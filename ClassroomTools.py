@@ -99,61 +99,6 @@ class IconManager:
         return icon
 
     @classmethod
-    def _generate_icon(cls, name: str) -> Optional[QIcon]:
-        pixmap = QPixmap(32, 32)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-        if name == "eraser":
-            painter.translate(pixmap.width() / 2, pixmap.height() / 2)
-            painter.rotate(-28)
-            body_rect = QRectF(-9.2, -5.6, 18.4, 11.2)
-            painter.setPen(QPen(QColor(40, 44, 52, 180), 1.3))
-            painter.setBrush(QColor("#f8cdd1"))
-            painter.drawRoundedRect(body_rect, 3.6, 3.6)
-
-            top_rect = QRectF(body_rect.left(), body_rect.top(), body_rect.width(), body_rect.height() * 0.45)
-            painter.setBrush(QColor("#8ab4f8"))
-            painter.drawRoundedRect(top_rect, 3.4, 3.4)
-
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(255, 255, 255, 130))
-            gloss_rect = QRectF(top_rect.left() + 1.1, top_rect.bottom() - top_rect.height() * 0.65, top_rect.width() - 2.2, top_rect.height() * 0.6)
-            painter.drawRoundedRect(gloss_rect, 2.2, 2.2)
-
-            painter.end()
-            return QIcon(pixmap)
-
-        if name in {"clear_all", "clear"}:
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor("#fbbc04"))
-            bristles = QPainterPath()
-            bristles.moveTo(6.5, 20.0)
-            bristles.quadTo(13.0, 27.0, 22.5, 20.8)
-            bristles.lineTo(21.0, 15.0)
-            bristles.quadTo(13.8, 19.5, 6.5, 20.0)
-            painter.drawPath(bristles)
-
-            painter.setBrush(QColor("#fff3d4"))
-            painter.drawEllipse(QRectF(5.4, 5.4, 5.0, 5.0))
-
-            painter.setPen(QPen(QColor("#8d6e63"), 3.1, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-            painter.drawLine(QPointF(11.0, 6.5), QPointF(23.0, 21.5))
-            painter.setPen(QPen(QColor(250, 250, 250, 220), 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-            painter.drawLine(QPointF(11.6, 6.2), QPointF(18.4, 13.2))
-
-            painter.setPen(QPen(QColor("#c68400"), 1.0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-            painter.drawLine(QPointF(10.4, 17.5), QPointF(14.0, 22.4))
-            painter.drawLine(QPointF(14.8, 17.0), QPointF(18.4, 21.2))
-
-            painter.end()
-            return QIcon(pixmap)
-
-        painter.end()
-        return None
-
-    @classmethod
     def get_icon(cls, name: str) -> QIcon:
         """返回缓存的图标，如果未缓存则即时加载。"""
         if name == "clear":
@@ -719,7 +664,7 @@ class FloatingToolbar(QWidget):
             button.clicked.connect(lambda _checked, c=color_hex: self.overlay.use_brush_color(c))
         self.btn_shape.clicked.connect(self._select_shape)
         self.btn_undo.clicked.connect(self.overlay.undo_last_action)
-        self.btn_eraser.clicked.connect(self._toggle_eraser)
+        self.btn_eraser.clicked.connect(lambda: self.overlay.set_mode("eraser"))
         self.btn_clear_all.clicked.connect(self.overlay.clear_all)
         self.btn_settings.clicked.connect(self.overlay.open_pen_settings)
         self.btn_whiteboard.clicked.connect(self._handle_whiteboard_click)
@@ -734,12 +679,6 @@ class FloatingToolbar(QWidget):
 
         for widget in (self, container, self.title_bar):
             widget.installEventFilter(self)
-
-    def _toggle_eraser(self) -> None:
-        if self.overlay.mode == "eraser":
-            self.overlay.restore_previous_brush()
-        else:
-            self.overlay.set_mode("eraser")
 
     def update_tool_states(self, mode: str, pen_color: QColor) -> None:
         color_key = pen_color.name().lower()
@@ -960,24 +899,6 @@ class OverlayWindow(QWidget):
         if getattr(self, "toolbar", None):
             self.toolbar.update_undo_state(bool(self.history))
 
-    def _remember_brush_state(self) -> None:
-        self._last_brush_color = QColor(self.pen_color)
-        self._last_pen_size = self.pen_size
-
-    def restore_previous_brush(self) -> None:
-        if self._last_brush_color and isinstance(self._last_brush_color, QColor) and self._last_brush_color.isValid():
-            self.pen_color = QColor(self._last_brush_color)
-        if isinstance(self._last_pen_size, int) and self._last_pen_size > 0:
-            self.pen_size = self._last_pen_size
-        self.last_width = self.pen_size * 0.4
-        self.last_time = time.time()
-        if self.mode != "brush":
-            self.set_mode("brush")
-        else:
-            self.update_toolbar_state()
-            self.update_cursor()
-        self._remember_brush_state()
-
     def clear_all(self) -> None:
         self._push_history()
         self.canvas.fill(Qt.GlobalColor.transparent)
@@ -985,16 +906,12 @@ class OverlayWindow(QWidget):
         self.update()
         self.raise_toolbar()
         self._update_undo_button()
-        self.restore_previous_brush()
 
     def use_brush_color(self, color_hex: str) -> None:
         color = QColor(color_hex)
         if not color.isValid():
             return
         self.pen_color = color
-        self.last_width = self.pen_size * 0.4
-        self.last_time = time.time()
-        self._remember_brush_state()
         self.set_mode("brush")
 
     def undo_last_action(self) -> None:
@@ -1008,8 +925,6 @@ class OverlayWindow(QWidget):
             return
         self.temp_canvas.fill(Qt.GlobalColor.transparent)
         self.drawing = False
-        self.last_time = time.time()
-        self.last_width = self.pen_size * 0.4
         self.update()
         self.raise_toolbar()
         self._update_undo_button()
