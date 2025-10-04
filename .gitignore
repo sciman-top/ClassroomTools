@@ -1,0 +1,11 @@
+# 默认忽略所有文件和文件夹
+*
+
+# 但是，以下文件不要忽略 (使用 ! 来取消忽略)
+!ClassroomTools.py
+!students.xlsx
+!settings.ini
+!icon.ico
+
+# 不要忽略 .gitignore 文件本身
+!.gitignore
