@@ -1315,30 +1315,37 @@ class RollCallTimerWindow(QWidget):
         self.title_label.setFont(f); self.title_label.setStyleSheet("color: #202124;"); top.addWidget(self.title_label)
 
         self.mode_button = QPushButton("切换到计时"); self.mode_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.mode_button.clicked.connect(self.toggle_mode); self.mode_button.setFixedHeight(26); top.addWidget(self.mode_button)
+        self.mode_button.clicked.connect(self.toggle_mode); self.mode_button.setFixedHeight(28)
+        mode_font = QFont("Microsoft YaHei UI", 9, QFont.Weight.Medium)
+        self.mode_button.setFont(mode_font)
+        fm = self.mode_button.fontMetrics()
+        max_text = max(("切换到计时", "切换到点名"), key=lambda t: fm.horizontalAdvance(t))
+        target_width = fm.horizontalAdvance(max_text) + 24
+        self.mode_button.setFixedWidth(target_width)  # 固定宽度，避免文本切换导致按钮位置跳动
+        self.mode_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        top.addWidget(self.mode_button, 0, Qt.AlignmentFlag.AlignLeft)
 
         self.group_combo = QComboBox(); self.group_combo.addItems(self.groups); self.group_combo.setCurrentText(self.current_group_name)
-        self.group_combo.setFixedHeight(26)
-        self.group_combo.setMaxVisibleItems(10)
+        self.group_combo.setFixedHeight(28)
         self.group_combo.setMinimumContentsLength(4)
         self.group_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self.group_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.group_combo.setMinimumWidth(140)
-        self.group_combo.setMaximumWidth(220)
+        self.group_combo.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        self.group_combo.setMinimumWidth(160)
+        self.group_combo.setMaximumWidth(260)  # 控制下拉按钮宽度适中，同时保留充足的选项显示空间
         self.group_combo.currentTextChanged.connect(self.on_group_change)
 
         self.group_placeholder = QWidget()
-        self.group_placeholder.setFixedHeight(26)
+        self.group_placeholder.setFixedHeight(28)
         self.group_placeholder.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
         self.group_stack = QStackedWidget(); self.group_stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.group_stack.setFixedHeight(26)
+        self.group_stack.setFixedHeight(28)
         self.group_stack.setMinimumWidth(140)
         self.group_stack.setMaximumWidth(220)
         self.group_stack.addWidget(self.group_combo)
         self.group_stack.addWidget(self.group_placeholder)
         top.addWidget(self.group_stack, 1)
-        self.group_combo.view().setMinimumWidth(160)
+        self.group_combo.view().setMinimumWidth(200)
 
         self.menu_button = QToolButton(); self.menu_button.setText("..."); self.menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.menu_button.setFixedSize(28, 28); self.menu_button.setStyleSheet("font-size: 18px; padding-bottom: 6px;")
