@@ -1934,25 +1934,41 @@ class LauncherWindow(QWidget):
         row = QHBoxLayout(); row.setSpacing(3)
         self.paint_button = QPushButton("画笔"); self.paint_button.clicked.connect(self.toggle_paint); row.addWidget(self.paint_button)
         self.roll_call_button = QPushButton("点名/计时"); self.roll_call_button.clicked.connect(self.toggle_roll_call); row.addWidget(self.roll_call_button)
+        row.addStretch(1)
         unified_width = self._action_button_width()
         self.paint_button.setFixedWidth(unified_width)
         self.roll_call_button.setFixedWidth(unified_width)
-        target_height = max(self.paint_button.sizeHint().height(), self.roll_call_button.sizeHint().height())
-        self.paint_button.setFixedHeight(target_height)
-        self.roll_call_button.setFixedHeight(target_height)
-        self.minimize_button = QPushButton("缩小"); self.minimize_button.clicked.connect(self.minimize_launcher); self.minimize_button.setFixedWidth(48)
-        row.addWidget(self.minimize_button)
         v.addLayout(row)
 
         bottom = QHBoxLayout(); bottom.setSpacing(3)
-        self.autostart_check = QCheckBox("开机启动"); self.autostart_check.stateChanged.connect(self.toggle_autostart); bottom.addWidget(self.autostart_check)
+        self.minimize_button = QPushButton("缩小"); self.minimize_button.clicked.connect(self.minimize_launcher)
+        bottom.addWidget(self.minimize_button)
 
-        right = QHBoxLayout(); right.setSpacing(3)
-        self.about_button = QPushButton("关于"); self.about_button.setFixedWidth(42); self.about_button.clicked.connect(self.show_about); right.addWidget(self.about_button)
-        self.exit_button = QPushButton("退出"); self.exit_button.setFixedWidth(42)
+        self.autostart_check = QCheckBox("开机启动"); self.autostart_check.stateChanged.connect(self.toggle_autostart); bottom.addWidget(self.autostart_check)
+        bottom.addStretch(1)
+
+        self.about_button = QPushButton("关于"); self.about_button.clicked.connect(self.show_about); bottom.addWidget(self.about_button)
+        self.exit_button = QPushButton("退出")
         self.exit_button.clicked.connect(QApplication.instance().quit)
-        right.addWidget(self.exit_button)
-        bottom.addLayout(right); v.addLayout(bottom)
+        bottom.addWidget(self.exit_button)
+        v.addLayout(bottom)
+
+        aux_width = max(self.minimize_button.sizeHint().width(), 52)
+        self.minimize_button.setFixedWidth(aux_width)
+        about_width = max(self.about_button.sizeHint().width(), 52)
+        exit_width = max(self.exit_button.sizeHint().width(), 52)
+        self.about_button.setFixedWidth(about_width)
+        self.exit_button.setFixedWidth(exit_width)
+
+        button_height = max(
+            self.paint_button.sizeHint().height(),
+            self.roll_call_button.sizeHint().height(),
+            self.minimize_button.sizeHint().height(),
+            self.about_button.sizeHint().height(),
+            self.exit_button.sizeHint().height(),
+        )
+        for btn in (self.paint_button, self.roll_call_button, self.minimize_button, self.about_button, self.exit_button):
+            btn.setFixedHeight(button_height)
 
         s = self.settings_manager.load_settings().get("Launcher", {})
         x = int(s.get("x", "120")); y = int(s.get("y", "120"))
