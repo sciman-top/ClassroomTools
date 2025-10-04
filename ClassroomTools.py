@@ -29,6 +29,7 @@ from PyQt6.QtGui import (
     QColor,
     QCursor,
     QFont,
+    QFontDatabase,
     QIcon,
     QPainter,
     QPainterPath,
@@ -67,8 +68,8 @@ class IconManager:
     _icons: Dict[str, str] = {
         "cursor": "PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCc+CiAgICA8cGF0aCBmaWxsPScjZjFmM2Y0JyBkPSdNNCAzLjMgMTEuNCAyMWwxLjgtNS44IDYuMy0yLjF6Jy8+CiAgICA8cGF0aCBmaWxsPScjOGFiNGY4JyBkPSdtMTIuNiAxNC40IDQuOCA0LjgtMi4xIDIuMS00LjItNC4yeicvPgo8L3N2Zz4=",
         "shape": "PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCc+CiAgICA8cmVjdCB4PSczLjUnIHk9JzMuNScgd2lkdGg9JzknIGhlaWdodD0nOScgcng9JzInIGZpbGw9JyNmMWYzZjQnLz4KICAgIDxjaXJjbGUgY3g9JzE2LjUnIGN5PScxNi41JyByPSc1LjUnIGZpbGw9J25vbmUnIHN0cm9rZT0nI2YxZjNmNCcgc3Ryb2tlLXdpZHRoPScxLjgnLz4KICAgIDxjaXJjbGUgY3g9JzE2LjUnIGN5PScxNi41JyByPSczLjUnIGZpbGw9JyM4YWI0ZjgnIGZpbGwtb3BhY2l0eT0nMC4zNScvPgo8L3N2Zz4=",
-        "eraser": "PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCc+CiAgICA8cGF0aCBmaWxsPScjZjFmM2Y0JyBkPSdtNSAxNC42IDgtOGEyLjggMi44IDAgMCAxIDQgMGwuOS45YTIuOCAyLjggMCAwIDEgMCA0bC04IDhINi40bC0xLjktMS45YTIgMiAwIDAgMSAwLTIuOHonLz4KICAgIDxyZWN0IHg9JzQnIHk9JzE5JyB3aWR0aD0nMTEnIGhlaWdodD0nMicgcng9JzEnIGZpbGw9JyM4YWI0ZjgnLz4KPC9zdmc+",
-        "clear_all": "PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCc+CiAgICA8cmVjdCB4PSczLjInIHk9JzQuMicgd2lkdGg9JzE3LjYnIGhlaWdodD0nMTEuNicgcng9JzInIHJ5PScyJyBmaWxsPSdub25lJyBzdHJva2U9JyNmMWYzZjQnIHN0cm9rZS13aWR0aD0nMS42Jy8+CiAgICA8cGF0aCBkPSdNNy4yIDE3LjJoOS42YTEgMSAwIDAgMSAxIDF2MS42SDYuMnYtMS42YTEgMSAwIDAgMSAxLTF6JyBmaWxsPScjOGFiNGY4Jy8+CiAgICA8cGF0aCBkPSdNOC41IDhoNk04LjUgMTEuNWg0JyBzdHJva2U9JyNmMWYzZjQnIHN0cm9rZS13aWR0aD0nMS42JyBzdHJva2UtbGluZWNhcD0ncm91bmQnLz4KPC9zdmc+",
+        "eraser": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+CiAgPHBhdGggZD0iTTQuNiAxNC4yIDExLjMgNy40YTIgMiAwIDAgMSAyLjggMGwzLjUgMy41YTIgMiAwIDAgMSAwIDIuOGwtNC44IDQuOEg5LjRhMiAyIDAgMCAxLTEuNC0uNmwtMy0zYTIgMiAwIDAgMSAwLTIuOHoiIGZpbGw9IiNmNGE5YjciLz4KICA8cGF0aCBkPSJNOS4yIDE5LjZoNi4xYy42IDAgMS4xLS4yIDEuNS0uNmwxLjctMS43IiBmaWxsPSJub25lIiBzdHJva2U9IiM1ZjYzNjgiIHN0cm9rZS13aWR0aD0iMS42IiBzdHJva2UtbGluZWNhcD0icm91bmQiLz4KICA8cGF0aCBkPSJtNy4yIDEyLjMgNC41IDQuNSIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjZmZmZmZmIiBzdHJva2Utd2lkdGg9IjEuNiIgc3Rya2UtbGluZWNhcD0icm91bmQiLz4KICA8cGF0aCBkPSJNMy42IDE4LjZoNiIgc3Ryb2tlPSIjNWY2MzY4IiBzdHJva2Utd2lkdGg9IjEuNiIgc3Rya2UtbGluZWNhcD0icm91bmQiLz4KPC9zdmc+",
+        "clear_all": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+CiAgPGRlZnM+CiAgICA8bGluZWFyR3JhZGllbnQgaWQ9ImciIHgxPSIwIiB4Mj0iMCIgeTE9IjAiIHkyPSIxIj4KICAgICAgPHN0b3Agb2Zmc2V0PSIwIiBzdG9wLWNvbG9yPSIjOGFiNGY4Ii8+CiAgICAgIDxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iIzFhNzNlOCIvPgogICAgPC9saW5lYXJHcmFkaWVudD4KICA8L2RlZnM+CiAgPHBhdGggZD0iTTUuNSA4aDEzbC0uOSAxMS4yQTIgMiAwIDAgMSAxNS42IDIxSDguNGEyIDIgMCAwIDEtMS45LTEuOEw1LjUgOHoiIGZpbGw9InVybCgjZykiIHN0cm9rZT0iIzFhNzNlOCIgc3Rya2Utd2lkdGg9IjEuMiIvPgogIDxwYXRoIGQ9Ik05LjUgNS41IDEwLjMgNGgzLjRsLjggMS41aDQuNSIgZmlsbD0ibm9uZSIgc3Rya2U9IiM1ZjYzNjgiIHN0cm9rZS13aWR0aD0iMS42IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz4KICA8cGF0aCBkPSJNNSA1LjVoNCIgc3Ryb2tlPSIjNWY2MzY4IiBzdHJva2Utd2lkdGg9IjEuNiIgc3Rya2UtbGluZWNhcD0icm91bmQiLz4KICA8cGF0aCBkPSJNMTAgMTEuMnY2LjFNMTQgMTEuMnY2LjEiIHN0cm9rZT0iI2ZmZmZmZiIgc3Rya2Utd2lkdGg9IjEuNCIgc3Rya2UtbGluZWNhcD0icm91bmQiLz4KICA8cGF0aCBkPSJNOC4yIDExLjJ2Ni4xIiBzdHJva2U9IiMzYjc4ZTciIHN0cm9rZS13aWR0aD0iMS40IiBzdHJva2UtbGluZWNhcD0icm91bmQiIG9wYWNpdHk9Ii43Ii8+CiAgPHBhdGggZD0iTTE1LjggMTEuMnY2LjEiIHN0cm9rZT0iIzNiNzhlNyIgc3Rya2Utd2lkdGg9IjEuNCIgc3Rya2UtbGluZWNhcD0icm91bmQiIG9wYWNpdHk9Ii43Ii8+CiAgPHBhdGggZD0iTTYuMiAzLjYgNy40IDIuNCIgc3Ryb2tlPSIjZmJiYzA0IiBzdHJva2Utd2lkdGg9IjEuNCIgc3Rya2UtbGluZWNhcD0icm91bmQiLz4KICA8cGF0aCBkPSJtMTguNCAzLjQgMS40LTEuNCIgc3Rya2U9IiMzNGE4NTMiIHN0cm9rZS13aWR0aD0iMS40IiBzdHJva2UtbGluZWNhcD0icm91bmQiLz4KPC9zdmc+",
         "settings": "PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCc+CiAgICA8Y2lyY2xlIGN4PScxMicgY3k9JzEyJyByPSczLjUnIGZpbGw9JyM4YWI0ZjgnLz4KICAgIDxwYXRoIGZpbGw9J25vbmUnIHN0cm9rZT0nI2YxZjNmNCcgc3Ryb2tlLXdpZHRoPScxLjYnIHN0cm9rZS1saW5lY2FwPSdyb3VuZCcgc3Ryb2tlLWxpbmVqb2luPSdyb3VuZCcKICAgICAgICBkPSdNMTIgNC41VjIuOG0wIDE4LjR2LTEuN203LjEtNy41SDIwbS0xOCAwaDEuNk0xNy42IDZsMS4yLTEuMk01LjIgMTguNCA2LjQgMTcuMk02LjQgNiA1LjIgNC44bTEzLjYgMTMuNi0xLjItMS4yJy8+Cjwvc3ZnPg==",
         "whiteboard": "PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCc+CiAgICA8cmVjdCB4PSczJyB5PSc0JyB3aWR0aD0nMTgnIGhlaWdodD0nMTInIHJ4PScyJyByeT0nMicgZmlsbD0nI2YxZjNmNCcgZmlsbC1vcGFjaXR5PScwLjEyJyBzdHJva2U9JyNmMWYzZjQnIHN0cm9rZS13aWR0aD0nMS42Jy8+CiAgICA8cGF0aCBkPSdtNyAxOCA1LTUgNSA1JyBmaWxsPSdub25lJyBzdHJva2U9JyM4YWI0ZjgnIHN0cm9rZS13aWR0aD0nMS44JyBzdHJva2UtbGluZWNhcD0ncm91bmQnIHN0cm9rZS1saW5lam9pbj0ncm91bmQnLz4KICAgIDxwYXRoIGQ9J004IDloOG0tOCAzaDUnIHN0cm9rZT0nI2YxZjNmNCcgc3Ryb2tlLXdpZHRoPScxLjYnIHN0cm9rZS1saW5lY2FwPSdyb3VuZCcvPgo8L3N2Zz4=",
         "undo": "PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCc+CiAgPHBhdGggZmlsbD0nI2YxZjNmNCcgZD0nTTguNCA1LjJMMyAxMC42bDUuNCA1LjQgMS40LTEuNC0yLjMtMi4zaDUuNWMzLjIgMCA1LjggMi42IDUuOCA1LjggMCAuNS0uMSAxLS4yIDEuNWwyLjEuNmMuMi0uNy4zLTEuNC4zLTIuMSAwLTQuNC0zLjYtOC04LThINy41bDIuMy0yLjMtMS40LTEuNHonLz4KPC9zdmc+",
@@ -197,7 +198,52 @@ def apply_geometry_from_text(widget: QWidget, geometry: str) -> None:
         y = int(y_str)
     except ValueError:
         return
+
+    screen = QApplication.screenAt(QPoint(x, y))
+    if screen is None:
+        try:
+            screen = widget.screen() or QApplication.primaryScreen()
+        except Exception:
+            screen = QApplication.primaryScreen()
+    if screen is not None:
+        available = screen.availableGeometry()
+        max_width = max(320, int(available.width() * 0.9))
+        max_height = max(240, int(available.height() * 0.9))
+        width = max(widget.minimumWidth(), min(width, max_width))
+        height = max(widget.minimumHeight(), min(height, max_height))
+        x = max(available.left(), min(x, available.right() - width))
+        y = max(available.top(), min(y, available.bottom() - height))
     widget.resize(max(160, width), max(120, height))
+    widget.move(x, y)
+
+
+def ensure_widget_within_screen(widget: QWidget) -> None:
+    screen = None
+    try:
+        screen = widget.screen()
+    except Exception:
+        screen = None
+    if screen is None:
+        screen = QApplication.primaryScreen()
+    if screen is None:
+        return
+    available = screen.availableGeometry()
+    geom = widget.frameGeometry()
+    width = geom.width() or widget.width() or widget.sizeHint().width()
+    height = geom.height() or widget.height() or widget.sizeHint().height()
+    max_width = min(available.width(), max(widget.minimumWidth(), int(available.width() * 0.9)))
+    max_height = min(available.height(), max(widget.minimumHeight(), int(available.height() * 0.9)))
+    width = max(widget.minimumWidth(), min(width, max_width))
+    height = max(widget.minimumHeight(), min(height, max_height))
+    left_limit = available.x()
+    top_limit = available.y()
+    right_limit = max(left_limit, available.x() + available.width() - width)
+    bottom_limit = max(top_limit, available.y() + available.height() - height)
+    x = geom.x() if geom.width() else widget.x()
+    y = geom.y() if geom.height() else widget.y()
+    x = max(left_limit, min(x, right_limit))
+    y = max(top_limit, min(y, bottom_limit))
+    widget.resize(width, height)
     widget.move(x, y)
 
 
@@ -450,7 +496,7 @@ class TitleBar(QWidget):
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(6, 0, 6, 0)
-        title = QLabel("屏幕批注")
+        title = QLabel("屏幕画笔")
         font = title.font()
         font.setBold(True)
         title.setFont(font)
@@ -533,6 +579,28 @@ class FloatingToolbar(QWidget):
                 background: rgba(138, 180, 248, 255);
                 color: #202124;
             }
+            QPushButton#eraserButton {
+                background: rgba(241, 243, 244, 235);
+                color: #3c4043;
+                border-color: rgba(138, 180, 248, 170);
+            }
+            QPushButton#eraserButton:hover,
+            QPushButton#eraserButton:checked {
+                background: rgba(202, 225, 255, 255);
+                border-color: #1a73e8;
+                color: #174ea6;
+            }
+            QPushButton#clearButton {
+                background: rgba(255, 236, 232, 240);
+                color: #a03a1e;
+                border-color: rgba(255, 173, 153, 230);
+            }
+            QPushButton#clearButton:hover,
+            QPushButton#clearButton:checked {
+                background: rgba(255, 210, 204, 255);
+                border-color: rgba(255, 138, 101, 255);
+                color: #5f2121;
+            }
             #whiteboardButtonActive {
                 background: rgba(255, 214, 102, 240);
                 border-color: rgba(251, 188, 5, 255);
@@ -563,7 +631,7 @@ class FloatingToolbar(QWidget):
             ("#000000", "黑色画笔"),
             ("#FF0000", "红色画笔"),
             ("#1E90FF", "蓝色画笔"),
-        ]
+        ]  # 预设的高频画笔颜色
         brush_buttons = []
         for color_hex, name in brush_configs:
             button = QPushButton(IconManager.get_brush_icon(color_hex), "")
@@ -573,7 +641,9 @@ class FloatingToolbar(QWidget):
         self.btn_shape = QPushButton(IconManager.get_icon("shape"), "")
         self.btn_undo = QPushButton(IconManager.get_icon("undo"), "")
         self.btn_eraser = QPushButton(IconManager.get_icon("eraser"), "")
+        self.btn_eraser.setObjectName("eraserButton")
         self.btn_clear_all = QPushButton(IconManager.get_icon("clear_all"), "")
+        self.btn_clear_all.setObjectName("clearButton")
         self.btn_whiteboard = QPushButton(IconManager.get_icon("whiteboard"), "")
         self.btn_settings = QPushButton(IconManager.get_icon("settings"), "")
 
@@ -600,8 +670,8 @@ class FloatingToolbar(QWidget):
             self.btn_cursor: "光标",
             self.btn_shape: "图形",
             self.btn_undo: "撤销",
-            self.btn_eraser: "橡皮",
-            self.btn_clear_all: "清除",
+            self.btn_eraser: "橡皮（再次点击恢复画笔）",
+            self.btn_clear_all: "清除（并恢复画笔）",
             self.btn_whiteboard: "白板（单击开关 / 双击换色）",
             self.btn_settings: "画笔设置",
         }
@@ -622,7 +692,7 @@ class FloatingToolbar(QWidget):
             button.clicked.connect(lambda _checked, c=color_hex: self.overlay.use_brush_color(c))
         self.btn_shape.clicked.connect(self._select_shape)
         self.btn_undo.clicked.connect(self.overlay.undo_last_action)
-        self.btn_eraser.clicked.connect(lambda: self.overlay.set_mode("eraser"))
+        self.btn_eraser.clicked.connect(self.overlay.toggle_eraser_mode)
         self.btn_clear_all.clicked.connect(self.overlay.clear_all)
         self.btn_settings.clicked.connect(self.overlay.open_pen_settings)
         self.btn_whiteboard.clicked.connect(self._handle_whiteboard_click)
@@ -718,6 +788,9 @@ class OverlayWindow(QWidget):
         self.drawing = False
         self.last_point = QPointF(); self.prev_point = QPointF()
         self.last_width = float(self.pen_size); self.last_time = time.time()
+        self._last_brush_color = QColor(self.pen_color)
+        self._last_brush_size = max(1, self.pen_size)
+        self._eraser_last_point: Optional[QPoint] = None
         self.whiteboard_active = False
         self.whiteboard_color = QColor(0, 0, 0, 0); self.last_board_color = QColor("#ffffff")
         self.cursor_pixmap = QPixmap()
@@ -783,11 +856,16 @@ class OverlayWindow(QWidget):
         self.update()
 
     def set_mode(self, mode: str, shape_type: Optional[str] = None, *, initial: bool = False) -> None:
+        prev_mode = getattr(self, "mode", None)
         self.mode = mode
         if shape_type is not None or mode != "shape":
             self.current_shape = shape_type
         if mode != "shape":
             self.shape_start_point = None
+        if self.mode != "eraser":
+            self._eraser_last_point = None
+        if self.mode == "brush" and (not initial or prev_mode != "brush"):
+            self._remember_brush_state()
         self._update_visibility_for_mode(initial=initial)
         if not initial:
             self.raise_toolbar()
@@ -798,6 +876,27 @@ class OverlayWindow(QWidget):
         if not getattr(self, 'toolbar', None):
             return
         self.toolbar.update_tool_states(self.mode, self.pen_color)
+
+    def _remember_brush_state(self) -> None:
+        if self.pen_color.isValid():
+            self._last_brush_color = QColor(self.pen_color)
+        if self.pen_size > 0:
+            self._last_brush_size = max(1, int(self.pen_size))
+
+    def _restore_brush_mode(self) -> None:
+        if isinstance(self._last_brush_color, QColor) and self._last_brush_color.isValid():
+            self.pen_color = QColor(self._last_brush_color)
+        if isinstance(self._last_brush_size, int) and self._last_brush_size > 0:
+            self.pen_size = max(1, int(self._last_brush_size))
+        self.set_mode("brush")
+
+    def toggle_eraser_mode(self) -> None:
+        """切换橡皮模式；再次点击会恢复上一次的画笔配置。"""
+        if self.mode == "eraser":
+            self._restore_brush_mode()
+        else:
+            self._remember_brush_state()
+            self.set_mode("eraser")
 
     def update_cursor(self) -> None:
         if self.mode == "cursor":
@@ -847,14 +946,21 @@ class OverlayWindow(QWidget):
             self.toolbar.update_undo_state(bool(self.history))
 
     def clear_all(self) -> None:
+        """清除整块画布，同时根据需要恢复画笔模式。"""
+        restore_needed = self.mode != "brush"
         self._push_history()
         self.canvas.fill(Qt.GlobalColor.transparent)
         self.temp_canvas.fill(Qt.GlobalColor.transparent)
         self.update()
-        self.raise_toolbar()
+        self._eraser_last_point = None
+        if restore_needed:
+            self._restore_brush_mode()
+        else:
+            self.raise_toolbar()
         self._update_undo_button()
 
     def use_brush_color(self, color_hex: str) -> None:
+        """根据传入的十六进制颜色值启用画笔模式。"""
         color = QColor(color_hex)
         if not color.isValid():
             return
@@ -900,6 +1006,7 @@ class OverlayWindow(QWidget):
             pointf = e.position(); self.last_point = pointf; self.prev_point = pointf
             self.last_width = self.pen_size * 0.4
             self.shape_start_point = e.pos() if self.mode == "shape" else None
+            self._eraser_last_point = e.pos() if self.mode == "eraser" else None
             self.raise_toolbar()
             e.accept()
         super().mousePressEvent(e)
@@ -918,6 +1025,8 @@ class OverlayWindow(QWidget):
         if e.button() == Qt.MouseButton.LeftButton and self.drawing:
             if self.mode == "shape" and self.current_shape: self._draw_shape_final(e.pos())
             self.drawing = False; self.shape_start_point = None; self.update()
+            if self.mode == "eraser":
+                self._eraser_last_point = None
             self.raise_toolbar()
         super().mouseReleaseEvent(e)
 
@@ -950,12 +1059,18 @@ class OverlayWindow(QWidget):
         self.prev_point = self.last_point; self.last_point = cur; self.last_width = cur_w
 
     def _erase_at(self, pos) -> None:
-        if isinstance(pos, QPointF): pos = pos.toPoint()
-        p = QPainter(self.canvas); p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if isinstance(pos, QPointF):
+            pos = pos.toPoint()
+        start = self._eraser_last_point or pos
+        p = QPainter(self.canvas)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
-        radius = max(6, int(self.pen_size * 3.2))
-        p.setPen(QPen(QColor(255, 255, 255, 0), radius, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-        p.drawPoint(pos); p.end()
+        diameter = max(10, int(self.pen_size * 1.8) * 2)
+        pen = QPen(QColor(255, 255, 255, 0), diameter, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+        p.setPen(pen)
+        p.drawLine(start, pos)
+        p.end()
+        self._eraser_last_point = QPoint(pos)
 
     def _draw_shape_preview(self, end_point) -> None:
         if not self.shape_start_point: return
@@ -1170,6 +1285,21 @@ class RollCallTimerWindow(QWidget):
         else:
             self.speech_enabled = False
 
+        # QFontDatabase 在 Qt 6 中以静态方法为主，这里直接调用类方法避免实例化失败
+        families_list = []
+        get_families = getattr(QFontDatabase, "families", None)
+        if callable(get_families):
+            try:
+                families_list = list(get_families())
+            except TypeError:
+                # 个别绑定版本可能要求显式写入枚举参数
+                try:
+                    families_list = list(get_families(QFontDatabase.WritingSystem.Any))  # type: ignore[arg-type]
+                except Exception:
+                    families_list = []
+        families = set(families_list)
+        self.name_font_family = "楷体" if "楷体" in families else ("KaiTi" if "KaiTi" in families else "Microsoft YaHei UI")
+
         self._build_ui()
         self._update_menu_state()
         self.update_mode_ui()
@@ -1188,7 +1318,27 @@ class RollCallTimerWindow(QWidget):
         self.mode_button.clicked.connect(self.toggle_mode); self.mode_button.setFixedHeight(26); top.addWidget(self.mode_button)
 
         self.group_combo = QComboBox(); self.group_combo.addItems(self.groups); self.group_combo.setCurrentText(self.current_group_name)
-        self.group_combo.currentTextChanged.connect(self.on_group_change); self.group_combo.setFixedHeight(26); top.addWidget(self.group_combo, 1)
+        self.group_combo.setFixedHeight(26)
+        self.group_combo.setMaxVisibleItems(10)
+        self.group_combo.setMinimumContentsLength(4)
+        self.group_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.group_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.group_combo.setMinimumWidth(140)
+        self.group_combo.setMaximumWidth(220)
+        self.group_combo.currentTextChanged.connect(self.on_group_change)
+
+        self.group_placeholder = QWidget()
+        self.group_placeholder.setFixedHeight(26)
+        self.group_placeholder.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self.group_stack = QStackedWidget(); self.group_stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.group_stack.setFixedHeight(26)
+        self.group_stack.setMinimumWidth(140)
+        self.group_stack.setMaximumWidth(220)
+        self.group_stack.addWidget(self.group_combo)
+        self.group_stack.addWidget(self.group_placeholder)
+        top.addWidget(self.group_stack, 1)
+        self.group_combo.view().setMinimumWidth(160)
 
         self.menu_button = QToolButton(); self.menu_button.setText("..."); self.menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.menu_button.setFixedSize(28, 28); self.menu_button.setStyleSheet("font-size: 18px; padding-bottom: 6px;")
@@ -1294,13 +1444,13 @@ class RollCallTimerWindow(QWidget):
         self.title_label.setText("点名" if is_roll else "计时")
         self.mode_button.setText("切换到计时" if is_roll else "切换到点名")
         if is_roll:
-            self.stack.setCurrentWidget(self.roll_call_frame); self.group_combo.show()
+            self.stack.setCurrentWidget(self.roll_call_frame); self.group_stack.setCurrentWidget(self.group_combo)
             self.count_timer.stop(); self.clock_timer.stop(); self.timer_running = False; self.timer_start_pause_button.setText("开始")
             self.update_display_layout(); self.display_current_student()
-            QTimer.singleShot(0, self.update_dynamic_fonts)
+            self.schedule_font_update()
         else:
-            self.stack.setCurrentWidget(self.timer_frame); self.group_combo.hide(); self.update_timer_mode_ui()
-            QTimer.singleShot(0, self.update_dynamic_fonts)
+            self.stack.setCurrentWidget(self.timer_frame); self.group_stack.setCurrentWidget(self.group_placeholder); self.update_timer_mode_ui()
+            self.schedule_font_update()
         self.updateGeometry()
 
     def update_timer_mode_ui(self) -> None:
@@ -1320,7 +1470,7 @@ class RollCallTimerWindow(QWidget):
             self.timer_mode_button.setText("时钟")
             self.timer_start_pause_button.setEnabled(False); self.timer_reset_button.setEnabled(False); self.timer_set_button.setEnabled(False)
             self.timer_running = False; self.count_timer.stop(); self._update_clock(); self.clock_timer.start()
-        QTimer.singleShot(0, self.update_dynamic_fonts)
+        self.schedule_font_update()
 
     def toggle_timer_mode(self) -> None:
         if self.timer_running: return
@@ -1371,11 +1521,11 @@ class RollCallTimerWindow(QWidget):
             mi, se = divmod(seconds, 60); self.time_display_label.setText(f"{int(mi):02d}:{int(se):02d}")
         else:
             self.time_display_label.setText(time.strftime("%H:%M:%S"))
-        self.update_dynamic_fonts()
+        self.schedule_font_update()
 
     def _update_clock(self) -> None:
         self.time_display_label.setText(time.strftime("%H:%M:%S"))
-        self.update_dynamic_fonts()
+        self.schedule_font_update()
 
     def play_timer_sound(self) -> None:
         if SOUNDDEVICE_AVAILABLE:
@@ -1422,6 +1572,7 @@ class RollCallTimerWindow(QWidget):
             if not self.show_id: self.id_label.setText("")
             if not self.show_name: self.name_label.setText("")
         self.update_display_layout()
+        self.schedule_font_update()
 
     def update_display_layout(self) -> None:
         self.id_label.setVisible(self.show_id); self.name_label.setVisible(self.show_name)
@@ -1429,6 +1580,9 @@ class RollCallTimerWindow(QWidget):
         layout.setColumnStretch(0, 1); layout.setColumnStretch(1, 1)
         if not self.show_id: layout.setColumnStretch(0, 0)
         if not self.show_name: layout.setColumnStretch(1, 0)
+        self.schedule_font_update()
+
+    def schedule_font_update(self) -> None:
         QTimer.singleShot(0, self.update_dynamic_fonts)
 
     def update_dynamic_fonts(self) -> None:
@@ -1436,7 +1590,11 @@ class RollCallTimerWindow(QWidget):
             if not lab.isVisible(): continue
             w = max(40, lab.width()); h = max(40, lab.height()); text = lab.text()
             size = self._calc_font_size(w, h, text)
-            lab.setFont(QFont("Microsoft YaHei UI", size, QFont.Weight.Bold))
+            if lab is self.name_label:
+                weight = QFont.Weight.Normal if self.name_font_family in {"楷体", "KaiTi"} else QFont.Weight.Bold
+                lab.setFont(QFont(self.name_font_family, size, weight))
+            else:
+                lab.setFont(QFont("Microsoft YaHei UI", size, QFont.Weight.Bold))
         if self.timer_frame.isVisible():
             text = self.time_display_label.text()
             w = max(60, self.time_display_label.width())
@@ -1460,11 +1618,12 @@ class RollCallTimerWindow(QWidget):
     def showEvent(self, e) -> None:
         super().showEvent(e)
         self.visibility_changed.emit(True)
-        QTimer.singleShot(0, self.update_dynamic_fonts)
+        self.schedule_font_update()
+        ensure_widget_within_screen(self)
 
     def resizeEvent(self, e: QResizeEvent) -> None:
         super().resizeEvent(e)
-        QTimer.singleShot(0, self.update_dynamic_fonts)
+        self.schedule_font_update()
 
     def hideEvent(self, e) -> None:
         super().hideEvent(e)
@@ -1635,6 +1794,10 @@ class LauncherWindow(QWidget):
         self.adjustSize()
         self.setFixedSize(self.sizeHint())
 
+    def showEvent(self, e) -> None:
+        super().showEvent(e)
+        ensure_widget_within_screen(self)
+
     def eventFilter(self, obj, e) -> bool:
         if e.type() == QEvent.Type.MouseButtonPress and e.button() == Qt.MouseButton.LeftButton:
             self._dragging = True; self._drag_offset = e.globalPosition().toPoint() - self.pos()
@@ -1651,6 +1814,7 @@ class LauncherWindow(QWidget):
         self.settings_manager.save_settings(settings)
 
     def toggle_paint(self) -> None:
+        """打开或隐藏屏幕画笔覆盖层。"""
         if self.overlay is None: self.overlay = OverlayWindow(self.settings_manager)
         if self.overlay.isVisible():
             self.overlay.hide_overlay(); self.paint_button.setText("画笔")
@@ -1658,6 +1822,7 @@ class LauncherWindow(QWidget):
             self.overlay.show_overlay(); self.paint_button.setText("隐藏画笔")
 
     def toggle_roll_call(self) -> None:
+        """切换点名/计时窗口的显示状态，必要时先创建窗口。"""
         if self.student_data is None:
             QMessageBox.warning(self, "提示", "学生数据加载失败，无法打开点名器。"); return
         if self.roll_call_window is None:
@@ -1724,6 +1889,7 @@ class LauncherWindow(QWidget):
 
 # ---------- 入口 ----------
 def main() -> None:
+    """应用程序入口：初始化 DPI、加载设置并启动启动器窗口。"""
     ensure_high_dpi_awareness()
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
@@ -1737,5 +1903,8 @@ def main() -> None:
     sys.exit(app.exec())
 
 
+# Nuitka 打包指令（根据当前依赖整理的推荐参数，保持在单行便于复制）：
+# 单文件：python -m nuitka --onefile --enable-plugin=pyqt6 --include-qt-plugins=sensible --windows-disable-console --windows-icon-from-ico=icon.ico --include-data-file=students.xlsx=students.xlsx --include-data-file=settings.ini=settings.ini ClassroomTools.py
+# 独立目录：python -m nuitka --standalone --enable-plugin=pyqt6 --include-qt-plugins=sensible --windows-disable-console --windows-icon-from-ico=icon.ico --output-dir=dist --include-data-file=students.xlsx=students.xlsx --include-data-file=settings.ini=settings.ini ClassroomTools.py
 if __name__ == "__main__":
     main()
