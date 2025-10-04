@@ -54,6 +54,7 @@ from PyQt6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QSpacerItem,
     QSizePolicy,
     QSlider,
     QSpinBox,
@@ -206,6 +207,9 @@ def apply_geometry_from_text(widget: QWidget, geometry: str) -> None:
     except ValueError:
         return
 
+    base_min_width = getattr(widget, "_base_minimum_width", widget.minimumWidth())
+    base_min_height = getattr(widget, "_base_minimum_height", widget.minimumHeight())
+
     screen = QApplication.screenAt(QPoint(x, y))
     if screen is None:
         try:
@@ -214,14 +218,14 @@ def apply_geometry_from_text(widget: QWidget, geometry: str) -> None:
             screen = QApplication.primaryScreen()
     if screen is not None:
         available = screen.availableGeometry()
-        max_width = max(320, int(available.width() * 0.9))
-        max_height = max(240, int(available.height() * 0.9))
-        width = max(widget.minimumWidth(), min(width, max_width))
-        height = max(widget.minimumHeight(), min(height, max_height))
+        max_width = max(base_min_width, 320, int(available.width() * 0.9))
+        max_height = max(base_min_height, 240, int(available.height() * 0.9))
+        width = max(base_min_width, min(width, max_width))
+        height = max(base_min_height, min(height, max_height))
         x = max(available.left(), min(x, available.right() - width))
         y = max(available.top(), min(y, available.bottom() - height))
-    target_width = max(widget.minimumWidth(), max(160, width))
-    target_height = max(widget.minimumHeight(), max(120, height))
+    target_width = max(base_min_width, max(160, width))
+    target_height = max(base_min_height, max(120, height))
     widget.resize(target_width, target_height)
     widget.move(x, y)
 
@@ -236,44 +240,17 @@ def ensure_widget_within_screen(widget: QWidget) -> None:
         screen = QApplication.primaryScreen()
     if screen is None:
         return
+    base_min_width = getattr(widget, "_base_minimum_width", widget.minimumWidth())
+    base_min_height = getattr(widget, "_base_minimum_height", widget.minimumHeight())
+
     available = screen.availableGeometry()
     geom = widget.frameGeometry()
     width = widget.width() or geom.width() or widget.sizeHint().width()
     height = widget.height() or geom.height() or widget.sizeHint().height()
-    max_width = min(available.width(), max(widget.minimumWidth(), int(available.width() * 0.9)))
-    max_height = min(available.height(), max(widget.minimumHeight(), int(available.height() * 0.9)))
-    width = max(widget.minimumWidth(), min(width, max_width))
-    height = max(widget.minimumHeight(), min(height, max_height))
-    left_limit = available.x()
-    top_limit = available.y()
-    right_limit = max(left_limit, available.x() + available.width() - width)
-    bottom_limit = max(top_limit, available.y() + available.height() - height)
-    x = geom.x() if geom.width() else widget.x()
-    y = geom.y() if geom.height() else widget.y()
-    x = max(left_limit, min(x, right_limit))
-    y = max(top_limit, min(y, bottom_limit))
-    widget.resize(width, height)
-    widget.move(x, y)
-
-
-def ensure_widget_within_screen(widget: QWidget) -> None:
-    screen = None
-    try:
-        screen = widget.screen()
-    except Exception:
-        screen = None
-    if screen is None:
-        screen = QApplication.primaryScreen()
-    if screen is None:
-        return
-    available = screen.availableGeometry()
-    geom = widget.frameGeometry()
-    width = geom.width() or widget.width() or widget.sizeHint().width()
-    height = geom.height() or widget.height() or widget.sizeHint().height()
-    max_width = min(available.width(), max(widget.minimumWidth(), int(available.width() * 0.9)))
-    max_height = min(available.height(), max(widget.minimumHeight(), int(available.height() * 0.9)))
-    width = max(widget.minimumWidth(), min(width, max_width))
-    height = max(widget.minimumHeight(), min(height, max_height))
+    max_width = min(available.width(), max(base_min_width, int(available.width() * 0.9)))
+    max_height = min(available.height(), max(base_min_height, int(available.height() * 0.9)))
+    width = max(base_min_width, min(width, max_width))
+    height = max(base_min_height, min(height, max_height))
     left_limit = available.x()
     top_limit = available.y()
     right_limit = max(left_limit, available.x() + available.width() - width)
@@ -1305,6 +1282,9 @@ class RollCallTimerWindow(QWidget):
                 return default
         apply_geometry_from_text(self, s.get("geometry", "420x240+180+180"))
         self.setMinimumSize(260, 160)
+        # 记录初始最小宽高，供后续还原窗口尺寸时使用
+        self._base_minimum_width = self.minimumWidth()
+        self._base_minimum_height = self.minimumHeight()
 
         self.mode = s.get("mode", "roll_call") if s.get("mode", "roll_call") in {"roll_call", "timer"} else "roll_call"
         self.timer_modes = ["countdown", "stopwatch", "clock"]
@@ -1968,11 +1948,20 @@ class LauncherWindow(QWidget):
         layout = QVBoxLayout(self); layout.setContentsMargins(0, 0, 0, 0); layout.addWidget(container)
         v = QVBoxLayout(container); v.setContentsMargins(8, 8, 8, 8); v.setSpacing(5)
 
-        row = QHBoxLayout(); row.setSpacing(3); row.setContentsMargins(0, 0, 0, 0)
-        row.addStretch(1)
-        self.paint_button = QPushButton("画笔"); self.paint_button.clicked.connect(self.toggle_paint); row.addWidget(self.paint_button)
-        self.roll_call_button = QPushButton("点名/计时"); self.roll_call_button.clicked.connect(self.toggle_roll_call); row.addWidget(self.roll_call_button)
-        row.addStretch(1)
+        # 通过三段可伸缩空白保证“画笔”“点名/计时”两侧及中间留白一致
+        row = QGridLayout(); row.setContentsMargins(0, 0, 0, 0); row.setHorizontalSpacing(0)
+        for col in (0, 2, 4):
+            row.setColumnMinimumWidth(col, 12)
+            row.setColumnStretch(col, 1)
+        self.paint_button = QPushButton("画笔")
+        self.paint_button.clicked.connect(self.toggle_paint)
+        row.addItem(QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum), 0, 0)
+        row.addWidget(self.paint_button, 0, 1)
+        row.addItem(QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum), 0, 2)
+        self.roll_call_button = QPushButton("点名/计时")
+        self.roll_call_button.clicked.connect(self.toggle_roll_call)
+        row.addWidget(self.roll_call_button, 0, 3)
+        row.addItem(QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum), 0, 4)
         unified_width = self._action_button_width()
         self.paint_button.setFixedWidth(unified_width)
         self.roll_call_button.setFixedWidth(unified_width)
@@ -2033,6 +2022,28 @@ class LauncherWindow(QWidget):
         # 锁定启动器的推荐尺寸，避免误拖拽造成遮挡
         self.adjustSize()
         self.setFixedSize(self.sizeHint())
+        self._base_minimum_width = self.minimumWidth()
+        self._base_minimum_height = self.minimumHeight()
+
+    def _action_button_width(self) -> int:
+        """计算“画笔”与“点名/计时”按钮的统一宽度，保证观感一致。"""
+
+        paint_metrics = QFontMetrics(self.paint_button.font())
+        roll_metrics = QFontMetrics(self.roll_call_button.font())
+        paint_texts = ["画笔", "隐藏画笔"]
+        roll_texts = ["点名/计时", "显示点名", "隐藏点名"]
+        max_width = max(
+            max(paint_metrics.horizontalAdvance(text) for text in paint_texts),
+            max(roll_metrics.horizontalAdvance(text) for text in roll_texts),
+        )
+        return max_width + 28
+
+    def showEvent(self, e) -> None:
+        super().showEvent(e)
+        ensure_widget_within_screen(self)
+        self._last_position = self.pos()
+        if self._minimized_on_start:
+            QTimer.singleShot(0, self._restore_minimized_state)
 
     def _action_button_width(self) -> int:
         """计算“画笔”与“点名/计时”按钮的统一宽度，保证观感一致。"""
