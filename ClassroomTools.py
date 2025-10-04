@@ -37,6 +37,7 @@ from PyQt6.QtGui import (
     QPixmap,
     QKeyEvent,
     QResizeEvent,
+    QScreen,
 )
 from PyQt6.QtWidgets import (
     QApplication,
@@ -265,7 +266,13 @@ class SettingsManager:
         self.filename = filename
         self.config = configparser.ConfigParser()
         self.defaults: Dict[str, Dict[str, str]] = {
-            "Launcher": {"x": "120", "y": "120"},
+            "Launcher": {
+                "x": "120",
+                "y": "120",
+                "minimized": "False",
+                "bubble_x": "120",
+                "bubble_y": "120",
+            },
             "Startup": {"autostart_enabled": "False"},
             "RollCallTimer": {
                 "geometry": "480x280+180+180",
@@ -279,6 +286,12 @@ class SettingsManager:
                 "timer_sound_enabled": "True",
                 "mode": "roll_call",
                 "timer_mode": "countdown",
+                "timer_seconds_left": "300",
+                "timer_stopwatch_seconds": "0",
+                "timer_running": "False",
+                "id_font_size": "48",
+                "name_font_size": "60",
+                "timer_font_size": "56",
             },
             "Paint": {"x": "260", "y": "260", "brush_size": "12", "brush_color": "#ff0000"},
         }
@@ -1247,6 +1260,11 @@ class RollCallTimerWindow(QWidget):
         self.student_data = student_data
 
         s = self.settings_manager.load_settings().get("RollCallTimer", {})
+        def _get_int(key: str, default: int) -> int:
+            try:
+                return int(s.get(key, str(default)))
+            except (TypeError, ValueError):
+                return default
         apply_geometry_from_text(self, s.get("geometry", "420x240+180+180"))
         self.setMinimumSize(260, 160)
 
@@ -1254,8 +1272,8 @@ class RollCallTimerWindow(QWidget):
         self.timer_modes = ["countdown", "stopwatch", "clock"]
         self.timer_mode_index = self.timer_modes.index(s.get("timer_mode", "countdown")) if s.get("timer_mode", "countdown") in self.timer_modes else 0
 
-        self.timer_countdown_minutes = int(s.get("timer_countdown_minutes", "5"))
-        self.timer_countdown_seconds = int(s.get("timer_countdown_seconds", "0"))
+        self.timer_countdown_minutes = _get_int("timer_countdown_minutes", 5)
+        self.timer_countdown_seconds = _get_int("timer_countdown_seconds", 0)
         self.timer_sound_enabled = str_to_bool(s.get("timer_sound_enabled", "True"), True)
 
         self.show_id = str_to_bool(s.get("show_id", "True"), True)
@@ -1270,8 +1288,13 @@ class RollCallTimerWindow(QWidget):
         if self.current_group_name not in self.groups: self.current_group_name = "全部"
 
         self._shuffled_indices: List[int] = []; self.current_student_index: Optional[int] = None
-        self.timer_seconds_left = max(0, self.timer_countdown_minutes * 60 + self.timer_countdown_seconds)
-        self.timer_stopwatch_seconds = 0; self.timer_running = False
+        self.timer_seconds_left = max(0, _get_int("timer_seconds_left", self.timer_countdown_minutes * 60 + self.timer_countdown_seconds))
+        self.timer_stopwatch_seconds = max(0, _get_int("timer_stopwatch_seconds", 0))
+        self.timer_running = str_to_bool(s.get("timer_running", "False"), False)
+
+        self.last_id_font_size = max(self.MIN_FONT_SIZE, _get_int("id_font_size", 48))
+        self.last_name_font_size = max(self.MIN_FONT_SIZE, _get_int("name_font_size", 60))
+        self.last_timer_font_size = max(self.MIN_FONT_SIZE, _get_int("timer_font_size", 56))
 
         self.count_timer = QTimer(self); self.count_timer.setInterval(1000); self.count_timer.timeout.connect(self._on_count_timer)
         self.clock_timer = QTimer(self); self.clock_timer.setInterval(1000); self.clock_timer.timeout.connect(self._update_clock)
@@ -1301,6 +1324,7 @@ class RollCallTimerWindow(QWidget):
         self.name_font_family = "楷体" if "楷体" in families else ("KaiTi" if "KaiTi" in families else "Microsoft YaHei UI")
 
         self._build_ui()
+        self._apply_saved_fonts()
         self._update_menu_state()
         self.update_mode_ui()
         self.on_group_change(initial=True)
@@ -1385,6 +1409,15 @@ class RollCallTimerWindow(QWidget):
 
         self.roll_call_frame.clicked.connect(self.roll_student)
         self.id_label.installEventFilter(self); self.name_label.installEventFilter(self)
+
+    def _apply_saved_fonts(self) -> None:
+        id_font = QFont("Microsoft YaHei UI", self.last_id_font_size, QFont.Weight.Bold)
+        name_weight = QFont.Weight.Normal if self.name_font_family in {"楷体", "KaiTi"} else QFont.Weight.Bold
+        name_font = QFont(self.name_font_family, self.last_name_font_size, name_weight)
+        timer_font = QFont("Consolas", self.last_timer_font_size, QFont.Weight.Bold)
+        self.id_label.setFont(id_font)
+        self.name_label.setFont(name_font)
+        self.time_display_label.setFont(timer_font)
 
     def _build_menu(self) -> QMenu:
         menu = QMenu(self)
@@ -1471,17 +1504,20 @@ class RollCallTimerWindow(QWidget):
         if mode == "countdown":
             self.timer_mode_button.setText("倒计时")
             self.timer_start_pause_button.setEnabled(True); self.timer_reset_button.setEnabled(True); self.timer_set_button.setEnabled(True)
+            self.timer_start_pause_button.setText("暂停" if self.timer_running else "开始")
             if self.timer_running and not self.count_timer.isActive(): self.count_timer.start()
             self.update_timer_display()
         elif mode == "stopwatch":
             self.timer_mode_button.setText("秒表")
             self.timer_start_pause_button.setEnabled(True); self.timer_reset_button.setEnabled(True); self.timer_set_button.setEnabled(False)
+            self.timer_start_pause_button.setText("暂停" if self.timer_running else "开始")
             if self.timer_running and not self.count_timer.isActive(): self.count_timer.start()
             self.update_timer_display()
         else:
             self.timer_mode_button.setText("时钟")
             self.timer_start_pause_button.setEnabled(False); self.timer_reset_button.setEnabled(False); self.timer_set_button.setEnabled(False)
             self.timer_running = False; self.count_timer.stop(); self._update_clock(); self.clock_timer.start()
+            self.timer_start_pause_button.setText("开始")
         self.schedule_font_update()
 
     def toggle_timer_mode(self) -> None:
@@ -1605,14 +1641,17 @@ class RollCallTimerWindow(QWidget):
             if lab is self.name_label:
                 weight = QFont.Weight.Normal if self.name_font_family in {"楷体", "KaiTi"} else QFont.Weight.Bold
                 lab.setFont(QFont(self.name_font_family, size, weight))
+                self.last_name_font_size = size
             else:
                 lab.setFont(QFont("Microsoft YaHei UI", size, QFont.Weight.Bold))
+                self.last_id_font_size = size
         if self.timer_frame.isVisible():
             text = self.time_display_label.text()
             w = max(60, self.time_display_label.width())
             h = max(60, self.time_display_label.height())
             size = self._calc_font_size(w, h, text, monospace=True)
             self.time_display_label.setFont(QFont("Consolas", size, QFont.Weight.Bold))
+            self.last_timer_font_size = size
 
     def _calc_font_size(self, w: int, h: int, text: str, monospace: bool = False) -> int:
         if not text or w < 20 or h < 20:
@@ -1664,6 +1703,12 @@ class RollCallTimerWindow(QWidget):
         sec["timer_sound_enabled"] = bool_to_str(self.timer_sound_enabled)
         sec["mode"] = self.mode
         sec["timer_mode"] = self.timer_modes[self.timer_mode_index]
+        sec["timer_seconds_left"] = str(self.timer_seconds_left)
+        sec["timer_stopwatch_seconds"] = str(self.timer_stopwatch_seconds)
+        sec["timer_running"] = bool_to_str(self.timer_running)
+        sec["id_font_size"] = str(self.last_id_font_size)
+        sec["name_font_size"] = str(self.last_name_font_size)
+        sec["timer_font_size"] = str(self.last_timer_font_size)
         settings["RollCallTimer"] = sec
         self.settings_manager.save_settings(settings)
 
@@ -1722,6 +1767,112 @@ def load_student_data(parent: Optional[QWidget]) -> Optional[pd.DataFrame]:
 
 
 # ---------- 启动器 ----------
+class LauncherBubble(QWidget):
+    """启动器缩小时显示的悬浮圆球，负责发出恢复指令。"""
+
+    restore_requested = pyqtSignal()
+    position_changed = pyqtSignal(QPoint)
+
+    def __init__(self, diameter: int = 52) -> None:
+        super().__init__(
+            None,
+            Qt.WindowType.Tool
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint,
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setWindowTitle("ClassroomTools Bubble")
+        self._diameter = max(32, diameter)
+        self.setFixedSize(self._diameter, self._diameter)
+        self._dragging = False
+        self._drag_offset = QPoint()
+        self._moved = False
+
+    def place_near(self, target: QPoint, screen: Optional[QScreen]) -> None:
+        """将气泡吸附到距离 target 最近的屏幕边缘。"""
+
+        if screen is None:
+            screen = QApplication.screenAt(target) or QApplication.primaryScreen()
+        if screen is None:
+            return
+        available = screen.availableGeometry()
+        margin = 8
+        bubble_size = self.size()
+        center = QPoint(int(target.x()), int(target.y()))
+        center.setX(max(available.left(), min(center.x(), available.right())))
+        center.setY(max(available.top(), min(center.y(), available.bottom())))
+
+        distances = {
+            "left": abs(center.x() - available.left()),
+            "right": abs(available.right() - center.x()),
+            "top": abs(center.y() - available.top()),
+            "bottom": abs(available.bottom() - center.y()),
+        }
+        nearest_edge = min(distances, key=distances.get)
+        if nearest_edge == "left":
+            x = available.left() + margin
+            y = center.y() - bubble_size.height() // 2
+        elif nearest_edge == "right":
+            x = available.right() - bubble_size.width() - margin
+            y = center.y() - bubble_size.height() // 2
+        elif nearest_edge == "top":
+            y = available.top() + margin
+            x = center.x() - bubble_size.width() // 2
+        else:
+            y = available.bottom() - bubble_size.height() - margin
+            x = center.x() - bubble_size.width() // 2
+
+        x = max(available.left() + margin, min(x, available.right() - bubble_size.width() - margin))
+        y = max(available.top() + margin, min(y, available.bottom() - bubble_size.height() - margin))
+        self.move(int(x), int(y))
+        self.position_changed.emit(self.pos())
+
+    def snap_to_edge(self) -> None:
+        screen = self.screen() or QApplication.screenAt(self.frameGeometry().center()) or QApplication.primaryScreen()
+        if screen is None:
+            return
+        self.place_near(self.frameGeometry().center(), screen)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = self.rect()
+        color = QColor(32, 33, 36, 180)
+        highlight = QColor(138, 180, 248, 220)
+        painter.setBrush(QBrush(color))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(rect)
+        painter.setBrush(QBrush(highlight))
+        painter.drawEllipse(rect.adjusted(rect.width() // 3, rect.height() // 3, -rect.width() // 6, -rect.height() // 6))
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._dragging = True
+            self._drag_offset = event.position().toPoint()
+            self._moved = False
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._dragging and event.buttons() & Qt.MouseButton.LeftButton:
+            new_pos = event.globalPosition().toPoint() - self._drag_offset
+            self.move(new_pos)
+            self._moved = True
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            if not self._moved:
+                self.restore_requested.emit()
+            else:
+                self.snap_to_edge()
+                self.position_changed.emit(self.pos())
+            self._dragging = False
+        super().mouseReleaseEvent(event)
+
+
 class LauncherWindow(QWidget):
     def __init__(self, settings_manager: SettingsManager, student_data: Optional[pd.DataFrame]) -> None:
         super().__init__(None, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
@@ -1730,6 +1881,11 @@ class LauncherWindow(QWidget):
         self.overlay: Optional[OverlayWindow] = None
         self.roll_call_window: Optional[RollCallTimerWindow] = None
         self._dragging = False; self._drag_offset = QPoint()
+        self.bubble: Optional[LauncherBubble] = None
+        self._last_position = QPoint()
+        self._bubble_position = QPoint()
+        self._minimized = False
+        self._minimized_on_start = False
 
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet(
@@ -1776,6 +1932,8 @@ class LauncherWindow(QWidget):
         row = QHBoxLayout(); row.setSpacing(3)
         self.paint_button = QPushButton("画笔"); self.paint_button.clicked.connect(self.toggle_paint); row.addWidget(self.paint_button)
         self.roll_call_button = QPushButton("点名/计时"); self.roll_call_button.clicked.connect(self.toggle_roll_call); row.addWidget(self.roll_call_button)
+        self.minimize_button = QPushButton("缩小"); self.minimize_button.clicked.connect(self.minimize_launcher); self.minimize_button.setFixedWidth(48)
+        row.addWidget(self.minimize_button)
         v.addLayout(row)
 
         bottom = QHBoxLayout(); bottom.setSpacing(3)
@@ -1789,7 +1947,15 @@ class LauncherWindow(QWidget):
         bottom.addLayout(right); v.addLayout(bottom)
 
         s = self.settings_manager.load_settings().get("Launcher", {})
-        self.move(int(s.get("x", "120")), int(s.get("y", "120")))
+        x = int(s.get("x", "120")); y = int(s.get("y", "120"))
+        self.move(x, y)
+        self._last_position = QPoint(x, y)
+        bubble_x = int(s.get("bubble_x", str(x)))
+        bubble_y = int(s.get("bubble_y", str(y)))
+        self._bubble_position = QPoint(bubble_x, bubble_y)
+        minimized = str_to_bool(s.get("minimized", "False"), False)
+        self._minimized = minimized
+        self._minimized_on_start = minimized
 
         startup = self.settings_manager.load_settings().get("Startup", {})
         autostart_enabled = str_to_bool(startup.get("autostart_enabled", "False"), False)
@@ -1799,7 +1965,7 @@ class LauncherWindow(QWidget):
         if not PANDAS_AVAILABLE or not OPENPYXL_AVAILABLE or self.student_data is None:
             self.roll_call_button.setEnabled(False)
 
-        for w in (self, container, self.paint_button, self.roll_call_button, self.autostart_check):
+        for w in (self, container, self.paint_button, self.roll_call_button, self.minimize_button, self.autostart_check):
             w.installEventFilter(self)
 
         # 锁定启动器的推荐尺寸，避免误拖拽造成遮挡
@@ -1809,6 +1975,9 @@ class LauncherWindow(QWidget):
     def showEvent(self, e) -> None:
         super().showEvent(e)
         ensure_widget_within_screen(self)
+        self._last_position = self.pos()
+        if self._minimized_on_start:
+            QTimer.singleShot(0, self._restore_minimized_state)
 
     def eventFilter(self, obj, e) -> bool:
         if e.type() == QEvent.Type.MouseButtonPress and e.button() == Qt.MouseButton.LeftButton:
@@ -1816,12 +1985,22 @@ class LauncherWindow(QWidget):
         elif e.type() == QEvent.Type.MouseMove and self._dragging and e.buttons() & Qt.MouseButton.LeftButton:
             self.move(e.globalPosition().toPoint() - self._drag_offset)
         elif e.type() == QEvent.Type.MouseButtonRelease and e.button() == Qt.MouseButton.LeftButton:
-            self._dragging = False; self.save_position()
+            self._dragging = False
+            self._last_position = self.pos()
+            self.save_position()
         return super().eventFilter(obj, e)
 
     def save_position(self) -> None:
         settings = self.settings_manager.load_settings()
-        launcher = settings.get("Launcher", {}); launcher["x"] = str(self.x()); launcher["y"] = str(self.y()); settings["Launcher"] = launcher
+        pos = self._last_position if (self._minimized and not self._last_position.isNull()) else self.pos()
+        launcher = settings.get("Launcher", {})
+        launcher["x"] = str(pos.x())
+        launcher["y"] = str(pos.y())
+        bubble_pos = self._bubble_position if not self._bubble_position.isNull() else pos
+        launcher["bubble_x"] = str(bubble_pos.x())
+        launcher["bubble_y"] = str(bubble_pos.y())
+        launcher["minimized"] = bool_to_str(self._minimized)
+        settings["Launcher"] = launcher
         startup = settings.get("Startup", {}); startup["autostart_enabled"] = bool_to_str(self.autostart_check.isChecked()); settings["Startup"] = startup
         self.settings_manager.save_settings(settings)
 
@@ -1863,6 +2042,55 @@ class LauncherWindow(QWidget):
         enabled = self.autostart_check.isChecked()
         self.set_autostart(enabled); self.save_position()
 
+    def minimize_launcher(self, from_settings: bool = False) -> None:
+        """将启动器收纳为悬浮圆球。"""
+
+        if self._minimized and not from_settings:
+            return
+        if self.bubble is None:
+            self.bubble = LauncherBubble()
+            self.bubble.restore_requested.connect(self.restore_from_bubble)
+            self.bubble.position_changed.connect(self._on_bubble_position_changed)
+        target_center = self.frameGeometry().center()
+        screen = self.screen() or QApplication.screenAt(target_center) or QApplication.primaryScreen()
+        if not from_settings:
+            self._last_position = self.pos()
+        self.hide()
+        if from_settings and not self._bubble_position.isNull():
+            self.bubble.place_near(self._bubble_position, screen)
+        else:
+            self.bubble.place_near(target_center, screen)
+        self.bubble.setWindowOpacity(0.9)
+        self.bubble.show()
+        self.bubble.raise_()
+        self._minimized = True
+        self.save_position()
+
+    def _restore_minimized_state(self) -> None:
+        if not self._minimized_on_start:
+            return
+        self._minimized_on_start = False
+        self.minimize_launcher(from_settings=True)
+
+    def restore_from_bubble(self) -> None:
+        """从悬浮球恢复主启动器窗口。"""
+
+        self._minimized = False
+        if self.bubble:
+            self._bubble_position = self.bubble.pos()
+            self.bubble.hide()
+        if not self._last_position.isNull():
+            self.move(self._last_position)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.save_position()
+
+    def _on_bubble_position_changed(self, pos: QPoint) -> None:
+        self._bubble_position = QPoint(pos.x(), pos.y())
+        if self._minimized:
+            self.save_position()
+
     def set_autostart(self, enabled: bool) -> None:
         if not WINREG_AVAILABLE: return
         key_path = r"Software\\Microsoft\\Windows\\CurrentVersion\\Run"
@@ -1894,6 +2122,8 @@ class LauncherWindow(QWidget):
 
     def closeEvent(self, e) -> None:
         self.save_position()
+        if self.bubble is not None:
+            self.bubble.close()
         if self.roll_call_window is not None: self.roll_call_window.close()
         if self.overlay is not None: self.overlay.close()
         super().closeEvent(e)
