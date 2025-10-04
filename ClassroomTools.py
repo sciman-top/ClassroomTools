@@ -256,6 +256,36 @@ def ensure_widget_within_screen(widget: QWidget) -> None:
     widget.move(x, y)
 
 
+def ensure_widget_within_screen(widget: QWidget) -> None:
+    screen = None
+    try:
+        screen = widget.screen()
+    except Exception:
+        screen = None
+    if screen is None:
+        screen = QApplication.primaryScreen()
+    if screen is None:
+        return
+    available = screen.availableGeometry()
+    geom = widget.frameGeometry()
+    width = geom.width() or widget.width() or widget.sizeHint().width()
+    height = geom.height() or widget.height() or widget.sizeHint().height()
+    max_width = min(available.width(), max(widget.minimumWidth(), int(available.width() * 0.9)))
+    max_height = min(available.height(), max(widget.minimumHeight(), int(available.height() * 0.9)))
+    width = max(widget.minimumWidth(), min(width, max_width))
+    height = max(widget.minimumHeight(), min(height, max_height))
+    left_limit = available.x()
+    top_limit = available.y()
+    right_limit = max(left_limit, available.x() + available.width() - width)
+    bottom_limit = max(top_limit, available.y() + available.height() - height)
+    x = geom.x() if geom.width() else widget.x()
+    y = geom.y() if geom.height() else widget.y()
+    x = max(left_limit, min(x, right_limit))
+    y = max(top_limit, min(y, bottom_limit))
+    widget.resize(width, height)
+    widget.move(x, y)
+
+
 def str_to_bool(value: str, default: bool = False) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
