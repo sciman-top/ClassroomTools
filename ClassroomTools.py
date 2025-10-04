@@ -29,6 +29,7 @@ from PyQt6.QtGui import (
     QColor,
     QCursor,
     QFont,
+    QFontDatabase,
     QIcon,
     QPainter,
     QPainterPath,
@@ -1284,6 +1285,10 @@ class RollCallTimerWindow(QWidget):
         else:
             self.speech_enabled = False
 
+        db = QFontDatabase()
+        families = set(db.families())
+        self.name_font_family = "楷体" if "楷体" in families else ("KaiTi" if "KaiTi" in families else "Microsoft YaHei UI")
+
         self._build_ui()
         self._update_menu_state()
         self.update_mode_ui()
@@ -1302,7 +1307,27 @@ class RollCallTimerWindow(QWidget):
         self.mode_button.clicked.connect(self.toggle_mode); self.mode_button.setFixedHeight(26); top.addWidget(self.mode_button)
 
         self.group_combo = QComboBox(); self.group_combo.addItems(self.groups); self.group_combo.setCurrentText(self.current_group_name)
-        self.group_combo.currentTextChanged.connect(self.on_group_change); self.group_combo.setFixedHeight(26); top.addWidget(self.group_combo, 1)
+        self.group_combo.setFixedHeight(26)
+        self.group_combo.setMaxVisibleItems(10)
+        self.group_combo.setMinimumContentsLength(4)
+        self.group_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.group_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.group_combo.setMinimumWidth(140)
+        self.group_combo.setMaximumWidth(220)
+        self.group_combo.currentTextChanged.connect(self.on_group_change)
+
+        self.group_placeholder = QWidget()
+        self.group_placeholder.setFixedHeight(26)
+        self.group_placeholder.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self.group_stack = QStackedWidget(); self.group_stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.group_stack.setFixedHeight(26)
+        self.group_stack.setMinimumWidth(140)
+        self.group_stack.setMaximumWidth(220)
+        self.group_stack.addWidget(self.group_combo)
+        self.group_stack.addWidget(self.group_placeholder)
+        top.addWidget(self.group_stack, 1)
+        self.group_combo.view().setMinimumWidth(160)
 
         self.menu_button = QToolButton(); self.menu_button.setText("..."); self.menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.menu_button.setFixedSize(28, 28); self.menu_button.setStyleSheet("font-size: 18px; padding-bottom: 6px;")
@@ -1408,12 +1433,12 @@ class RollCallTimerWindow(QWidget):
         self.title_label.setText("点名" if is_roll else "计时")
         self.mode_button.setText("切换到计时" if is_roll else "切换到点名")
         if is_roll:
-            self.stack.setCurrentWidget(self.roll_call_frame); self.group_combo.show()
+            self.stack.setCurrentWidget(self.roll_call_frame); self.group_stack.setCurrentWidget(self.group_combo)
             self.count_timer.stop(); self.clock_timer.stop(); self.timer_running = False; self.timer_start_pause_button.setText("开始")
             self.update_display_layout(); self.display_current_student()
             self.schedule_font_update()
         else:
-            self.stack.setCurrentWidget(self.timer_frame); self.group_combo.hide(); self.update_timer_mode_ui()
+            self.stack.setCurrentWidget(self.timer_frame); self.group_stack.setCurrentWidget(self.group_placeholder); self.update_timer_mode_ui()
             self.schedule_font_update()
         self.updateGeometry()
 
@@ -1554,7 +1579,11 @@ class RollCallTimerWindow(QWidget):
             if not lab.isVisible(): continue
             w = max(40, lab.width()); h = max(40, lab.height()); text = lab.text()
             size = self._calc_font_size(w, h, text)
-            lab.setFont(QFont("Microsoft YaHei UI", size, QFont.Weight.Bold))
+            if lab is self.name_label:
+                weight = QFont.Weight.Normal if self.name_font_family in {"楷体", "KaiTi"} else QFont.Weight.Bold
+                lab.setFont(QFont(self.name_font_family, size, weight))
+            else:
+                lab.setFont(QFont("Microsoft YaHei UI", size, QFont.Weight.Bold))
         if self.timer_frame.isVisible():
             text = self.time_display_label.text()
             w = max(60, self.time_display_label.width())
