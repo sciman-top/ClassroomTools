@@ -179,8 +179,13 @@ def ensure_high_dpi_awareness() -> None:
 
 # ---------- 工具 ----------
 def geometry_to_text(widget: QWidget) -> str:
-    rect = widget.frameGeometry()
-    return f"{rect.width()}x{rect.height()}+{rect.x()}+{rect.y()}"
+    """以不含边框的尺寸记录窗口几何信息，避免重复放大。"""
+
+    frame = widget.frameGeometry()
+    inner = widget.geometry()
+    width = inner.width() or frame.width()
+    height = inner.height() or frame.height()
+    return f"{width}x{height}+{frame.x()}+{frame.y()}"
 
 
 def apply_geometry_from_text(widget: QWidget, geometry: str) -> None:
@@ -215,7 +220,39 @@ def apply_geometry_from_text(widget: QWidget, geometry: str) -> None:
         height = max(widget.minimumHeight(), min(height, max_height))
         x = max(available.left(), min(x, available.right() - width))
         y = max(available.top(), min(y, available.bottom() - height))
-    widget.resize(max(160, width), max(120, height))
+    target_width = max(widget.minimumWidth(), max(160, width))
+    target_height = max(widget.minimumHeight(), max(120, height))
+    widget.resize(target_width, target_height)
+    widget.move(x, y)
+
+
+def ensure_widget_within_screen(widget: QWidget) -> None:
+    screen = None
+    try:
+        screen = widget.screen()
+    except Exception:
+        screen = None
+    if screen is None:
+        screen = QApplication.primaryScreen()
+    if screen is None:
+        return
+    available = screen.availableGeometry()
+    geom = widget.frameGeometry()
+    width = widget.width() or geom.width() or widget.sizeHint().width()
+    height = widget.height() or geom.height() or widget.sizeHint().height()
+    max_width = min(available.width(), max(widget.minimumWidth(), int(available.width() * 0.9)))
+    max_height = min(available.height(), max(widget.minimumHeight(), int(available.height() * 0.9)))
+    width = max(widget.minimumWidth(), min(width, max_width))
+    height = max(widget.minimumHeight(), min(height, max_height))
+    left_limit = available.x()
+    top_limit = available.y()
+    right_limit = max(left_limit, available.x() + available.width() - width)
+    bottom_limit = max(top_limit, available.y() + available.height() - height)
+    x = geom.x() if geom.width() else widget.x()
+    y = geom.y() if geom.height() else widget.y()
+    x = max(left_limit, min(x, right_limit))
+    y = max(top_limit, min(y, bottom_limit))
+    widget.resize(width, height)
     widget.move(x, y)
 
 
@@ -1931,7 +1968,8 @@ class LauncherWindow(QWidget):
         layout = QVBoxLayout(self); layout.setContentsMargins(0, 0, 0, 0); layout.addWidget(container)
         v = QVBoxLayout(container); v.setContentsMargins(8, 8, 8, 8); v.setSpacing(5)
 
-        row = QHBoxLayout(); row.setSpacing(3)
+        row = QHBoxLayout(); row.setSpacing(3); row.setContentsMargins(0, 0, 0, 0)
+        row.addStretch(1)
         self.paint_button = QPushButton("画笔"); self.paint_button.clicked.connect(self.toggle_paint); row.addWidget(self.paint_button)
         self.roll_call_button = QPushButton("点名/计时"); self.roll_call_button.clicked.connect(self.toggle_roll_call); row.addWidget(self.roll_call_button)
         row.addStretch(1)
