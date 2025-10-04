@@ -17,7 +17,6 @@ from PyQt6.QtCore import (
     QPoint,
     QPointF,
     QRect,
-    QRectF,
     QSize,
     Qt,
     QTimer,
@@ -64,10 +63,12 @@ from PyQt6.QtWidgets import (
 
 # ---------- 图标 ----------
 class IconManager:
-    """集中管理浮动工具条的图标，方便后续统一换肤。"""
+    """集中管理浮动工具条的 SVG 图标，方便后续统一换肤。"""
     _icons: Dict[str, str] = {
         "cursor": "PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCc+CiAgICA8cGF0aCBmaWxsPScjZjFmM2Y0JyBkPSdNNCAzLjMgMTEuNCAyMWwxLjgtNS44IDYuMy0yLjF6Jy8+CiAgICA8cGF0aCBmaWxsPScjOGFiNGY4JyBkPSdtMTIuNiAxNC40IDQuOCA0LjgtMi4xIDIuMS00LjItNC4yeicvPgo8L3N2Zz4=",
         "shape": "PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCc+CiAgICA8cmVjdCB4PSczLjUnIHk9JzMuNScgd2lkdGg9JzknIGhlaWdodD0nOScgcng9JzInIGZpbGw9JyNmMWYzZjQnLz4KICAgIDxjaXJjbGUgY3g9JzE2LjUnIGN5PScxNi41JyByPSc1LjUnIGZpbGw9J25vbmUnIHN0cm9rZT0nI2YxZjNmNCcgc3Ryb2tlLXdpZHRoPScxLjgnLz4KICAgIDxjaXJjbGUgY3g9JzE2LjUnIGN5PScxNi41JyByPSczLjUnIGZpbGw9JyM4YWI0ZjgnIGZpbGwtb3BhY2l0eT0nMC4zNScvPgo8L3N2Zz4=",
+        "eraser": "PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCc+CiAgICA8cGF0aCBmaWxsPScjZjFmM2Y0JyBkPSdtNSAxNC42IDgtOGEyLjggMi44IDAgMCAxIDQgMGwuOS45YTIuOCAyLjggMCAwIDEgMCA0bC04IDhINi40bC0xLjktMS45YTIgMiAwIDAgMSAwLTIuOHonLz4KICAgIDxyZWN0IHg9JzQnIHk9JzE5JyB3aWR0aD0nMTEnIGhlaWdodD0nMicgcng9JzEnIGZpbGw9JyM4YWI0ZjgnLz4KPC9zdmc+",
+        "clear_all": "PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCc+CiAgICA8cmVjdCB4PSczLjInIHk9JzQuMicgd2lkdGg9JzE3LjYnIGhlaWdodD0nMTEuNicgcng9JzInIHJ5PScyJyBmaWxsPSdub25lJyBzdHJva2U9JyNmMWYzZjQnIHN0cm9rZS13aWR0aD0nMS42Jy8+CiAgICA8cGF0aCBkPSdNNy4yIDE3LjJoOS42YTEgMSAwIDAgMSAxIDF2MS42SDYuMnYtMS42YTEgMSAwIDAgMSAxLTF6JyBmaWxsPScjOGFiNGY4Jy8+CiAgICA8cGF0aCBkPSdNOC41IDhoNk04LjUgMTEuNWg0JyBzdHJva2U9JyNmMWYzZjQnIHN0cm9rZS13aWR0aD0nMS42JyBzdHJva2UtbGluZWNhcD0ncm91bmQnLz4KPC9zdmc+",
         "settings": "PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCc+CiAgICA8Y2lyY2xlIGN4PScxMicgY3k9JzEyJyByPSczLjUnIGZpbGw9JyM4YWI0ZjgnLz4KICAgIDxwYXRoIGZpbGw9J25vbmUnIHN0cm9rZT0nI2YxZjNmNCcgc3Ryb2tlLXdpZHRoPScxLjYnIHN0cm9rZS1saW5lY2FwPSdyb3VuZCcgc3Ryb2tlLWxpbmVqb2luPSdyb3VuZCcKICAgICAgICBkPSdNMTIgNC41VjIuOG0wIDE4LjR2LTEuN203LjEtNy41SDIwbS0xOCAwaDEuNk0xNy42IDZsMS4yLTEuMk01LjIgMTguNCA2LjQgMTcuMk02LjQgNiA1LjIgNC44bTEzLjYgMTMuNi0xLjItMS4yJy8+Cjwvc3ZnPg==",
         "whiteboard": "PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCc+CiAgICA8cmVjdCB4PSczJyB5PSc0JyB3aWR0aD0nMTgnIGhlaWdodD0nMTInIHJ4PScyJyByeT0nMicgZmlsbD0nI2YxZjNmNCcgZmlsbC1vcGFjaXR5PScwLjEyJyBzdHJva2U9JyNmMWYzZjQnIHN0cm9rZS13aWR0aD0nMS42Jy8+CiAgICA8cGF0aCBkPSdtNyAxOCA1LTUgNSA1JyBmaWxsPSdub25lJyBzdHJva2U9JyM4YWI0ZjgnIHN0cm9rZS13aWR0aD0nMS44JyBzdHJva2UtbGluZWNhcD0ncm91bmQnIHN0cm9rZS1saW5lam9pbj0ncm91bmQnLz4KICAgIDxwYXRoIGQ9J004IDloOG0tOCAzaDUnIHN0cm9rZT0nI2YxZjNmNCcgc3Ryb2tlLXdpZHRoPScxLjYnIHN0cm9rZS1saW5lY2FwPSdyb3VuZCcvPgo8L3N2Zz4=",
         "undo": "PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCc+CiAgPHBhdGggZmlsbD0nI2YxZjNmNCcgZD0nTTguNCA1LjJMMyAxMC42bDUuNCA1LjQgMS40LTEuNC0yLjMtMi4zaDUuNWMzLjIgMCA1LjggMi42IDUuOCA1LjggMCAuNS0uMSAxLS4yIDEuNWwyLjEuNmMuMi0uNy4zLTEuNC4zLTIuMSAwLTQuNC0zLjYtOC04LThINy41bDIuMy0yLjMtMS40LTEuNHonLz4KPC9zdmc+",
@@ -105,12 +106,6 @@ class IconManager:
             name = "clear_all"  # 兼容旧配置
         if name in cls._cache:
             return cls._cache[name]
-
-        generated = cls._generate_icon(name)
-        if generated is not None:
-            cls._cache[name] = generated
-            return generated
-
         data = cls._icons.get(name)
         if not data:
             return QIcon()
@@ -185,25 +180,6 @@ def geometry_to_text(widget: QWidget) -> str:
     return f"{rect.width()}x{rect.height()}+{rect.x()}+{rect.y()}"
 
 
-def _available_geometry(widget: QWidget):
-    screen = widget.screen() or QApplication.primaryScreen()
-    return screen.availableGeometry() if screen else None
-
-
-def _clamp_widget_position(widget: QWidget, x: int, y: int) -> QPoint:
-    available = _available_geometry(widget)
-    if not available:
-        return QPoint(x, y)
-    geom = widget.frameGeometry()
-    width = geom.width() or widget.width() or 1
-    height = geom.height() or widget.height() or 1
-    max_x = available.left() + max(0, available.width() - width)
-    max_y = available.top() + max(0, available.height() - height)
-    clamped_x = max(available.left(), min(x, max_x))
-    clamped_y = max(available.top(), min(y, max_y))
-    return QPoint(clamped_x, clamped_y)
-
-
 def apply_geometry_from_text(widget: QWidget, geometry: str) -> None:
     if not geometry:
         return
@@ -221,24 +197,8 @@ def apply_geometry_from_text(widget: QWidget, geometry: str) -> None:
         y = int(y_str)
     except ValueError:
         return
-    available = _available_geometry(widget)
-    if available:
-        min_w = max(180, int(available.width() * 0.18))
-        max_w = max(min(available.width(), int(available.width() * 0.94)), min_w)
-        min_h = max(140, int(available.height() * 0.18))
-        max_h = max(min(available.height(), int(available.height() * 0.94)), min_h)
-    else:
-        min_w = 160
-        max_w = 960
-        min_h = 120
-        max_h = 720
-
-    width = max(min_w, min(width, max_w))
-    height = max(min_h, min(height, max_h))
-    widget.resize(width, height)
-
-    pos = _clamp_widget_position(widget, x, y)
-    widget.move(pos)
+    widget.resize(max(160, width), max(120, height))
+    widget.move(x, y)
 
 
 def str_to_bool(value: str, default: bool = False) -> bool:
@@ -546,8 +506,6 @@ class FloatingToolbar(QWidget):
         self.move(int(settings.get("x", "260")), int(settings.get("y", "260")))
         self.adjustSize()
         self.setFixedSize(self.sizeHint())
-        pos = _clamp_widget_position(self, self.x(), self.y())
-        self.move(pos)
 
     def _build_ui(self) -> None:
         self.setStyleSheet(
@@ -754,8 +712,6 @@ class OverlayWindow(QWidget):
         s = self.settings_manager.load_settings().get("Paint", {})
         self.pen_size = int(s.get("brush_size", "12"))
         self.pen_color = QColor(s.get("brush_color", "#ff0000"))
-        self._last_brush_color = QColor(self.pen_color)
-        self._last_pen_size = self.pen_size
         self.mode = "brush"
         self.current_shape: Optional[str] = None
         self.shape_start_point: Optional[QPoint] = None
@@ -801,9 +757,6 @@ class OverlayWindow(QWidget):
         d = PenSettingsDialog(self.toolbar, self.pen_size, self.pen_color.name())
         if d.exec():
             self.pen_size, self.pen_color = d.get_settings()
-            self.last_width = self.pen_size * 0.4
-            self.last_time = time.time()
-            self._remember_brush_state()
             self.update_cursor()
         self.set_mode(pm, ps)
         self.raise_toolbar()
@@ -830,9 +783,6 @@ class OverlayWindow(QWidget):
         self.update()
 
     def set_mode(self, mode: str, shape_type: Optional[str] = None, *, initial: bool = False) -> None:
-        previous_mode = getattr(self, "mode", None)
-        if previous_mode == "brush" and mode != "brush":
-            self._remember_brush_state()
         self.mode = mode
         if shape_type is not None or mode != "shape":
             self.current_shape = shape_type
@@ -843,9 +793,6 @@ class OverlayWindow(QWidget):
             self.raise_toolbar()
         self.update_toolbar_state()
         self.update_cursor()
-        if self.mode == "brush":
-            self.last_width = self.pen_size * 0.4
-            self.last_time = time.time()
 
     def update_toolbar_state(self) -> None:
         if not getattr(self, 'toolbar', None):
@@ -950,11 +897,8 @@ class OverlayWindow(QWidget):
         if e.button() == Qt.MouseButton.LeftButton and self.mode != "cursor":
             self._push_history()
             self.drawing = True
-            pointf = QPointF(e.position())
-            self.last_point = QPointF(pointf)
-            self.prev_point = QPointF(pointf)
+            pointf = e.position(); self.last_point = pointf; self.prev_point = pointf
             self.last_width = self.pen_size * 0.4
-            self.last_time = time.time()
             self.shape_start_point = e.pos() if self.mode == "shape" else None
             self.raise_toolbar()
             e.accept()
@@ -997,48 +941,21 @@ class OverlayWindow(QWidget):
         mid = (self.last_point + cur) / 2.0
 
         path = QPainterPath(); path.moveTo(self.prev_point); path.quadTo(self.last_point, mid)
-        painter = QPainter(self.canvas)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        fade = QColor(self.pen_color)
-        fade.setAlpha(90)
-        painter.setPen(QPen(fade, cur_w * 1.45, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-        painter.drawPath(path)
+        p = QPainter(self.canvas); p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        fade = QColor(self.pen_color); fade.setAlpha(70)
+        p.setPen(QPen(fade, cur_w * 1.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)); p.drawPath(path)
+        p.setPen(QPen(self.pen_color, cur_w, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)); p.drawPath(path)
+        p.end()
 
-        main_pen = QPen(self.pen_color, cur_w, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
-        painter.setPen(main_pen)
-        painter.drawPath(path)
-
-        highlight_color = QColor(self.pen_color)
-        highlight_color = highlight_color.lighter(130)
-        highlight_color.setAlpha(160)
-        highlight_pen = QPen(highlight_color, max(1.0, cur_w * 0.45), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
-        highlight_path = QPainterPath()
-        highlight_path.moveTo(self.last_point)
-        highlight_mid = QPointF(
-            self.last_point.x() * 0.6 + mid.x() * 0.4,
-            self.last_point.y() * 0.6 + mid.y() * 0.4,
-        )
-        highlight_path.quadTo(highlight_mid, mid)
-        painter.setPen(highlight_pen)
-        painter.drawPath(highlight_path)
-        painter.end()
-
-        self.prev_point = QPointF(self.last_point)
-        self.last_point = QPointF(cur)
-        self.last_width = cur_w
+        self.prev_point = self.last_point; self.last_point = cur; self.last_width = cur_w
 
     def _erase_at(self, pos) -> None:
-        current = QPointF(pos) if not isinstance(pos, QPointF) else QPointF(pos)
-        painter = QPainter(self.canvas)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
-        radius = max(8.0, float(self.pen_size) * 2.6)
-        eraser_pen = QPen(QColor(255, 255, 255, 0), radius, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
-        painter.setPen(eraser_pen)
-        painter.drawLine(self.last_point, current)
-        painter.end()
-        self.prev_point = QPointF(self.last_point)
-        self.last_point = QPointF(current)
+        if isinstance(pos, QPointF): pos = pos.toPoint()
+        p = QPainter(self.canvas); p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+        radius = max(6, int(self.pen_size * 3.2))
+        p.setPen(QPen(QColor(255, 255, 255, 0), radius, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        p.drawPoint(pos); p.end()
 
     def _draw_shape_preview(self, end_point) -> None:
         if not self.shape_start_point: return
@@ -1216,13 +1133,7 @@ class RollCallTimerWindow(QWidget):
 
         s = self.settings_manager.load_settings().get("RollCallTimer", {})
         apply_geometry_from_text(self, s.get("geometry", "420x240+180+180"))
-        available = _available_geometry(self)
-        if available:
-            min_width = max(260, int(available.width() * 0.2))
-            min_height = max(160, int(available.height() * 0.2))
-        else:
-            min_width, min_height = 260, 160
-        self.setMinimumSize(min_width, min_height)
+        self.setMinimumSize(260, 160)
 
         self.mode = s.get("mode", "roll_call") if s.get("mode", "roll_call") in {"roll_call", "timer"} else "roll_call"
         self.timer_modes = ["countdown", "stopwatch", "clock"]
@@ -1511,7 +1422,6 @@ class RollCallTimerWindow(QWidget):
             if not self.show_id: self.id_label.setText("")
             if not self.show_name: self.name_label.setText("")
         self.update_display_layout()
-        self.update_dynamic_fonts()
 
     def update_display_layout(self) -> None:
         self.id_label.setVisible(self.show_id); self.name_label.setVisible(self.show_name)
@@ -1724,8 +1634,6 @@ class LauncherWindow(QWidget):
         # 锁定启动器的推荐尺寸，避免误拖拽造成遮挡
         self.adjustSize()
         self.setFixedSize(self.sizeHint())
-        pos = _clamp_widget_position(self, self.x(), self.y())
-        self.move(pos)
 
     def eventFilter(self, obj, e) -> bool:
         if e.type() == QEvent.Type.MouseButtonPress and e.button() == Qt.MouseButton.LeftButton:
