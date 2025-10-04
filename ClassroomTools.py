@@ -30,6 +30,7 @@ from PyQt6.QtGui import (
     QCursor,
     QFont,
     QFontDatabase,
+    QFontMetrics,
     QIcon,
     QPainter,
     QPainterPath,
@@ -1773,7 +1774,7 @@ class LauncherBubble(QWidget):
     restore_requested = pyqtSignal()
     position_changed = pyqtSignal(QPoint)
 
-    def __init__(self, diameter: int = 52) -> None:
+    def __init__(self, diameter: int = 42) -> None:
         super().__init__(
             None,
             Qt.WindowType.Tool
@@ -1787,6 +1788,7 @@ class LauncherBubble(QWidget):
         self.setWindowTitle("ClassroomTools Bubble")
         self._diameter = max(32, diameter)
         self.setFixedSize(self._diameter, self._diameter)
+        self.setWindowOpacity(0.74)
         self._dragging = False
         self._drag_offset = QPoint()
         self._moved = False
@@ -1799,7 +1801,7 @@ class LauncherBubble(QWidget):
         if screen is None:
             return
         available = screen.availableGeometry()
-        margin = 8
+        margin = 6
         bubble_size = self.size()
         center = QPoint(int(target.x()), int(target.y()))
         center.setX(max(available.left(), min(center.x(), available.right())))
@@ -1840,8 +1842,8 @@ class LauncherBubble(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         rect = self.rect()
-        color = QColor(32, 33, 36, 180)
-        highlight = QColor(138, 180, 248, 220)
+        color = QColor(32, 33, 36, 150)
+        highlight = QColor(138, 180, 248, 160)
         painter.setBrush(QBrush(color))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawEllipse(rect)
@@ -1932,6 +1934,12 @@ class LauncherWindow(QWidget):
         row = QHBoxLayout(); row.setSpacing(3)
         self.paint_button = QPushButton("画笔"); self.paint_button.clicked.connect(self.toggle_paint); row.addWidget(self.paint_button)
         self.roll_call_button = QPushButton("点名/计时"); self.roll_call_button.clicked.connect(self.toggle_roll_call); row.addWidget(self.roll_call_button)
+        unified_width = self._action_button_width()
+        self.paint_button.setFixedWidth(unified_width)
+        self.roll_call_button.setFixedWidth(unified_width)
+        target_height = max(self.paint_button.sizeHint().height(), self.roll_call_button.sizeHint().height())
+        self.paint_button.setFixedHeight(target_height)
+        self.roll_call_button.setFixedHeight(target_height)
         self.minimize_button = QPushButton("缩小"); self.minimize_button.clicked.connect(self.minimize_launcher); self.minimize_button.setFixedWidth(48)
         row.addWidget(self.minimize_button)
         v.addLayout(row)
@@ -1971,6 +1979,19 @@ class LauncherWindow(QWidget):
         # 锁定启动器的推荐尺寸，避免误拖拽造成遮挡
         self.adjustSize()
         self.setFixedSize(self.sizeHint())
+
+    def _action_button_width(self) -> int:
+        """计算“画笔”与“点名/计时”按钮的统一宽度，保证观感一致。"""
+
+        paint_metrics = QFontMetrics(self.paint_button.font())
+        roll_metrics = QFontMetrics(self.roll_call_button.font())
+        paint_texts = ["画笔", "隐藏画笔"]
+        roll_texts = ["点名/计时", "显示点名", "隐藏点名"]
+        max_width = max(
+            max(paint_metrics.horizontalAdvance(text) for text in paint_texts),
+            max(roll_metrics.horizontalAdvance(text) for text in roll_texts),
+        )
+        return max_width + 28
 
     def showEvent(self, e) -> None:
         super().showEvent(e)
@@ -2060,7 +2081,7 @@ class LauncherWindow(QWidget):
             self.bubble.place_near(self._bubble_position, screen)
         else:
             self.bubble.place_near(target_center, screen)
-        self.bubble.setWindowOpacity(0.9)
+        self.bubble.setWindowOpacity(0.74)
         self.bubble.show()
         self.bubble.raise_()
         self._minimized = True
@@ -2076,14 +2097,50 @@ class LauncherWindow(QWidget):
         """从悬浮球恢复主启动器窗口。"""
 
         self._minimized = False
+        target_pos: Optional[QPoint] = None
+        screen = None
         if self.bubble:
             self._bubble_position = self.bubble.pos()
+            bubble_geom = self.bubble.frameGeometry()
+            bubble_center = bubble_geom.center()
+            screen = self.bubble.screen() or QApplication.screenAt(bubble_center) or QApplication.primaryScreen()
+            margin = 12
+            width = self.width() or self.sizeHint().width()
+            height = self.height() or self.sizeHint().height()
+            if screen is not None:
+                available = screen.availableGeometry()
+                distances = {
+                    "left": abs(bubble_center.x() - available.left()),
+                    "right": abs(available.right() - bubble_center.x()),
+                    "top": abs(bubble_center.y() - available.top()),
+                    "bottom": abs(available.bottom() - bubble_center.y()),
+                }
+                nearest_edge = min(distances, key=distances.get)
+                if nearest_edge == "left":
+                    x = bubble_geom.right() + margin
+                    y = bubble_center.y() - height // 2
+                elif nearest_edge == "right":
+                    x = bubble_geom.left() - width - margin
+                    y = bubble_center.y() - height // 2
+                elif nearest_edge == "top":
+                    y = bubble_geom.bottom() + margin
+                    x = bubble_center.x() - width // 2
+                else:
+                    y = bubble_geom.top() - height - margin
+                    x = bubble_center.x() - width // 2
+                x = max(available.left(), min(int(x), available.right() - width))
+                y = max(available.top(), min(int(y), available.bottom() - height))
+                target_pos = QPoint(x, y)
             self.bubble.hide()
-        if not self._last_position.isNull():
-            self.move(self._last_position)
+        if target_pos is None and not self._last_position.isNull():
+            target_pos = QPoint(self._last_position)
+        if target_pos is not None:
+            self.move(target_pos)
         self.show()
         self.raise_()
         self.activateWindow()
+        ensure_widget_within_screen(self)
+        self._last_position = self.pos()
         self.save_position()
 
     def _on_bubble_position_changed(self, pos: QPoint) -> None:
