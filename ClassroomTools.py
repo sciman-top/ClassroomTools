@@ -66,14 +66,38 @@ class IconManager:
     """集中管理浮动工具条的 SVG 图标，方便后续统一换肤。"""
     _icons: Dict[str, str] = {
         "cursor": "PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCc+CiAgICA8cGF0aCBmaWxsPScjZjFmM2Y0JyBkPSdNNCAzLjMgMTEuNCAyMWwxLjgtNS44IDYuMy0yLjF6Jy8+CiAgICA8cGF0aCBmaWxsPScjOGFiNGY4JyBkPSdtMTIuNiAxNC40IDQuOCA0LjgtMi4xIDIuMS00LjItNC4yeicvPgo8L3N2Zz4=",
-        "brush": "PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCc+CiAgICA8cGF0aCBmaWxsPScjZjFmM2Y0JyBkPSdNMTUuOSA0LjJhMyAzIDAgMCAxIDQuMiAwbC4xLjFhMyAzIDAgMCAxIDAgNC4ybC03LjggNy45LTQuNiAxLjIgMS4yLTQuNnonLz4KICAgIDxwYXRoIGZpbGw9JyM4YWI0ZjgnIGQ9J000LjMgMTYuNGEzIDMgMCAwIDAtLjggMi41IDMgMyAwIDAgMCAyLjUtLjggMiAyIDAgMCAwIDAtMi44IDIgMiAwIDAgMC0yLjggMHonLz4KPC9zdmc+",
         "shape": "PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCc+CiAgICA8cmVjdCB4PSczLjUnIHk9JzMuNScgd2lkdGg9JzknIGhlaWdodD0nOScgcng9JzInIGZpbGw9JyNmMWYzZjQnLz4KICAgIDxjaXJjbGUgY3g9JzE2LjUnIGN5PScxNi41JyByPSc1LjUnIGZpbGw9J25vbmUnIHN0cm9rZT0nI2YxZjNmNCcgc3Ryb2tlLXdpZHRoPScxLjgnLz4KICAgIDxjaXJjbGUgY3g9JzE2LjUnIGN5PScxNi41JyByPSczLjUnIGZpbGw9JyM4YWI0ZjgnIGZpbGwtb3BhY2l0eT0nMC4zNScvPgo8L3N2Zz4=",
         "eraser": "PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCc+CiAgICA8cGF0aCBmaWxsPScjZjFmM2Y0JyBkPSdtNSAxNC42IDgtOGEyLjggMi44IDAgMCAxIDQgMGwuOS45YTIuOCAyLjggMCAwIDEgMCA0bC04IDhINi40bC0xLjktMS45YTIgMiAwIDAgMSAwLTIuOHonLz4KICAgIDxyZWN0IHg9JzQnIHk9JzE5JyB3aWR0aD0nMTEnIGhlaWdodD0nMicgcng9JzEnIGZpbGw9JyM4YWI0ZjgnLz4KPC9zdmc+",
         "clear_all": "PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCc+CiAgICA8cmVjdCB4PSczLjInIHk9JzQuMicgd2lkdGg9JzE3LjYnIGhlaWdodD0nMTEuNicgcng9JzInIHJ5PScyJyBmaWxsPSdub25lJyBzdHJva2U9JyNmMWYzZjQnIHN0cm9rZS13aWR0aD0nMS42Jy8+CiAgICA8cGF0aCBkPSdNNy4yIDE3LjJoOS42YTEgMSAwIDAgMSAxIDF2MS42SDYuMnYtMS42YTEgMSAwIDAgMSAxLTF6JyBmaWxsPScjOGFiNGY4Jy8+CiAgICA8cGF0aCBkPSdNOC41IDhoNk04LjUgMTEuNWg0JyBzdHJva2U9JyNmMWYzZjQnIHN0cm9rZS13aWR0aD0nMS42JyBzdHJva2UtbGluZWNhcD0ncm91bmQnLz4KPC9zdmc+",
         "settings": "PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCc+CiAgICA8Y2lyY2xlIGN4PScxMicgY3k9JzEyJyByPSczLjUnIGZpbGw9JyM4YWI0ZjgnLz4KICAgIDxwYXRoIGZpbGw9J25vbmUnIHN0cm9rZT0nI2YxZjNmNCcgc3Ryb2tlLXdpZHRoPScxLjYnIHN0cm9rZS1saW5lY2FwPSdyb3VuZCcgc3Ryb2tlLWxpbmVqb2luPSdyb3VuZCcKICAgICAgICBkPSdNMTIgNC41VjIuOG0wIDE4LjR2LTEuN203LjEtNy41SDIwbS0xOCAwaDEuNk0xNy42IDZsMS4yLTEuMk01LjIgMTguNCA2LjQgMTcuMk02LjQgNiA1LjIgNC44bTEzLjYgMTMuNi0xLjItMS4yJy8+Cjwvc3ZnPg==",
         "whiteboard": "PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCc+CiAgICA8cmVjdCB4PSczJyB5PSc0JyB3aWR0aD0nMTgnIGhlaWdodD0nMTInIHJ4PScyJyByeT0nMicgZmlsbD0nI2YxZjNmNCcgZmlsbC1vcGFjaXR5PScwLjEyJyBzdHJva2U9JyNmMWYzZjQnIHN0cm9rZS13aWR0aD0nMS42Jy8+CiAgICA8cGF0aCBkPSdtNyAxOCA1LTUgNSA1JyBmaWxsPSdub25lJyBzdHJva2U9JyM4YWI0ZjgnIHN0cm9rZS13aWR0aD0nMS44JyBzdHJva2UtbGluZWNhcD0ncm91bmQnIHN0cm9rZS1saW5lam9pbj0ncm91bmQnLz4KICAgIDxwYXRoIGQ9J004IDloOG0tOCAzaDUnIHN0cm9rZT0nI2YxZjNmNCcgc3Ryb2tlLXdpZHRoPScxLjYnIHN0cm9rZS1saW5lY2FwPSdyb3VuZCcvPgo8L3N2Zz4=",
+        "undo": "PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCc+CiAgPHBhdGggZmlsbD0nI2YxZjNmNCcgZD0nTTguNCA1LjJMMyAxMC42bDUuNCA1LjQgMS40LTEuNC0yLjMtMi4zaDUuNWMzLjIgMCA1LjggMi42IDUuOCA1LjggMCAuNS0uMSAxLS4yIDEuNWwyLjEuNmMuMi0uNy4zLTEuNC4zLTIuMSAwLTQuNC0zLjYtOC04LThINy41bDIuMy0yLjMtMS40LTEuNHonLz4KPC9zdmc+",
     }
     _cache: Dict[str, QIcon] = {}
+
+    @classmethod
+    def get_brush_icon(cls, color_hex: str) -> QIcon:
+        key = f"brush_{color_hex.lower()}"
+        if key in cls._cache:
+            return cls._cache[key]
+        pixmap = QPixmap(28, 28)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        brush_color = QColor(color_hex)
+        if not brush_color.isValid():
+            brush_color = QColor("#999999")
+        painter.setBrush(QBrush(brush_color))
+        painter.setPen(QPen(QColor(0, 0, 0, 140), 1.4))
+        painter.drawEllipse(5, 6, 18, 18)
+        painter.setPen(QPen(QColor(255, 255, 255, 230), 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.drawLine(9, 10, 18, 19)
+        painter.setPen(QPen(QColor(0, 0, 0, 90), 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.drawLine(10, 9, 19, 18)
+        painter.end()
+        icon = QIcon(pixmap)
+        cls._cache[key] = icon
+        return icon
 
     @classmethod
     def get_icon(cls, name: str) -> QIcon:
@@ -283,10 +307,9 @@ class TipWindow(QWidget):
 class PenSettingsDialog(QDialog):
     """画笔粗细与颜色选择对话框。"""
     COLORS = {
-        "#000000": "黑",
-        "#FF0000": "红",
-        "#1E90FF": "蓝",
         "#FFFF00": "黄",
+        "#FFA500": "橙",
+        "#24B47E": "绿",
         "#800080": "紫",
         "#FFFFFF": "白",
     }
@@ -298,7 +321,7 @@ class PenSettingsDialog(QDialog):
         self.pen_color = QColor(initial_color)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
 
         size_layout = QHBoxLayout()
@@ -321,9 +344,11 @@ class PenSettingsDialog(QDialog):
         color_layout.setSpacing(6)
         for index, (color_hex, name) in enumerate(self.COLORS.items()):
             button = QPushButton()
-            button.setFixedSize(26, 26)
+            button.setFixedSize(24, 24)
             button.setCursor(Qt.CursorShape.PointingHandCursor)
-            button.setStyleSheet(f"background-color: {color_hex}; border: 1px solid #5f6368; border-radius: 4px;")
+            button.setStyleSheet(
+                f"background-color: {color_hex}; border: 1px solid rgba(0, 0, 0, 60); border-radius: 12px;"
+            )
             button.setToolTip(name)
             button.clicked.connect(lambda _checked, c=color_hex: self._select_color(c))
             color_layout.addWidget(button, index // 3, index % 3)
@@ -419,17 +444,17 @@ class TitleBar(QWidget):
 
         self.setAutoFillBackground(True)
         palette = self.palette()
-        palette.setColor(self.backgroundRole(), QColor(42, 43, 46, 235))
+        palette.setColor(self.backgroundRole(), QColor(36, 37, 41, 235))
         self.setPalette(palette)
-        self.setFixedHeight(24)
+        self.setFixedHeight(22)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 0, 8, 0)
+        layout.setContentsMargins(6, 0, 6, 0)
         title = QLabel("屏幕批注")
         font = title.font()
         font.setBold(True)
         title.setFont(font)
-        title.setStyleSheet("color: #f1f3f4; font-size: 11px;")
+        title.setStyleSheet("color: #f1f3f4; font-size: 10.5px;")
         layout.addWidget(title)
         layout.addStretch()
 
@@ -495,9 +520,9 @@ class FloatingToolbar(QWidget):
                 background: rgba(60, 64, 67, 240);
                 border: 1px solid rgba(255, 255, 255, 45);
                 border-radius: 6px;
-                padding: 4px;
-                min-width: 30px;
-                min-height: 30px;
+                padding: 3px;
+                min-width: 28px;
+                min-height: 28px;
             }
             QPushButton:hover {
                 background: rgba(138, 180, 248, 245);
@@ -523,34 +548,49 @@ class FloatingToolbar(QWidget):
         root.addWidget(container)
 
         layout = QVBoxLayout(container)
-        layout.setContentsMargins(8, 6, 8, 6)
-        layout.setSpacing(6)
+        layout.setContentsMargins(6, 5, 6, 6)
+        layout.setSpacing(5)
         self.title_bar = TitleBar(self)
         layout.addWidget(self.title_bar)
 
         button_row = QHBoxLayout()
         button_row.setContentsMargins(0, 0, 0, 0)
-        button_row.setSpacing(4)
+        button_row.setSpacing(3)
 
         self.btn_cursor = QPushButton(IconManager.get_icon("cursor"), "")
-        self.btn_brush = QPushButton(IconManager.get_icon("brush"), "")
+        self.brush_color_buttons: Dict[str, QPushButton] = {}
+        brush_configs = [
+            ("#000000", "黑色画笔"),
+            ("#FF0000", "红色画笔"),
+            ("#1E90FF", "蓝色画笔"),
+        ]
+        brush_buttons = []
+        for color_hex, name in brush_configs:
+            button = QPushButton(IconManager.get_brush_icon(color_hex), "")
+            button.setToolTip(name)
+            self.brush_color_buttons[color_hex.lower()] = button
+            brush_buttons.append(button)
         self.btn_shape = QPushButton(IconManager.get_icon("shape"), "")
+        self.btn_undo = QPushButton(IconManager.get_icon("undo"), "")
         self.btn_eraser = QPushButton(IconManager.get_icon("eraser"), "")
         self.btn_clear_all = QPushButton(IconManager.get_icon("clear_all"), "")
         self.btn_whiteboard = QPushButton(IconManager.get_icon("whiteboard"), "")
         self.btn_settings = QPushButton(IconManager.get_icon("settings"), "")
 
         buttons = (
-            self.btn_cursor,
-            self.btn_brush,
-            self.btn_shape,
-            self.btn_eraser,
-            self.btn_clear_all,
-            self.btn_whiteboard,
-            self.btn_settings,
+            [self.btn_cursor]
+            + brush_buttons
+            + [
+                self.btn_shape,
+                self.btn_undo,
+                self.btn_eraser,
+                self.btn_clear_all,
+                self.btn_whiteboard,
+                self.btn_settings,
+            ]
         )
         for btn in buttons:
-            btn.setIconSize(QSize(20, 20))
+            btn.setIconSize(QSize(18, 18))
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             button_row.addWidget(btn)
@@ -558,26 +598,30 @@ class FloatingToolbar(QWidget):
 
         tooltip_text = {
             self.btn_cursor: "光标",
-            self.btn_brush: "画笔",
             self.btn_shape: "图形",
+            self.btn_undo: "撤销",
             self.btn_eraser: "橡皮",
             self.btn_clear_all: "清除",
             self.btn_whiteboard: "白板（单击开关 / 双击换色）",
             self.btn_settings: "画笔设置",
         }
+        for button in brush_buttons:
+            tooltip_text[button] = button.toolTip() or "画笔"
         for btn, tip_text in tooltip_text.items():
             btn.setToolTip(tip_text)
             btn.installEventFilter(self)
 
         self.tool_buttons = QButtonGroup(self)
-        for btn in (self.btn_cursor, self.btn_brush, self.btn_shape, self.btn_eraser):
+        for btn in (self.btn_cursor, *brush_buttons, self.btn_shape, self.btn_eraser):
             btn.setCheckable(True)
             self.tool_buttons.addButton(btn)
         self.tool_buttons.setExclusive(True)
 
         self.btn_cursor.clicked.connect(lambda: self.overlay.set_mode("cursor"))
-        self.btn_brush.clicked.connect(lambda: self.overlay.set_mode("brush"))
+        for color_hex, button in zip([c for c, _ in brush_configs], brush_buttons):
+            button.clicked.connect(lambda _checked, c=color_hex: self.overlay.use_brush_color(c))
         self.btn_shape.clicked.connect(self._select_shape)
+        self.btn_undo.clicked.connect(self.overlay.undo_last_action)
         self.btn_eraser.clicked.connect(lambda: self.overlay.set_mode("eraser"))
         self.btn_clear_all.clicked.connect(self.overlay.clear_all)
         self.btn_settings.clicked.connect(self.overlay.open_pen_settings)
@@ -589,8 +633,33 @@ class FloatingToolbar(QWidget):
         # 使用单次定时器来区分白板按钮的单击与双击行为
         self._wb_click_timer.timeout.connect(self.overlay.toggle_whiteboard)
 
+        self.btn_undo.setEnabled(False)
+
         for widget in (self, container, self.title_bar):
             widget.installEventFilter(self)
+
+    def update_tool_states(self, mode: str, pen_color: QColor) -> None:
+        color_key = pen_color.name().lower()
+        for hex_key, button in self.brush_color_buttons.items():
+            prev = button.blockSignals(True)
+            button.setChecked(mode == "brush" and hex_key == color_key)
+            button.blockSignals(prev)
+        for tool, button in (
+            ("cursor", self.btn_cursor),
+            ("shape", self.btn_shape),
+            ("eraser", self.btn_eraser),
+        ):
+            prev = button.blockSignals(True)
+            button.setChecked(mode == tool)
+            button.blockSignals(prev)
+        if mode == "brush" and color_key not in self.brush_color_buttons:
+            for button in (self.btn_cursor, self.btn_shape, self.btn_eraser):
+                prev = button.blockSignals(True)
+                button.setChecked(False)
+                button.blockSignals(prev)
+
+    def update_undo_state(self, enabled: bool) -> None:
+        self.btn_undo.setEnabled(enabled)
 
     def eventFilter(self, obj, event):
         event_type = event.type()
@@ -656,8 +725,11 @@ class OverlayWindow(QWidget):
         self.setMouseTracking(True)
 
         self._build_scene()
+        self.history: List[QPixmap] = []
+        self._history_limit = 30
         self.toolbar = FloatingToolbar(self, self.settings_manager)
         self.set_mode("brush", initial=True)
+        self.toolbar.update_undo_state(False)
 
     def raise_toolbar(self) -> None:
         if getattr(self, "toolbar", None) is not None:
@@ -725,9 +797,7 @@ class OverlayWindow(QWidget):
     def update_toolbar_state(self) -> None:
         if not getattr(self, 'toolbar', None):
             return
-        m = {"cursor": self.toolbar.btn_cursor, "brush": self.toolbar.btn_brush, "shape": self.toolbar.btn_shape, "eraser": self.toolbar.btn_eraser}
-        for k, b in m.items():
-            prev = b.blockSignals(True); b.setChecked(self.mode == k); b.blockSignals(prev)
+        self.toolbar.update_tool_states(self.mode, self.pen_color)
 
     def update_cursor(self) -> None:
         if self.mode == "cursor":
@@ -764,11 +834,47 @@ class OverlayWindow(QWidget):
             if not self.isVisible():
                 self.show()
 
+    def _push_history(self) -> None:
+        if not isinstance(self.canvas, QPixmap):
+            return
+        self.history.append(self.canvas.copy())
+        if len(self.history) > self._history_limit:
+            self.history.pop(0)
+        self._update_undo_button()
+
+    def _update_undo_button(self) -> None:
+        if getattr(self, "toolbar", None):
+            self.toolbar.update_undo_state(bool(self.history))
+
     def clear_all(self) -> None:
+        self._push_history()
         self.canvas.fill(Qt.GlobalColor.transparent)
         self.temp_canvas.fill(Qt.GlobalColor.transparent)
         self.update()
         self.raise_toolbar()
+        self._update_undo_button()
+
+    def use_brush_color(self, color_hex: str) -> None:
+        color = QColor(color_hex)
+        if not color.isValid():
+            return
+        self.pen_color = color
+        self.set_mode("brush")
+
+    def undo_last_action(self) -> None:
+        if not self.history:
+            return
+        last = self.history.pop()
+        if isinstance(last, QPixmap):
+            self.canvas = last
+        else:
+            self._update_undo_button()
+            return
+        self.temp_canvas.fill(Qt.GlobalColor.transparent)
+        self.drawing = False
+        self.update()
+        self.raise_toolbar()
+        self._update_undo_button()
 
     def save_settings(self) -> None:
         settings = self.settings_manager.load_settings()
@@ -789,6 +895,7 @@ class OverlayWindow(QWidget):
     # ---- 画图事件 ----
     def mousePressEvent(self, e) -> None:
         if e.button() == Qt.MouseButton.LeftButton and self.mode != "cursor":
+            self._push_history()
             self.drawing = True
             pointf = e.position(); self.last_point = pointf; self.prev_point = pointf
             self.last_width = self.pen_size * 0.4
@@ -1458,16 +1565,16 @@ class LauncherWindow(QWidget):
             """
             QWidget#launcherContainer {
                 background-color: rgba(28, 29, 32, 232);
-                border-radius: 10px;
-                border: 1px solid rgba(255, 255, 255, 45);
+                border-radius: 9px;
+                border: 1px solid rgba(255, 255, 255, 40);
             }
             QPushButton {
                 color: #f1f3f4;
                 background-color: rgba(60, 64, 67, 230);
-                border: 1px solid rgba(255, 255, 255, 30);
+                border: 1px solid rgba(255, 255, 255, 35);
                 border-radius: 6px;
-                padding: 4px 10px;
-                min-height: 28px;
+                padding: 3px 9px;
+                min-height: 26px;
             }
             QPushButton:hover {
                 background-color: rgba(138, 180, 248, 240);
@@ -1493,19 +1600,19 @@ class LauncherWindow(QWidget):
         )
         container = QWidget(self); container.setObjectName("launcherContainer")
         layout = QVBoxLayout(self); layout.setContentsMargins(0, 0, 0, 0); layout.addWidget(container)
-        v = QVBoxLayout(container); v.setContentsMargins(10, 10, 10, 10); v.setSpacing(6)
+        v = QVBoxLayout(container); v.setContentsMargins(8, 8, 8, 8); v.setSpacing(5)
 
-        row = QHBoxLayout(); row.setSpacing(4)
+        row = QHBoxLayout(); row.setSpacing(3)
         self.paint_button = QPushButton("画笔"); self.paint_button.clicked.connect(self.toggle_paint); row.addWidget(self.paint_button)
         self.roll_call_button = QPushButton("点名/计时"); self.roll_call_button.clicked.connect(self.toggle_roll_call); row.addWidget(self.roll_call_button)
         v.addLayout(row)
 
-        bottom = QHBoxLayout(); bottom.setSpacing(4)
+        bottom = QHBoxLayout(); bottom.setSpacing(3)
         self.autostart_check = QCheckBox("开机启动"); self.autostart_check.stateChanged.connect(self.toggle_autostart); bottom.addWidget(self.autostart_check)
 
-        right = QHBoxLayout(); right.setSpacing(4)
-        self.about_button = QPushButton("关于"); self.about_button.setFixedWidth(44); self.about_button.clicked.connect(self.show_about); right.addWidget(self.about_button)
-        self.exit_button = QPushButton("退出"); self.exit_button.setFixedWidth(44)
+        right = QHBoxLayout(); right.setSpacing(3)
+        self.about_button = QPushButton("关于"); self.about_button.setFixedWidth(42); self.about_button.clicked.connect(self.show_about); right.addWidget(self.about_button)
+        self.exit_button = QPushButton("退出"); self.exit_button.setFixedWidth(42)
         self.exit_button.clicked.connect(QApplication.instance().quit)
         right.addWidget(self.exit_button)
         bottom.addLayout(right); v.addLayout(bottom)
