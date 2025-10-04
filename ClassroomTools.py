@@ -2045,6 +2045,26 @@ class LauncherWindow(QWidget):
         if self._minimized_on_start:
             QTimer.singleShot(0, self._restore_minimized_state)
 
+    def _action_button_width(self) -> int:
+        """计算“画笔”与“点名/计时”按钮的统一宽度，保证观感一致。"""
+
+        paint_metrics = QFontMetrics(self.paint_button.font())
+        roll_metrics = QFontMetrics(self.roll_call_button.font())
+        paint_texts = ["画笔", "隐藏画笔"]
+        roll_texts = ["点名/计时", "显示点名", "隐藏点名"]
+        max_width = max(
+            max(paint_metrics.horizontalAdvance(text) for text in paint_texts),
+            max(roll_metrics.horizontalAdvance(text) for text in roll_texts),
+        )
+        return max_width + 28
+
+    def showEvent(self, e) -> None:
+        super().showEvent(e)
+        ensure_widget_within_screen(self)
+        self._last_position = self.pos()
+        if self._minimized_on_start:
+            QTimer.singleShot(0, self._restore_minimized_state)
+
     def eventFilter(self, obj, e) -> bool:
         if e.type() == QEvent.Type.MouseButtonPress and e.button() == Qt.MouseButton.LeftButton:
             self._dragging = True; self._drag_offset = e.globalPosition().toPoint() - self.pos()
