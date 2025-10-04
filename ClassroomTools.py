@@ -68,8 +68,8 @@ class IconManager:
     _icons: Dict[str, str] = {
         "cursor": "PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCc+CiAgICA8cGF0aCBmaWxsPScjZjFmM2Y0JyBkPSdNNCAzLjMgMTEuNCAyMWwxLjgtNS44IDYuMy0yLjF6Jy8+CiAgICA8cGF0aCBmaWxsPScjOGFiNGY4JyBkPSdtMTIuNiAxNC40IDQuOCA0LjgtMi4xIDIuMS00LjItNC4yeicvPgo8L3N2Zz4=",
         "shape": "PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCc+CiAgICA8cmVjdCB4PSczLjUnIHk9JzMuNScgd2lkdGg9JzknIGhlaWdodD0nOScgcng9JzInIGZpbGw9JyNmMWYzZjQnLz4KICAgIDxjaXJjbGUgY3g9JzE2LjUnIGN5PScxNi41JyByPSc1LjUnIGZpbGw9J25vbmUnIHN0cm9rZT0nI2YxZjNmNCcgc3Ryb2tlLXdpZHRoPScxLjgnLz4KICAgIDxjaXJjbGUgY3g9JzE2LjUnIGN5PScxNi41JyByPSczLjUnIGZpbGw9JyM4YWI0ZjgnIGZpbGwtb3BhY2l0eT0nMC4zNScvPgo8L3N2Zz4=",
-        "eraser": "PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCc+CiAgPHBhdGggZD0nTTEzIDZsMy0zIDQgNC0zIDN6JyBmaWxsPScjZGFkY2UwJy8+CiAgPHBhdGggZD0nTTQuNiAxNC42IDEzIDZsNCA0LTguNCA4LjZINmExIDEgMCAwIDEtLjgtMC4zbC0xLjItMS4yYTEgMSAwIDAgMSAwLTEuNXonIGZpbGw9JyNmMjhiODInLz4KICA8cGF0aCBkPSdNMy42IDE3LjhhMS44IDEuOCAwIDAgMCAwIDIuNWwxLjIgMS4yaDYuNmwzLjYtMy42LTIuMS0yLjEtMy40IDMuNkg2YTEgMSAwIDAgMS0uNy0wLjN6JyBmaWxsPScjZmRkNjYzJy8+CiAgPHBhdGggZD0nTTQuOCAyMC40aDYuOCcgc3Ryb2tlPScjNWY2MzY4JyBzdHJva2Utd2lkdGg9JzEuNicgc3Ryb2tlLWxpbmVjYXA9J3JvdW5kJy8+Cjwvc3ZnPg==",
-        "clear_all": "PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCc+CiAgPHBhdGggZD0nTTUuMiA3aDEzLjZhMS42IDEuNiAwIDAgMSAxLjYgMS42VjE5YTIgMiAwIDAgMS0yIDJINS42YTIgMiAwIDAgMS0yLTJWOC42QTEuNiAxLjYgMCAwIDEgNS4yIDd6JyBmaWxsPSdub25lJyBzdHJva2U9JyM1ZjYzNjgnIHN0cm9rZS13aWR0aD0nMS42JyBzdHJva2UtbGluZWpvaW49J3JvdW5kJy8+CiAgPHBhdGggZD0nTTcgNyA4LjQgNC4xQTIgMiAwIDAgMSAxMC4yIDNoMy42YTIgMiAwIDAgMSAxLjggMS4xTDE3IDcnIGZpbGw9JyNlOGYwZmUnIHN0cm9rZT0nIzVmNjM2OCcgc3Ryb2tlLXdpZHRoPScxLjYnIHN0cm9rZS1saW5lam9pbj0ncm91bmQnLz4KICA8cGF0aCBkPSdNOSAxMS4ydjUuNk0xMiAxMS4ydjUuNk0xNSAxMS4ydjUuNicgc3Ryb2tlPScjMWE3M2U4JyBzdHJva2Utd2lkdGg9JzEuNicgc3Ryb2tlLWxpbmVjYXA9J3JvdW5kJy8+Cjwvc3ZnPg==",
+        "eraser": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+CiAgPHBhdGggZD0iTTQuNiAxNC4yIDExLjMgNy40YTIgMiAwIDAgMSAyLjggMGwzLjUgMy41YTIgMiAwIDAgMSAwIDIuOGwtNC44IDQuOEg5LjRhMiAyIDAgMCAxLTEuNC0uNmwtMy0zYTIgMiAwIDAgMSAwLTIuOHoiIGZpbGw9IiNmNGE5YjciLz4KICA8cGF0aCBkPSJNOS4yIDE5LjZoNi4xYy42IDAgMS4xLS4yIDEuNS0uNmwxLjctMS43IiBmaWxsPSJub25lIiBzdHJva2U9IiM1ZjYzNjgiIHN0cm9rZS13aWR0aD0iMS42IiBzdHJva2UtbGluZWNhcD0icm91bmQiLz4KICA8cGF0aCBkPSJtNy4yIDEyLjMgNC41IDQuNSIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjZmZmZmZmIiBzdHJva2Utd2lkdGg9IjEuNiIgc3Rya2UtbGluZWNhcD0icm91bmQiLz4KICA8cGF0aCBkPSJNMy42IDE4LjZoNiIgc3Ryb2tlPSIjNWY2MzY4IiBzdHJva2Utd2lkdGg9IjEuNiIgc3Rya2UtbGluZWNhcD0icm91bmQiLz4KPC9zdmc+",
+        "clear_all": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+CiAgPGRlZnM+CiAgICA8bGluZWFyR3JhZGllbnQgaWQ9ImciIHgxPSIwIiB4Mj0iMCIgeTE9IjAiIHkyPSIxIj4KICAgICAgPHN0b3Agb2Zmc2V0PSIwIiBzdG9wLWNvbG9yPSIjOGFiNGY4Ii8+CiAgICAgIDxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iIzFhNzNlOCIvPgogICAgPC9saW5lYXJHcmFkaWVudD4KICA8L2RlZnM+CiAgPHBhdGggZD0iTTUuNSA4aDEzbC0uOSAxMS4yQTIgMiAwIDAgMSAxNS42IDIxSDguNGEyIDIgMCAwIDEtMS45LTEuOEw1LjUgOHoiIGZpbGw9InVybCgjZykiIHN0cm9rZT0iIzFhNzNlOCIgc3Rya2Utd2lkdGg9IjEuMiIvPgogIDxwYXRoIGQ9Ik05LjUgNS41IDEwLjMgNGgzLjRsLjggMS41aDQuNSIgZmlsbD0ibm9uZSIgc3Rya2U9IiM1ZjYzNjgiIHN0cm9rZS13aWR0aD0iMS42IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz4KICA8cGF0aCBkPSJNNSA1LjVoNCIgc3Ryb2tlPSIjNWY2MzY4IiBzdHJva2Utd2lkdGg9IjEuNiIgc3Rya2UtbGluZWNhcD0icm91bmQiLz4KICA8cGF0aCBkPSJNMTAgMTEuMnY2LjFNMTQgMTEuMnY2LjEiIHN0cm9rZT0iI2ZmZmZmZiIgc3Rya2Utd2lkdGg9IjEuNCIgc3Rya2UtbGluZWNhcD0icm91bmQiLz4KICA8cGF0aCBkPSJNOC4yIDExLjJ2Ni4xIiBzdHJva2U9IiMzYjc4ZTciIHN0cm9rZS13aWR0aD0iMS40IiBzdHJva2UtbGluZWNhcD0icm91bmQiIG9wYWNpdHk9Ii43Ii8+CiAgPHBhdGggZD0iTTE1LjggMTEuMnY2LjEiIHN0cm9rZT0iIzNiNzhlNyIgc3Rya2Utd2lkdGg9IjEuNCIgc3Rya2UtbGluZWNhcD0icm91bmQiIG9wYWNpdHk9Ii43Ii8+CiAgPHBhdGggZD0iTTYuMiAzLjYgNy40IDIuNCIgc3Ryb2tlPSIjZmJiYzA0IiBzdHJva2Utd2lkdGg9IjEuNCIgc3Rya2UtbGluZWNhcD0icm91bmQiLz4KICA8cGF0aCBkPSJtMTguNCAzLjQgMS40LTEuNCIgc3Rya2U9IiMzNGE4NTMiIHN0cm9rZS13aWR0aD0iMS40IiBzdHJva2UtbGluZWNhcD0icm91bmQiLz4KPC9zdmc+",
         "settings": "PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCc+CiAgICA8Y2lyY2xlIGN4PScxMicgY3k9JzEyJyByPSczLjUnIGZpbGw9JyM4YWI0ZjgnLz4KICAgIDxwYXRoIGZpbGw9J25vbmUnIHN0cm9rZT0nI2YxZjNmNCcgc3Ryb2tlLXdpZHRoPScxLjYnIHN0cm9rZS1saW5lY2FwPSdyb3VuZCcgc3Ryb2tlLWxpbmVqb2luPSdyb3VuZCcKICAgICAgICBkPSdNMTIgNC41VjIuOG0wIDE4LjR2LTEuN203LjEtNy41SDIwbS0xOCAwaDEuNk0xNy42IDZsMS4yLTEuMk01LjIgMTguNCA2LjQgMTcuMk02LjQgNiA1LjIgNC44bTEzLjYgMTMuNi0xLjItMS4yJy8+Cjwvc3ZnPg==",
         "whiteboard": "PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCc+CiAgICA8cmVjdCB4PSczJyB5PSc0JyB3aWR0aD0nMTgnIGhlaWdodD0nMTInIHJ4PScyJyByeT0nMicgZmlsbD0nI2YxZjNmNCcgZmlsbC1vcGFjaXR5PScwLjEyJyBzdHJva2U9JyNmMWYzZjQnIHN0cm9rZS13aWR0aD0nMS42Jy8+CiAgICA8cGF0aCBkPSdtNyAxOCA1LTUgNSA1JyBmaWxsPSdub25lJyBzdHJva2U9JyM4YWI0ZjgnIHN0cm9rZS13aWR0aD0nMS44JyBzdHJva2UtbGluZWNhcD0ncm91bmQnIHN0cm9rZS1saW5lam9pbj0ncm91bmQnLz4KICAgIDxwYXRoIGQ9J004IDloOG0tOCAzaDUnIHN0cm9rZT0nI2YxZjNmNCcgc3Ryb2tlLXdpZHRoPScxLjYnIHN0cm9rZS1saW5lY2FwPSdyb3VuZCcvPgo8L3N2Zz4=",
         "undo": "PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCc+CiAgPHBhdGggZmlsbD0nI2YxZjNmNCcgZD0nTTguNCA1LjJMMyAxMC42bDUuNCA1LjQgMS40LTEuNC0yLjMtMi4zaDUuNWMzLjIgMCA1LjggMi42IDUuOCA1LjggMCAuNS0uMSAxLS4yIDEuNWwyLjEuNmMuMi0uNy4zLTEuNC4zLTIuMSAwLTQuNC0zLjYtOC04LThINy41bDIuMy0yLjMtMS40LTEuNHonLz4KPC9zdmc+",
@@ -496,7 +496,7 @@ class TitleBar(QWidget):
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(6, 0, 6, 0)
-        title = QLabel("屏幕批注")
+        title = QLabel("屏幕画笔")
         font = title.font()
         font.setBold(True)
         title.setFont(font)
@@ -579,6 +579,28 @@ class FloatingToolbar(QWidget):
                 background: rgba(138, 180, 248, 255);
                 color: #202124;
             }
+            QPushButton#eraserButton {
+                background: rgba(241, 243, 244, 235);
+                color: #3c4043;
+                border-color: rgba(138, 180, 248, 170);
+            }
+            QPushButton#eraserButton:hover,
+            QPushButton#eraserButton:checked {
+                background: rgba(202, 225, 255, 255);
+                border-color: #1a73e8;
+                color: #174ea6;
+            }
+            QPushButton#clearButton {
+                background: rgba(255, 236, 232, 240);
+                color: #a03a1e;
+                border-color: rgba(255, 173, 153, 230);
+            }
+            QPushButton#clearButton:hover,
+            QPushButton#clearButton:checked {
+                background: rgba(255, 210, 204, 255);
+                border-color: rgba(255, 138, 101, 255);
+                color: #5f2121;
+            }
             #whiteboardButtonActive {
                 background: rgba(255, 214, 102, 240);
                 border-color: rgba(251, 188, 5, 255);
@@ -609,7 +631,7 @@ class FloatingToolbar(QWidget):
             ("#000000", "黑色画笔"),
             ("#FF0000", "红色画笔"),
             ("#1E90FF", "蓝色画笔"),
-        ]
+        ]  # 预设的高频画笔颜色
         brush_buttons = []
         for color_hex, name in brush_configs:
             button = QPushButton(IconManager.get_brush_icon(color_hex), "")
@@ -619,7 +641,9 @@ class FloatingToolbar(QWidget):
         self.btn_shape = QPushButton(IconManager.get_icon("shape"), "")
         self.btn_undo = QPushButton(IconManager.get_icon("undo"), "")
         self.btn_eraser = QPushButton(IconManager.get_icon("eraser"), "")
+        self.btn_eraser.setObjectName("eraserButton")
         self.btn_clear_all = QPushButton(IconManager.get_icon("clear_all"), "")
+        self.btn_clear_all.setObjectName("clearButton")
         self.btn_whiteboard = QPushButton(IconManager.get_icon("whiteboard"), "")
         self.btn_settings = QPushButton(IconManager.get_icon("settings"), "")
 
@@ -867,6 +891,7 @@ class OverlayWindow(QWidget):
         self.set_mode("brush")
 
     def toggle_eraser_mode(self) -> None:
+        """切换橡皮模式；再次点击会恢复上一次的画笔配置。"""
         if self.mode == "eraser":
             self._restore_brush_mode()
         else:
@@ -921,6 +946,7 @@ class OverlayWindow(QWidget):
             self.toolbar.update_undo_state(bool(self.history))
 
     def clear_all(self) -> None:
+        """清除整块画布，同时根据需要恢复画笔模式。"""
         restore_needed = self.mode != "brush"
         self._push_history()
         self.canvas.fill(Qt.GlobalColor.transparent)
@@ -934,6 +960,7 @@ class OverlayWindow(QWidget):
         self._update_undo_button()
 
     def use_brush_color(self, color_hex: str) -> None:
+        """根据传入的十六进制颜色值启用画笔模式。"""
         color = QColor(color_hex)
         if not color.isValid():
             return
@@ -1258,8 +1285,19 @@ class RollCallTimerWindow(QWidget):
         else:
             self.speech_enabled = False
 
-        db = QFontDatabase()
-        families = set(db.families())
+        # QFontDatabase 在 Qt 6 中以静态方法为主，这里直接调用类方法避免实例化失败
+        families_list = []
+        get_families = getattr(QFontDatabase, "families", None)
+        if callable(get_families):
+            try:
+                families_list = list(get_families())
+            except TypeError:
+                # 个别绑定版本可能要求显式写入枚举参数
+                try:
+                    families_list = list(get_families(QFontDatabase.WritingSystem.Any))  # type: ignore[arg-type]
+                except Exception:
+                    families_list = []
+        families = set(families_list)
         self.name_font_family = "楷体" if "楷体" in families else ("KaiTi" if "KaiTi" in families else "Microsoft YaHei UI")
 
         self._build_ui()
@@ -1776,6 +1814,7 @@ class LauncherWindow(QWidget):
         self.settings_manager.save_settings(settings)
 
     def toggle_paint(self) -> None:
+        """打开或隐藏屏幕画笔覆盖层。"""
         if self.overlay is None: self.overlay = OverlayWindow(self.settings_manager)
         if self.overlay.isVisible():
             self.overlay.hide_overlay(); self.paint_button.setText("画笔")
@@ -1783,6 +1822,7 @@ class LauncherWindow(QWidget):
             self.overlay.show_overlay(); self.paint_button.setText("隐藏画笔")
 
     def toggle_roll_call(self) -> None:
+        """切换点名/计时窗口的显示状态，必要时先创建窗口。"""
         if self.student_data is None:
             QMessageBox.warning(self, "提示", "学生数据加载失败，无法打开点名器。"); return
         if self.roll_call_window is None:
@@ -1849,6 +1889,7 @@ class LauncherWindow(QWidget):
 
 # ---------- 入口 ----------
 def main() -> None:
+    """应用程序入口：初始化 DPI、加载设置并启动启动器窗口。"""
     ensure_high_dpi_awareness()
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
@@ -1862,5 +1903,8 @@ def main() -> None:
     sys.exit(app.exec())
 
 
+# Nuitka 打包指令（根据当前依赖整理的推荐参数，保持在单行便于复制）：
+# 单文件：python -m nuitka --onefile --enable-plugin=pyqt6 --include-qt-plugins=sensible --windows-disable-console --windows-icon-from-ico=icon.ico --include-data-file=students.xlsx=students.xlsx --include-data-file=settings.ini=settings.ini ClassroomTools.py
+# 独立目录：python -m nuitka --standalone --enable-plugin=pyqt6 --include-qt-plugins=sensible --windows-disable-console --windows-icon-from-ico=icon.ico --output-dir=dist --include-data-file=students.xlsx=students.xlsx --include-data-file=settings.ini=settings.ini ClassroomTools.py
 if __name__ == "__main__":
     main()
