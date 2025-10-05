@@ -1324,6 +1324,8 @@ class RollCallTimerWindow(QWidget):
         self._group_all_indices: Dict[str, List[int]] = {}
         self._group_remaining_indices: Dict[str, List[int]] = {}
         self._group_last_student: Dict[str, Optional[int]] = {}
+        # 记录各分组初始的随机顺序，便于在界面切换时保持未点名名单不被重新洗牌
+        self._group_initial_sequences: Dict[str, List[int]] = {}
         # 记录每个分组已点过名的学生索引，便于核对剩余名单
         self._group_drawn_history: Dict[str, set[int]] = {}
         # 统一维护一个全局已点名集合，确保“全部”分组与子分组状态一致
@@ -1745,6 +1747,7 @@ class RollCallTimerWindow(QWidget):
         remaining: Dict[str, List[int]] = {}
         last_student: Dict[str, Optional[int]] = {}
         student_groups: Dict[int, set[str]] = {}
+        initial_sequences: Dict[str, List[int]] = {}
 
         if self.student_data.empty:
             all_indices["全部"] = []
@@ -1765,11 +1768,13 @@ class RollCallTimerWindow(QWidget):
             pool = list(indices)
             random.shuffle(pool)
             remaining[group_name] = pool
+            initial_sequences[group_name] = list(pool)
             last_student[group_name] = None
 
         self._group_all_indices = all_indices
         self._group_remaining_indices = remaining
         self._group_last_student = last_student
+        self._group_initial_sequences = initial_sequences
         self._student_groups = student_groups
         self._group_drawn_history = {group: set() for group in all_indices}
         # “全部”分组直接引用全局集合，避免重复维护两份数据造成不一致
@@ -1847,6 +1852,9 @@ class RollCallTimerWindow(QWidget):
                 except (TypeError, ValueError):
                     continue
             drawn = {idx for idx in normalized_base if idx not in remaining_set}
+            seq = list(self._group_remaining_indices.get(group, []))
+            seq.extend(idx for idx in normalized_base if idx not in seq)
+            self._group_initial_sequences[group] = seq
             if group == "全部":
                 # “全部”分组的已点名集合以全局集合为准
                 self._global_drawn_students.update(drawn)
@@ -1880,6 +1888,10 @@ class RollCallTimerWindow(QWidget):
                 entry = self._student_groups.setdefault(int(idx), set())
                 entry.add(group_name)
                 entry.add("全部")
+            # 新增分组时同步生成初始顺序
+            shuffled = list(base_list)
+            random.shuffle(shuffled)
+            self._group_initial_sequences[group_name] = shuffled
 
         base_indices: List[int] = []
         for value in self._group_all_indices.get(group_name, []):
@@ -1900,26 +1912,34 @@ class RollCallTimerWindow(QWidget):
             random.shuffle(pool)
             self._group_remaining_indices[group_name] = pool
             self._group_last_student.setdefault(group_name, None)
+            self._group_initial_sequences[group_name] = list(pool)
             return
 
         raw_pool = self._group_remaining_indices.get(group_name, [])
         normalized_pool: List[int] = []
+        seen: set[int] = set()
         for value in raw_pool:
             try:
                 idx = int(value)
             except (TypeError, ValueError):
                 continue
-            if idx in base_indices and idx not in normalized_pool:
+            if idx in base_indices and idx not in seen and idx not in reference_drawn:
                 normalized_pool.append(idx)
+                seen.add(idx)
 
-        # 移除已点过名的学生，避免误判全部完成
-        filtered_pool = [idx for idx in normalized_pool if idx not in reference_drawn]
-        missing = [idx for idx in base_indices if idx not in reference_drawn and idx not in filtered_pool]
-        if missing:
-            random.shuffle(missing)
-            filtered_pool.extend(missing)
+        source_order = self._group_initial_sequences.get(group_name)
+        if source_order is None:
+            # 如果未记录初始顺序，则退回数据原有顺序
+            source_order = list(base_indices)
+            self._group_initial_sequences[group_name] = list(source_order)
 
-        self._group_remaining_indices[group_name] = filtered_pool
+        for idx in source_order:
+            if idx in reference_drawn or idx in seen or idx not in base_indices:
+                continue
+            normalized_pool.append(idx)
+            seen.add(idx)
+
+        self._group_remaining_indices[group_name] = normalized_pool
         self._group_last_student.setdefault(group_name, None)
 
     def _mark_student_drawn(self, student_index: int) -> None:
