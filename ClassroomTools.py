@@ -1310,6 +1310,7 @@ class RollCallTimerWindow(QWidget):
         self._group_all_indices: Dict[str, List[int]] = {}
         self._group_remaining_indices: Dict[str, List[int]] = {}
         self._group_last_student: Dict[str, Optional[int]] = {}
+        self._student_groups: Dict[int, set[str]] = {}
         self._rebuild_group_indices()
         self._restore_group_state(s)
         self.timer_seconds_left = max(0, _get_int("timer_seconds_left", self.timer_countdown_minutes * 60 + self.timer_countdown_seconds))
@@ -1651,6 +1652,7 @@ class RollCallTimerWindow(QWidget):
             return
         self.current_student_index = pool.pop()
         self._group_last_student[group_name] = self.current_student_index
+        self._mark_student_drawn(self.current_student_index)
         self.display_current_student()
         if speak and self.speech_enabled and self.tts_manager and self.tts_manager.available:
             stu = self.student_data.loc[self.current_student_index]
@@ -1663,17 +1665,22 @@ class RollCallTimerWindow(QWidget):
         all_indices: Dict[str, List[int]] = {}
         remaining: Dict[str, List[int]] = {}
         last_student: Dict[str, Optional[int]] = {}
+        student_groups: Dict[int, set[str]] = {}
 
         if self.student_data.empty:
             all_indices["全部"] = []
         else:
             all_indices["全部"] = list(self.student_data.index)
+            for idx in all_indices["全部"]:
+                student_groups.setdefault(int(idx), set()).add("全部")
             group_series = self.student_data["分组"].astype(str).str.strip().str.upper()
             for group_name in self.groups:
                 if group_name == "全部":
                     continue
                 mask = group_series == group_name
                 all_indices[group_name] = list(self.student_data[mask].index)
+                for idx in all_indices[group_name]:
+                    student_groups.setdefault(int(idx), set()).add(group_name)
 
         for group_name, indices in all_indices.items():
             pool = list(indices)
@@ -1684,6 +1691,7 @@ class RollCallTimerWindow(QWidget):
         self._group_all_indices = all_indices
         self._group_remaining_indices = remaining
         self._group_last_student = last_student
+        self._student_groups = student_groups
 
     def _restore_group_state(self, section: Mapping[str, str]) -> None:
         """从配置中恢复各分组剩余学生池，保持未抽学生不重复。"""
@@ -1747,6 +1755,10 @@ class RollCallTimerWindow(QWidget):
             self._group_all_indices[group_name] = base_list
             self._group_remaining_indices[group_name] = []
             self._group_last_student.setdefault(group_name, None)
+            for idx in base_list:
+                entry = self._student_groups.setdefault(int(idx), set())
+                entry.add(group_name)
+                entry.add("全部")
 
         if force_reset or group_name not in self._group_remaining_indices:
             pool = list(self._group_all_indices.get(group_name, []))
@@ -1756,6 +1768,19 @@ class RollCallTimerWindow(QWidget):
             return
 
         self._group_last_student.setdefault(group_name, None)
+
+    def _mark_student_drawn(self, student_index: int) -> None:
+        """抽中学生后，从所有关联分组的候选列表中移除该学生。"""
+
+        groups = self._student_groups.get(int(student_index))
+        if not groups:
+            return
+        for group in groups:
+            pool = self._group_remaining_indices.get(group)
+            if not pool:
+                continue
+            if student_index in pool:
+                self._group_remaining_indices[group] = [idx for idx in pool if idx != student_index]
 
     def display_current_student(self) -> None:
         if self.current_student_index is None:
