@@ -1785,18 +1785,59 @@ class RollCallTimerWindow(QWidget):
         return True
 
     def _reset_roll_call_state(self) -> None:
-        """清空点名历史并重新洗牌，保持界面占位符显示。"""
+        """清空全部点名历史并重新洗牌。"""
 
         self._rebuild_group_indices()
         self._ensure_group_pool(self.current_group_name)
+
+    def reset_roll_call_pools(self) -> None:
+        """根据当前分组执行重置：子分组独立重置，“全部”重置所有。"""
+
+        group_name = self.current_group_name
+        if group_name == "全部":
+            self._reset_roll_call_state()
+        else:
+            self._reset_single_group(group_name)
         self.current_student_index = None
         self.display_current_student()
         self.save_settings()
 
-    def reset_roll_call_pools(self) -> None:
-        """手动点击“重置”按钮时执行，直接重新洗牌。"""
+    def _reset_single_group(self, group_name: str) -> None:
+        """仅重置指定分组，同时保持其它分组及全局状态不变。"""
 
-        self._reset_roll_call_state()
+        if group_name == "全部":
+            return
+        base_indices_raw = self._group_all_indices.get(group_name)
+        if base_indices_raw is None:
+            return
+        base_indices: List[int] = []
+        for value in base_indices_raw:
+            try:
+                base_indices.append(int(value))
+            except (TypeError, ValueError):
+                continue
+        shuffled = list(base_indices)
+        random.shuffle(shuffled)
+        self._group_remaining_indices[group_name] = shuffled
+        self._group_initial_sequences[group_name] = list(shuffled)
+        self._group_last_student[group_name] = None
+
+        history = self._group_drawn_history.setdefault(group_name, set())
+        if history:
+            for idx in list(history):
+                self._remove_from_global_history(idx, ignore_group=group_name)
+            history.clear()
+
+        last_all = self._group_last_student.get("全部")
+        if last_all is not None:
+            try:
+                last_all_key = int(last_all)
+            except (TypeError, ValueError):
+                last_all_key = None
+            if last_all_key is not None and last_all_key not in self._global_drawn_students:
+                self._group_last_student["全部"] = None
+
+        self._refresh_all_group_pool()
 
     def _rebuild_group_indices(self) -> None:
         """重新构建各分组的学生索引池。"""
@@ -1843,6 +1884,20 @@ class RollCallTimerWindow(QWidget):
             self._group_drawn_history["全部"] = self._global_drawn_students
 
         self._refresh_all_group_pool()
+
+    def _remove_from_global_history(self, student_index: int, ignore_group: Optional[str] = None) -> None:
+        """若学生未在其它分组被点名，则从全局记录中移除。"""
+
+        try:
+            student_key = int(student_index)
+        except (TypeError, ValueError):
+            return
+        for group, history in self._group_drawn_history.items():
+            if group == "全部" or group == ignore_group:
+                continue
+            if student_key in history:
+                return
+        self._global_drawn_students.discard(student_key)
 
     def _restore_group_state(self, section: Mapping[str, str]) -> None:
         """从配置中恢复各分组剩余学生池，保持未抽学生不重复。"""
