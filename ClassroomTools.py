@@ -1661,10 +1661,8 @@ class RollCallTimerWindow(QWidget):
                     data = 0.4 * np.sin(2 * np.pi * frequency * t)
                     sd.play(data.astype(np.float32), fs); sd.wait()
                 except Exception:
-                    QApplication.beep()
+                    pass
             threading.Thread(target=_play, daemon=True).start()
-        else:
-            QApplication.beep()
 
     def on_group_change(self, group_name: Optional[str] = None, initial: bool = False) -> None:
         if group_name is None:
@@ -1726,7 +1724,7 @@ class RollCallTimerWindow(QWidget):
                 return False
         return True
 
-    def _reset_roll_call_state(self, *, show_message: bool = False) -> None:
+    def _reset_roll_call_state(self) -> None:
         """清空点名历史并重新洗牌，保持界面占位符显示。"""
 
         self._rebuild_group_indices()
@@ -1734,13 +1732,11 @@ class RollCallTimerWindow(QWidget):
         self.current_student_index = None
         self.display_current_student()
         self.save_settings()
-        if show_message:
-            show_quiet_information(self, "已重新开始新一轮点名。")
 
     def reset_roll_call_pools(self) -> None:
         """手动点击“重置”按钮时执行，直接重新洗牌。"""
 
-        self._reset_roll_call_state(show_message=True)
+        self._reset_roll_call_state()
 
     def _rebuild_group_indices(self) -> None:
         """重新构建各分组的学生索引池。"""
