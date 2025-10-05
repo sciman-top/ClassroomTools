@@ -1326,6 +1326,8 @@ class RollCallTimerWindow(QWidget):
         self._group_last_student: Dict[str, Optional[int]] = {}
         # 记录每个分组已点过名的学生索引，便于核对剩余名单
         self._group_drawn_history: Dict[str, set[int]] = {}
+        # 统一维护一个全局已点名集合，确保“全部”分组与子分组状态一致
+        self._global_drawn_students: set[int] = set()
         self._student_groups: Dict[int, set[str]] = {}
         self._rebuild_group_indices()
         self._restore_group_state(s)
@@ -1392,6 +1394,14 @@ class RollCallTimerWindow(QWidget):
         self.mode_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         top.addWidget(self.mode_button, 0, Qt.AlignmentFlag.AlignLeft)
 
+        self.group_label = QLabel("分组")
+        self.group_label.setFont(QFont("Microsoft YaHei UI", 9, QFont.Weight.Medium))
+        self.group_label.setStyleSheet("color: #3c4043;")
+        self.group_label.setFixedHeight(28)
+        self.group_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        self.group_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        top.addWidget(self.group_label, 0, Qt.AlignmentFlag.AlignLeft)
+
         self.group_combo = QComboBox(); self.group_combo.addItems(self.groups); self.group_combo.setCurrentText(self.current_group_name)
         self.group_combo.setFixedHeight(28)
         self.group_combo.setMinimumContentsLength(4)
@@ -1414,6 +1424,13 @@ class RollCallTimerWindow(QWidget):
         self.group_stack.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         top.addWidget(self.group_stack, 0, Qt.AlignmentFlag.AlignLeft)
         self.group_combo.view().setMinimumWidth(combo_hint)
+
+        self.reset_button = QPushButton("重置")
+        self.reset_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.reset_button.setFixedHeight(28)
+        self.reset_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.reset_button.clicked.connect(self.reset_roll_call_pools)
+        top.addWidget(self.reset_button, 0, Qt.AlignmentFlag.AlignLeft)
 
         self.menu_button = QToolButton(); self.menu_button.setText("..."); self.menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.menu_button.setFixedSize(28, 28); self.menu_button.setStyleSheet("font-size: 18px; padding-bottom: 6px;")
@@ -1529,6 +1546,7 @@ class RollCallTimerWindow(QWidget):
         is_roll = self.mode == "roll_call"
         self.title_label.setText("点名" if is_roll else "计时")
         self.mode_button.setText("切换到计时" if is_roll else "切换到点名")
+        self.group_label.setVisible(is_roll)
         if is_roll:
             self.stack.setCurrentWidget(self.roll_call_frame); self.group_stack.setCurrentWidget(self.group_combo)
             self.count_timer.stop(); self.clock_timer.stop(); self.timer_running = False; self.timer_start_pause_button.setText("开始")
@@ -1537,6 +1555,7 @@ class RollCallTimerWindow(QWidget):
         else:
             self.stack.setCurrentWidget(self.timer_frame); self.group_stack.setCurrentWidget(self.group_placeholder); self.update_timer_mode_ui()
             self.schedule_font_update()
+        self.reset_button.setVisible(is_roll)
         self.updateGeometry()
 
     def update_timer_mode_ui(self) -> None:
@@ -1651,7 +1670,7 @@ class RollCallTimerWindow(QWidget):
         group_name = self.current_group_name
         pool = self._group_remaining_indices.get(group_name)
         if pool is None:
-            self._ensure_group_pool(group_name, force_reset=True)
+            self._ensure_group_pool(group_name)
             pool = self._group_remaining_indices.get(group_name, [])
         if not pool:
             base_total = self._group_all_indices.get(group_name, [])
@@ -1660,11 +1679,14 @@ class RollCallTimerWindow(QWidget):
                 self.current_student_index = None
                 self.display_current_student()
                 return
-            QMessageBox.information(self, "提示", f"'{group_name}' 的同学已经全部点到，重新开始一次抽取。")
-            self._ensure_group_pool(group_name, force_reset=True)
-            self._group_last_student[group_name] = None
-            self.current_student_index = None
-            self.display_current_student()
+            if self._all_groups_completed():
+                self._reset_roll_call_state(show_message=True)
+            else:
+                QMessageBox.information(
+                    self,
+                    "提示",
+                    f"'{group_name}' 的同学已经全部点到，请切换其他分组或点击“重置”按钮。",
+                )
             return
         self.current_student_index = pool.pop()
         self._group_last_student[group_name] = self.current_student_index
@@ -1674,6 +1696,47 @@ class RollCallTimerWindow(QWidget):
             stu = self.student_data.loc[self.current_student_index]
             name = str(stu["姓名"]) if "姓名" in stu and pd.notna(stu["姓名"]) else ""
             if name: self.tts_manager.speak(name)
+
+    def _all_groups_completed(self) -> bool:
+        """判断是否所有分组的学生都已点名完毕。"""
+
+        total_students = len(self._group_all_indices.get("全部", []))
+        if total_students == 0:
+            return True
+        if len(self._global_drawn_students) < total_students:
+            return False
+        for group, base in self._group_all_indices.items():
+            if not base:
+                continue
+            remaining = self._group_remaining_indices.get(group, [])
+            if remaining:
+                return False
+        return True
+
+    def _reset_roll_call_state(self, *, show_message: bool = False) -> None:
+        """清空点名历史并重新洗牌，保持界面占位符显示。"""
+
+        self._rebuild_group_indices()
+        self._ensure_group_pool(self.current_group_name)
+        self.current_student_index = None
+        self.display_current_student()
+        self.save_settings()
+        if show_message:
+            QMessageBox.information(self, "提示", "已重新开始新一轮点名。")
+
+    def reset_roll_call_pools(self) -> None:
+        """手动点击“重置”按钮时执行，需用户确认。"""
+
+        reply = QMessageBox.question(
+            self,
+            "确认重置",
+            "是否确认重新开始点名？当前未抽取的名单将被全部洗牌。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self._reset_roll_call_state(show_message=True)
 
     def _rebuild_group_indices(self) -> None:
         """重新构建各分组的学生索引池。"""
@@ -1709,6 +1772,12 @@ class RollCallTimerWindow(QWidget):
         self._group_last_student = last_student
         self._student_groups = student_groups
         self._group_drawn_history = {group: set() for group in all_indices}
+        # “全部”分组直接引用全局集合，避免重复维护两份数据造成不一致
+        if "全部" in self._group_drawn_history:
+            self._global_drawn_students.clear()
+            self._group_drawn_history["全部"] = self._global_drawn_students
+        else:
+            self._group_drawn_history["全部"] = self._global_drawn_students
 
     def _restore_group_state(self, section: Mapping[str, str]) -> None:
         """从配置中恢复各分组剩余学生池，保持未抽学生不重复。"""
@@ -1759,6 +1828,11 @@ class RollCallTimerWindow(QWidget):
                 self._group_last_student[group] = idx
 
         # 根据恢复后的剩余名单推导出每个分组已点名的学生集合
+        # 重新整理所有分组的已点名学生，并同步更新全局集合
+        self._global_drawn_students.clear()
+        # 确保“全部”分组始终引用全局集合
+        self._group_drawn_history["全部"] = self._global_drawn_students
+
         for group, base_indices in self._group_all_indices.items():
             normalized_base: List[int] = []
             for value in base_indices:
@@ -1773,7 +1847,16 @@ class RollCallTimerWindow(QWidget):
                 except (TypeError, ValueError):
                     continue
             drawn = {idx for idx in normalized_base if idx not in remaining_set}
-            self._group_drawn_history[group] = drawn
+            if group == "全部":
+                # “全部”分组的已点名集合以全局集合为准
+                self._global_drawn_students.update(drawn)
+            else:
+                self._group_drawn_history[group] = drawn
+                self._global_drawn_students.update(drawn)
+
+        # 最后让“全部”分组重新对齐全局集合，确保切换时不会出现错判
+        self._group_drawn_history["全部"].clear()
+        self._group_drawn_history["全部"].update(self._global_drawn_students)
 
     def _ensure_group_pool(self, group_name: str, force_reset: bool = False) -> None:
         """确保指定分组仍有待抽取的学生，必要时重新洗牌。"""
@@ -1789,7 +1872,10 @@ class RollCallTimerWindow(QWidget):
             self._group_all_indices[group_name] = base_list
             self._group_remaining_indices[group_name] = []
             self._group_last_student.setdefault(group_name, None)
-            self._group_drawn_history.setdefault(group_name, set())
+            if group_name == "全部":
+                self._group_drawn_history[group_name] = self._global_drawn_students
+            else:
+                self._group_drawn_history.setdefault(group_name, set())
             for idx in base_list:
                 entry = self._student_groups.setdefault(int(idx), set())
                 entry.add(group_name)
@@ -1801,7 +1887,12 @@ class RollCallTimerWindow(QWidget):
                 base_indices.append(int(value))
             except (TypeError, ValueError):
                 continue
-        drawn_history = self._group_drawn_history.setdefault(group_name, set())
+        if group_name == "全部":
+            drawn_history = self._group_drawn_history.setdefault("全部", self._global_drawn_students)
+            reference_drawn = self._global_drawn_students
+        else:
+            drawn_history = self._group_drawn_history.setdefault(group_name, set())
+            reference_drawn = drawn_history
 
         if force_reset or group_name not in self._group_remaining_indices:
             drawn_history.clear()
@@ -1822,8 +1913,8 @@ class RollCallTimerWindow(QWidget):
                 normalized_pool.append(idx)
 
         # 移除已点过名的学生，避免误判全部完成
-        filtered_pool = [idx for idx in normalized_pool if idx not in drawn_history]
-        missing = [idx for idx in base_indices if idx not in drawn_history and idx not in filtered_pool]
+        filtered_pool = [idx for idx in normalized_pool if idx not in reference_drawn]
+        missing = [idx for idx in base_indices if idx not in reference_drawn and idx not in filtered_pool]
         if missing:
             random.shuffle(missing)
             filtered_pool.extend(missing)
@@ -1843,8 +1934,12 @@ class RollCallTimerWindow(QWidget):
         groups = self._student_groups.get(student_key)
         if not groups:
             return
+        self._global_drawn_students.add(student_key)
         for group in groups:
-            history = self._group_drawn_history.setdefault(group, set())
+            if group == "全部":
+                history = self._group_drawn_history.setdefault("全部", self._global_drawn_students)
+            else:
+                history = self._group_drawn_history.setdefault(group, set())
             history.add(student_key)
             pool = self._group_remaining_indices.get(group)
             if not pool:
