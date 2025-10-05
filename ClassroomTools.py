@@ -340,6 +340,20 @@ class SettingsManager:
         except IOError:
             print(f"无法写入配置文件: {self.filename}")
 
+    def clear_roll_call_history(self) -> None:
+        """清空点名相关的历史记录，保证新启动时重新开始。"""
+
+        settings = self.load_settings()
+        section = settings.get("RollCallTimer", {})
+        removed = False
+        for key in ("group_remaining", "group_last"):
+            if key in section:
+                section.pop(key, None)
+                removed = True
+        if removed:
+            settings["RollCallTimer"] = section
+            self.save_settings(settings)
+
 
 # ---------- 自绘置顶 ToolTip ----------
 class TipWindow(QWidget):
@@ -2411,6 +2425,8 @@ class LauncherWindow(QWidget):
             self.bubble.close()
         if self.roll_call_window is not None: self.roll_call_window.close()
         if self.overlay is not None: self.overlay.close()
+        # 启动器关闭视为重新开课，清理点名历史以便下次全新开始
+        self.settings_manager.clear_roll_call_history()
         super().closeEvent(e)
 
 
@@ -2423,6 +2439,8 @@ def main() -> None:
     QToolTip.setFont(QFont("Microsoft YaHei UI", 9))
 
     settings_manager = SettingsManager()
+    # 每次启动器运行时先清空上一轮的点名记录，确保不会延续上一课堂的名单
+    settings_manager.clear_roll_call_history()
     student_data = load_student_data(None) if PANDAS_AVAILABLE else None
 
     window = LauncherWindow(settings_manager, student_data)
