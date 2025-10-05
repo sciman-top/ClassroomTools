@@ -4,13 +4,14 @@ from __future__ import annotations
 import base64
 import configparser
 import ctypes
+import json
 import os
 import random
 import sys
 import threading
 import time
 from queue import Empty, Queue
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Mapping
 
 from PyQt6.QtCore import (
     QByteArray,
@@ -1310,6 +1311,7 @@ class RollCallTimerWindow(QWidget):
         self._group_remaining_indices: Dict[str, List[int]] = {}
         self._group_last_student: Dict[str, Optional[int]] = {}
         self._rebuild_group_indices()
+        self._restore_group_state(s)
         self.timer_seconds_left = max(0, _get_int("timer_seconds_left", self.timer_countdown_minutes * 60 + self.timer_countdown_seconds))
         self.timer_stopwatch_seconds = max(0, _get_int("timer_stopwatch_seconds", 0))
         self.timer_running = str_to_bool(s.get("timer_running", "False"), False)
@@ -1624,10 +1626,8 @@ class RollCallTimerWindow(QWidget):
             self.display_current_student()
             return
         self._ensure_group_pool(group_name)
-        self.current_student_index = self._group_last_student.get(group_name)
+        self.current_student_index = None
         self.display_current_student()
-        if not initial:
-            self.roll_student(speak=False)
 
     def roll_student(self, speak: bool = True) -> None:
         if self.mode != "roll_call": return
@@ -1685,6 +1685,54 @@ class RollCallTimerWindow(QWidget):
         self._group_remaining_indices = remaining
         self._group_last_student = last_student
 
+    def _restore_group_state(self, section: Mapping[str, str]) -> None:
+        """从配置中恢复各分组剩余学生池，保持未抽学生不重复。"""
+
+        def _load_dict(key: str) -> Dict[str, object]:
+            raw = section.get(key, "")
+            if not raw:
+                return {}
+            try:
+                data = json.loads(raw)
+            except Exception:
+                return {}
+            return data if isinstance(data, dict) else {}
+
+        remaining_data = _load_dict("group_remaining")
+        last_data = _load_dict("group_last")
+
+        for group, indices in remaining_data.items():
+            if group not in self._group_all_indices:
+                continue
+            base_list = self._group_all_indices[group]
+            base_set = set(base_list)
+            restored: List[int] = []
+            if isinstance(indices, list):
+                seen: set[int] = set()
+                for value in indices:
+                    try:
+                        idx = int(value)
+                    except (TypeError, ValueError):
+                        continue
+                    if idx not in base_set or idx in seen:
+                        continue
+                    restored.append(idx)
+                    seen.add(idx)
+            self._group_remaining_indices[group] = restored
+
+        for group, value in last_data.items():
+            if group not in self._group_all_indices:
+                continue
+            if value is None:
+                self._group_last_student[group] = None
+                continue
+            try:
+                idx = int(value)
+            except (TypeError, ValueError):
+                continue
+            if idx in self._group_all_indices[group]:
+                self._group_last_student[group] = idx
+
     def _ensure_group_pool(self, group_name: str, force_reset: bool = False) -> None:
         """确保指定分组仍有待抽取的学生，必要时重新洗牌。"""
 
@@ -1707,16 +1755,12 @@ class RollCallTimerWindow(QWidget):
             self._group_last_student.setdefault(group_name, None)
             return
 
-        pool = self._group_remaining_indices[group_name]
-        if not pool and (force_reset or self._group_all_indices.get(group_name)):
-            pool = list(self._group_all_indices.get(group_name, []))
-            random.shuffle(pool)
-            self._group_remaining_indices[group_name] = pool
-            self._group_last_student.setdefault(group_name, None)
+        self._group_last_student.setdefault(group_name, None)
 
     def display_current_student(self) -> None:
         if self.current_student_index is None:
-            self.id_label.setText("点击抽取"); self.name_label.setText("学生")
+            self.id_label.setText("学号" if self.show_id else "")
+            self.name_label.setText("学生" if self.show_name else "")
         else:
             stu = self.student_data.loc[self.current_student_index]
             sid = str(stu["学号"]) if pd.notna(stu["学号"]) else ""; name = str(stu["姓名"]) if pd.notna(stu["姓名"]) else ""
@@ -1813,6 +1857,34 @@ class RollCallTimerWindow(QWidget):
         sec["id_font_size"] = str(self.last_id_font_size)
         sec["name_font_size"] = str(self.last_name_font_size)
         sec["timer_font_size"] = str(self.last_timer_font_size)
+        remaining_payload: Dict[str, List[int]] = {}
+        for group, indices in self._group_remaining_indices.items():
+            cleaned: List[int] = []
+            for idx in indices:
+                try:
+                    cleaned.append(int(idx))
+                except (TypeError, ValueError):
+                    continue
+            remaining_payload[group] = cleaned
+        last_payload: Dict[str, Optional[int]] = {}
+        all_groups = set(self._group_all_indices.keys()) | set(self._group_last_student.keys())
+        for group in all_groups:
+            value = self._group_last_student.get(group)
+            if value is None:
+                last_payload[group] = None
+            else:
+                try:
+                    last_payload[group] = int(value)
+                except (TypeError, ValueError):
+                    last_payload[group] = None
+        try:
+            sec["group_remaining"] = json.dumps(remaining_payload, ensure_ascii=False)
+        except TypeError:
+            sec["group_remaining"] = json.dumps({}, ensure_ascii=False)
+        try:
+            sec["group_last"] = json.dumps(last_payload, ensure_ascii=False)
+        except TypeError:
+            sec["group_last"] = json.dumps({}, ensure_ascii=False)
         settings["RollCallTimer"] = sec
         self.settings_manager.save_settings(settings)
 
