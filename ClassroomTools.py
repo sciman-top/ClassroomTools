@@ -274,6 +274,19 @@ def bool_to_str(value: bool) -> str:
     return "True" if value else "False"
 
 
+def show_quiet_information(parent: Optional[QWidget], text: str, title: str = "提示") -> None:
+    """显示不带提示音的消息框，避免频繁弹窗时的干扰。"""
+
+    msg = QMessageBox(parent)
+    msg.setWindowTitle(title)
+    msg.setIcon(QMessageBox.Icon.NoIcon)
+    msg.setText(text)
+    msg.setStandardButtons(QMessageBox.StandardButton.Ok)
+    msg.setDefaultButton(QMessageBox.StandardButton.Ok)
+    msg.setWindowModality(Qt.WindowModality.WindowModal)
+    msg.exec()
+
+
 # ---------- 配置 ----------
 class SettingsManager:
     """负责读取/写入配置文件的轻量封装。"""
@@ -1529,7 +1542,9 @@ class RollCallTimerWindow(QWidget):
 
     def _toggle_speech(self, enabled: bool) -> None:
         if not self.tts_manager or not self.tts_manager.available:
-            QMessageBox.information(self, "提示", "未检测到语音引擎，无法开启语音播报。"); self.speech_enabled_action.setChecked(False); return
+            show_quiet_information(self, "未检测到语音引擎，无法开启语音播报。")
+            self.speech_enabled_action.setChecked(False)
+            return
         self.speech_enabled = enabled
 
     def _set_voice(self, voice_id: str) -> None:
@@ -1677,22 +1692,14 @@ class RollCallTimerWindow(QWidget):
         if not pool:
             base_total = self._group_all_indices.get(group_name, [])
             if not base_total:
-                QMessageBox.information(self, "提示", f"'{group_name}' 分组当前没有可点名的学生。")
+                show_quiet_information(self, f"'{group_name}' 分组当前没有可点名的学生。")
                 self.current_student_index = None
                 self.display_current_student()
                 return
             if self._all_groups_completed():
-                QMessageBox.information(
-                    self,
-                    "提示",
-                    "所有学生都已完成点名，请点击“重置”按钮重新开始。",
-                )
+                show_quiet_information(self, "所有学生都已完成点名，请点击“重置”按钮重新开始。")
             else:
-                QMessageBox.information(
-                    self,
-                    "提示",
-                    f"'{group_name}' 的同学已经全部点到，请切换其他分组或点击“重置”按钮。",
-                )
+                show_quiet_information(self, f"'{group_name}' 的同学已经全部点到，请切换其他分组或点击“重置”按钮。")
             return
         self.current_student_index = pool.pop()
         self._group_last_student[group_name] = self.current_student_index
@@ -1728,7 +1735,7 @@ class RollCallTimerWindow(QWidget):
         self.display_current_student()
         self.save_settings()
         if show_message:
-            QMessageBox.information(self, "提示", "已重新开始新一轮点名。")
+            show_quiet_information(self, "已重新开始新一轮点名。")
 
     def reset_roll_call_pools(self) -> None:
         """手动点击“重置”按钮时执行，直接重新洗牌。"""
@@ -2223,7 +2230,7 @@ def load_student_data(parent: Optional[QWidget]) -> Optional[pd.DataFrame]:
         try:
             df = pd.DataFrame({"学号": [101, 102, 103], "姓名": ["张三", "李四", "王五"], "分组": ["A", "B", "A"]})
             df.to_excel(file_path, index=False)
-            QMessageBox.information(parent, "提示", f"未找到学生名单，已为您创建模板文件：{file_path}")
+            show_quiet_information(parent, f"未找到学生名单，已为您创建模板文件：{file_path}")
         except Exception as exc:
             QMessageBox.critical(parent, "错误", f"创建模板文件失败：{exc}")
             return None
