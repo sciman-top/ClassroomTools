@@ -1682,7 +1682,11 @@ class RollCallTimerWindow(QWidget):
                 self.display_current_student()
                 return
             if self._all_groups_completed():
-                self._reset_roll_call_state(show_message=True)
+                QMessageBox.information(
+                    self,
+                    "提示",
+                    "所有学生都已完成点名，请点击“重置”按钮重新开始。",
+                )
             else:
                 QMessageBox.information(
                     self,
@@ -1727,17 +1731,8 @@ class RollCallTimerWindow(QWidget):
             QMessageBox.information(self, "提示", "已重新开始新一轮点名。")
 
     def reset_roll_call_pools(self) -> None:
-        """手动点击“重置”按钮时执行，需用户确认。"""
+        """手动点击“重置”按钮时执行，直接重新洗牌。"""
 
-        reply = QMessageBox.question(
-            self,
-            "确认重置",
-            "是否确认重新开始点名？当前未抽取的名单将被全部洗牌。",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
         self._reset_roll_call_state(show_message=True)
 
     def _rebuild_group_indices(self) -> None:
@@ -1783,6 +1778,8 @@ class RollCallTimerWindow(QWidget):
             self._group_drawn_history["全部"] = self._global_drawn_students
         else:
             self._group_drawn_history["全部"] = self._global_drawn_students
+
+        self._refresh_all_group_pool()
 
     def _restore_group_state(self, section: Mapping[str, str]) -> None:
         """从配置中恢复各分组剩余学生池，保持未抽学生不重复。"""
@@ -1865,6 +1862,7 @@ class RollCallTimerWindow(QWidget):
         # 最后让“全部”分组重新对齐全局集合，确保切换时不会出现错判
         self._group_drawn_history["全部"].clear()
         self._group_drawn_history["全部"].update(self._global_drawn_students)
+        self._refresh_all_group_pool()
 
     def _ensure_group_pool(self, group_name: str, force_reset: bool = False) -> None:
         """确保指定分组仍有待抽取的学生，必要时重新洗牌。"""
@@ -1906,6 +1904,16 @@ class RollCallTimerWindow(QWidget):
             drawn_history = self._group_drawn_history.setdefault(group_name, set())
             reference_drawn = drawn_history
 
+        if group_name == "全部":
+            # “全部”分组直接依据全局集合生成剩余名单，避免与各子分组脱节
+            if group_name not in self._group_initial_sequences:
+                shuffled = list(base_indices)
+                random.shuffle(shuffled)
+                self._group_initial_sequences[group_name] = shuffled
+            self._refresh_all_group_pool()
+            self._group_last_student.setdefault(group_name, None)
+            return
+
         if force_reset or group_name not in self._group_remaining_indices:
             drawn_history.clear()
             pool = list(base_indices)
@@ -1913,6 +1921,7 @@ class RollCallTimerWindow(QWidget):
             self._group_remaining_indices[group_name] = pool
             self._group_last_student.setdefault(group_name, None)
             self._group_initial_sequences[group_name] = list(pool)
+            self._refresh_all_group_pool()
             return
 
         raw_pool = self._group_remaining_indices.get(group_name, [])
@@ -1941,6 +1950,7 @@ class RollCallTimerWindow(QWidget):
 
         self._group_remaining_indices[group_name] = normalized_pool
         self._group_last_student.setdefault(group_name, None)
+        self._refresh_all_group_pool()
 
     def _mark_student_drawn(self, student_index: int) -> None:
         """抽中学生后，从所有关联分组的候选列表中移除该学生。"""
@@ -1973,6 +1983,43 @@ class RollCallTimerWindow(QWidget):
                 if idx != student_key:
                     cleaned.append(idx)
             self._group_remaining_indices[group] = cleaned
+
+        self._refresh_all_group_pool()
+
+    def _refresh_all_group_pool(self) -> None:
+        """同步“全部”分组的剩余名单，使其与各子分组保持一致。"""
+
+        base_all = self._group_all_indices.get("全部", [])
+        if "全部" not in self._group_initial_sequences:
+            shuffled = list(base_all)
+            random.shuffle(shuffled)
+            self._group_initial_sequences["全部"] = shuffled
+        order = list(self._group_initial_sequences.get("全部", []))
+        normalized: List[int] = []
+        seen: set[int] = set()
+        for value in order:
+            try:
+                idx = int(value)
+            except (TypeError, ValueError):
+                continue
+            if idx in seen:
+                continue
+            seen.add(idx)
+            if idx in self._global_drawn_students:
+                continue
+            normalized.append(idx)
+        for value in base_all:
+            try:
+                idx = int(value)
+            except (TypeError, ValueError):
+                continue
+            if idx in seen:
+                continue
+            seen.add(idx)
+            if idx in self._global_drawn_students:
+                continue
+            normalized.append(idx)
+        self._group_remaining_indices["全部"] = normalized
 
     def display_current_student(self) -> None:
         if self.current_student_index is None:
