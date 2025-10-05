@@ -1324,6 +1324,8 @@ class RollCallTimerWindow(QWidget):
         self._group_all_indices: Dict[str, List[int]] = {}
         self._group_remaining_indices: Dict[str, List[int]] = {}
         self._group_last_student: Dict[str, Optional[int]] = {}
+        # 记录每个分组已点过名的学生索引，便于核对剩余名单
+        self._group_drawn_history: Dict[str, set[int]] = {}
         self._student_groups: Dict[int, set[str]] = {}
         self._rebuild_group_indices()
         self._restore_group_state(s)
@@ -1706,6 +1708,7 @@ class RollCallTimerWindow(QWidget):
         self._group_remaining_indices = remaining
         self._group_last_student = last_student
         self._student_groups = student_groups
+        self._group_drawn_history = {group: set() for group in all_indices}
 
     def _restore_group_state(self, section: Mapping[str, str]) -> None:
         """从配置中恢复各分组剩余学生池，保持未抽学生不重复。"""
@@ -1755,6 +1758,23 @@ class RollCallTimerWindow(QWidget):
             if idx in self._group_all_indices[group]:
                 self._group_last_student[group] = idx
 
+        # 根据恢复后的剩余名单推导出每个分组已点名的学生集合
+        for group, base_indices in self._group_all_indices.items():
+            normalized_base: List[int] = []
+            for value in base_indices:
+                try:
+                    normalized_base.append(int(value))
+                except (TypeError, ValueError):
+                    continue
+            remaining_set: set[int] = set()
+            for value in self._group_remaining_indices.get(group, []):
+                try:
+                    remaining_set.add(int(value))
+                except (TypeError, ValueError):
+                    continue
+            drawn = {idx for idx in normalized_base if idx not in remaining_set}
+            self._group_drawn_history[group] = drawn
+
     def _ensure_group_pool(self, group_name: str, force_reset: bool = False) -> None:
         """确保指定分组仍有待抽取的学生，必要时重新洗牌。"""
 
@@ -1769,32 +1789,75 @@ class RollCallTimerWindow(QWidget):
             self._group_all_indices[group_name] = base_list
             self._group_remaining_indices[group_name] = []
             self._group_last_student.setdefault(group_name, None)
+            self._group_drawn_history.setdefault(group_name, set())
             for idx in base_list:
                 entry = self._student_groups.setdefault(int(idx), set())
                 entry.add(group_name)
                 entry.add("全部")
 
+        base_indices: List[int] = []
+        for value in self._group_all_indices.get(group_name, []):
+            try:
+                base_indices.append(int(value))
+            except (TypeError, ValueError):
+                continue
+        drawn_history = self._group_drawn_history.setdefault(group_name, set())
+
         if force_reset or group_name not in self._group_remaining_indices:
-            pool = list(self._group_all_indices.get(group_name, []))
+            drawn_history.clear()
+            pool = list(base_indices)
             random.shuffle(pool)
             self._group_remaining_indices[group_name] = pool
             self._group_last_student.setdefault(group_name, None)
             return
 
+        raw_pool = self._group_remaining_indices.get(group_name, [])
+        normalized_pool: List[int] = []
+        for value in raw_pool:
+            try:
+                idx = int(value)
+            except (TypeError, ValueError):
+                continue
+            if idx in base_indices and idx not in normalized_pool:
+                normalized_pool.append(idx)
+
+        # 移除已点过名的学生，避免误判全部完成
+        filtered_pool = [idx for idx in normalized_pool if idx not in drawn_history]
+        missing = [idx for idx in base_indices if idx not in drawn_history and idx not in filtered_pool]
+        if missing:
+            random.shuffle(missing)
+            filtered_pool.extend(missing)
+
+        self._group_remaining_indices[group_name] = filtered_pool
         self._group_last_student.setdefault(group_name, None)
 
     def _mark_student_drawn(self, student_index: int) -> None:
         """抽中学生后，从所有关联分组的候选列表中移除该学生。"""
 
-        groups = self._student_groups.get(int(student_index))
+        student_key = None
+        try:
+            student_key = int(student_index)
+        except (TypeError, ValueError):
+            return
+
+        groups = self._student_groups.get(student_key)
         if not groups:
             return
         for group in groups:
+            history = self._group_drawn_history.setdefault(group, set())
+            history.add(student_key)
             pool = self._group_remaining_indices.get(group)
             if not pool:
                 continue
-            if student_index in pool:
-                self._group_remaining_indices[group] = [idx for idx in pool if idx != student_index]
+            cleaned: List[int] = []
+            for value in pool:
+                try:
+                    idx = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if idx != student_key:
+                    cleaned.append(idx)
+            self._group_remaining_indices[group] = cleaned
 
     def display_current_student(self) -> None:
         if self.current_student_index is None:
