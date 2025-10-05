@@ -1305,7 +1305,11 @@ class RollCallTimerWindow(QWidget):
             self.groups.extend(gs)
         if self.current_group_name not in self.groups: self.current_group_name = "全部"
 
-        self._shuffled_indices: List[int] = []; self.current_student_index: Optional[int] = None
+        self.current_student_index: Optional[int] = None
+        self._group_all_indices: Dict[str, List[int]] = {}
+        self._group_remaining_indices: Dict[str, List[int]] = {}
+        self._group_last_student: Dict[str, Optional[int]] = {}
+        self._rebuild_group_indices()
         self.timer_seconds_left = max(0, _get_int("timer_seconds_left", self.timer_countdown_minutes * 60 + self.timer_countdown_seconds))
         self.timer_stopwatch_seconds = max(0, _get_int("timer_stopwatch_seconds", 0))
         self.timer_running = str_to_bool(s.get("timer_running", "False"), False)
@@ -1608,25 +1612,107 @@ class RollCallTimerWindow(QWidget):
             QApplication.beep()
 
     def on_group_change(self, group_name: Optional[str] = None, initial: bool = False) -> None:
-        if group_name is None: group_name = self.group_combo.currentText()
+        if group_name is None:
+            group_name = self.group_combo.currentText()
+        if group_name not in self.groups:
+            group_name = "全部"
+            if self.group_combo.currentText() != group_name:
+                self.group_combo.setCurrentText(group_name)
         self.current_group_name = group_name
-        if self.student_data.empty: self._shuffled_indices = []; return
-        if group_name == "全部": idx = list(self.student_data.index)
-        else: idx = list(self.student_data[self.student_data["分组"].astype(str).str.upper() == group_name].index)
-        random.shuffle(idx); self._shuffled_indices = idx; self.current_student_index = None
+        if self.student_data.empty:
+            self.current_student_index = None
+            self.display_current_student()
+            return
+        self._ensure_group_pool(group_name)
+        self.current_student_index = self._group_last_student.get(group_name)
         self.display_current_student()
-        if not initial: self.roll_student(speak=False)
+        if not initial:
+            self.roll_student(speak=False)
 
     def roll_student(self, speak: bool = True) -> None:
         if self.mode != "roll_call": return
-        if not self._shuffled_indices:
-            QMessageBox.information(self, "提示", f"'{self.current_group_name}' 的同学已经全部点到，重新开始一次抽取。")
-            self.on_group_change(); return
-        self.current_student_index = self._shuffled_indices.pop(); self.display_current_student()
+        group_name = self.current_group_name
+        pool = self._group_remaining_indices.get(group_name)
+        if pool is None:
+            self._ensure_group_pool(group_name, force_reset=True)
+            pool = self._group_remaining_indices.get(group_name, [])
+        if not pool:
+            base_total = self._group_all_indices.get(group_name, [])
+            if not base_total:
+                QMessageBox.information(self, "提示", f"'{group_name}' 分组当前没有可点名的学生。")
+                self.current_student_index = None
+                self.display_current_student()
+                return
+            QMessageBox.information(self, "提示", f"'{group_name}' 的同学已经全部点到，重新开始一次抽取。")
+            self._ensure_group_pool(group_name, force_reset=True)
+            self._group_last_student[group_name] = None
+            self.current_student_index = None
+            self.display_current_student()
+            return
+        self.current_student_index = pool.pop()
+        self._group_last_student[group_name] = self.current_student_index
+        self.display_current_student()
         if speak and self.speech_enabled and self.tts_manager and self.tts_manager.available:
             stu = self.student_data.loc[self.current_student_index]
             name = str(stu["姓名"]) if "姓名" in stu and pd.notna(stu["姓名"]) else ""
             if name: self.tts_manager.speak(name)
+
+    def _rebuild_group_indices(self) -> None:
+        """重新构建各分组的学生索引池。"""
+
+        all_indices: Dict[str, List[int]] = {}
+        remaining: Dict[str, List[int]] = {}
+        last_student: Dict[str, Optional[int]] = {}
+
+        if self.student_data.empty:
+            all_indices["全部"] = []
+        else:
+            all_indices["全部"] = list(self.student_data.index)
+            group_series = self.student_data["分组"].astype(str).str.strip().str.upper()
+            for group_name in self.groups:
+                if group_name == "全部":
+                    continue
+                mask = group_series == group_name
+                all_indices[group_name] = list(self.student_data[mask].index)
+
+        for group_name, indices in all_indices.items():
+            pool = list(indices)
+            random.shuffle(pool)
+            remaining[group_name] = pool
+            last_student[group_name] = None
+
+        self._group_all_indices = all_indices
+        self._group_remaining_indices = remaining
+        self._group_last_student = last_student
+
+    def _ensure_group_pool(self, group_name: str, force_reset: bool = False) -> None:
+        """确保指定分组仍有待抽取的学生，必要时重新洗牌。"""
+
+        if group_name not in self._group_all_indices:
+            if self.student_data.empty:
+                base_list: List[int] = []
+            elif group_name == "全部":
+                base_list = list(self.student_data.index)
+            else:
+                group_series = self.student_data["分组"].astype(str).str.strip().str.upper()
+                base_list = list(self.student_data[group_series == group_name].index)
+            self._group_all_indices[group_name] = base_list
+            self._group_remaining_indices[group_name] = []
+            self._group_last_student.setdefault(group_name, None)
+
+        if force_reset or group_name not in self._group_remaining_indices:
+            pool = list(self._group_all_indices.get(group_name, []))
+            random.shuffle(pool)
+            self._group_remaining_indices[group_name] = pool
+            self._group_last_student.setdefault(group_name, None)
+            return
+
+        pool = self._group_remaining_indices[group_name]
+        if not pool and (force_reset or self._group_all_indices.get(group_name)):
+            pool = list(self._group_all_indices.get(group_name, []))
+            random.shuffle(pool)
+            self._group_remaining_indices[group_name] = pool
+            self._group_last_student.setdefault(group_name, None)
 
     def display_current_student(self) -> None:
         if self.current_student_index is None:
@@ -2024,26 +2110,6 @@ class LauncherWindow(QWidget):
         self.setFixedSize(self.sizeHint())
         self._base_minimum_width = self.minimumWidth()
         self._base_minimum_height = self.minimumHeight()
-
-    def _action_button_width(self) -> int:
-        """计算“画笔”与“点名/计时”按钮的统一宽度，保证观感一致。"""
-
-        paint_metrics = QFontMetrics(self.paint_button.font())
-        roll_metrics = QFontMetrics(self.roll_call_button.font())
-        paint_texts = ["画笔", "隐藏画笔"]
-        roll_texts = ["点名/计时", "显示点名", "隐藏点名"]
-        max_width = max(
-            max(paint_metrics.horizontalAdvance(text) for text in paint_texts),
-            max(roll_metrics.horizontalAdvance(text) for text in roll_texts),
-        )
-        return max_width + 28
-
-    def showEvent(self, e) -> None:
-        super().showEvent(e)
-        ensure_widget_within_screen(self)
-        self._last_position = self.pos()
-        if self._minimized_on_start:
-            QTimer.singleShot(0, self._restore_minimized_state)
 
     def _action_button_width(self) -> int:
         """计算“画笔”与“点名/计时”按钮的统一宽度，保证观感一致。"""
