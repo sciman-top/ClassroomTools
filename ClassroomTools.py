@@ -274,17 +274,77 @@ def bool_to_str(value: bool) -> str:
     return "True" if value else "False"
 
 
-def show_quiet_information(parent: Optional[QWidget], text: str, title: str = "提示") -> None:
-    """显示不带提示音的消息框，避免频繁弹窗时的干扰。"""
+class QuietInfoPopup(QWidget):
+    """提供一个静音的小型提示窗口，避免系统提示音干扰课堂。"""
 
-    msg = QMessageBox(parent)
-    msg.setWindowTitle(title)
-    msg.setIcon(QMessageBox.Icon.NoIcon)
-    msg.setText(text)
-    msg.setStandardButtons(QMessageBox.StandardButton.Ok)
-    msg.setDefaultButton(QMessageBox.StandardButton.Ok)
-    msg.setWindowModality(Qt.WindowModality.WindowModal)
-    msg.exec()
+    _active_popups: List["QuietInfoPopup"] = []
+
+    def __init__(self, parent: Optional[QWidget], text: str, title: str) -> None:
+        flags = (
+            Qt.WindowType.Tool
+            | Qt.WindowType.WindowTitleHint
+            | Qt.WindowType.WindowCloseButtonHint
+            | Qt.WindowType.CustomizeWindowHint
+        )
+        super().__init__(parent, flags)
+        self.setWindowTitle(title)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.setWindowModality(Qt.WindowModality.ApplicationModal)
+        self.setMinimumWidth(240)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 12)
+        layout.setSpacing(12)
+
+        self.message_label = QLabel(text, self)
+        self.message_label.setWordWrap(True)
+        self.message_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(self.message_label)
+
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+        self.ok_button = QPushButton("确定", self)
+        self.ok_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.ok_button.setDefault(True)
+        self.ok_button.clicked.connect(self.close)
+        button_row.addWidget(self.ok_button)
+        layout.addLayout(button_row)
+
+        QuietInfoPopup._active_popups.append(self)
+        self.destroyed.connect(self._cleanup)
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        self.adjustSize()
+        self._relocate()
+        self.activateWindow()
+        self.ok_button.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
+
+    def _relocate(self) -> None:
+        target_rect: Optional[QRect] = None
+        parent = self.parentWidget()
+        if parent and parent.isVisible():
+            target_rect = parent.frameGeometry()
+        else:
+            screen = QApplication.primaryScreen()
+            if screen:
+                target_rect = screen.availableGeometry()
+        if not target_rect:
+            return
+        geo = self.frameGeometry()
+        geo.moveCenter(target_rect.center())
+        self.move(geo.topLeft())
+
+    def _cleanup(self, *_args) -> None:
+        try:
+            QuietInfoPopup._active_popups.remove(self)
+        except ValueError:
+            pass
+
+
+def show_quiet_information(parent: Optional[QWidget], text: str, title: str = "提示") -> None:
+    popup = QuietInfoPopup(parent, text, title)
+    popup.show()
 
 
 # ---------- 配置 ----------
