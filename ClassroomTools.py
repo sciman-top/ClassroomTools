@@ -346,7 +346,7 @@ class SettingsManager:
         settings = self.load_settings()
         section = settings.get("RollCallTimer", {})
         removed = False
-        for key in ("group_remaining", "group_last"):
+        for key in ("group_remaining", "group_last", "global_drawn"):
             if key in section:
                 section.pop(key, None)
                 removed = True
@@ -1797,6 +1797,32 @@ class RollCallTimerWindow(QWidget):
         remaining_data = _load_dict("group_remaining")
         last_data = _load_dict("group_last")
 
+        # 读取保存的全局已点名名单，保证窗口被关闭后重新打开时仍能继承上一轮的状态
+        global_drawn_raw = section.get("global_drawn", "")
+        restored_global: set[int] = set()
+        if global_drawn_raw:
+            try:
+                payload = json.loads(global_drawn_raw)
+            except Exception:
+                payload = []
+            if isinstance(payload, list):
+                for value in payload:
+                    try:
+                        restored_global.add(int(value))
+                    except (TypeError, ValueError):
+                        continue
+
+        self._global_drawn_students.clear()
+        self._global_drawn_students.update(restored_global)
+        self._group_drawn_history["全部"] = self._global_drawn_students
+
+        # 先记录一份备份，稍后重新计算所有集合时需要与持久化信息交叉验证
+        existing_global = set(self._global_drawn_students)
+
+        # 从头构建全局集合，避免旧对象上的引用导致状态被意外清空
+        self._global_drawn_students = set()
+        self._group_drawn_history["全部"] = self._global_drawn_students
+
         for group, indices in remaining_data.items():
             if group not in self._group_all_indices:
                 continue
@@ -1831,10 +1857,6 @@ class RollCallTimerWindow(QWidget):
 
         # 根据恢复后的剩余名单推导出每个分组已点名的学生集合
         # 重新整理所有分组的已点名学生，并同步更新全局集合
-        self._global_drawn_students.clear()
-        # 确保“全部”分组始终引用全局集合
-        self._group_drawn_history["全部"] = self._global_drawn_students
-
         for group, base_indices in self._group_all_indices.items():
             normalized_base: List[int] = []
             for value in base_indices:
@@ -1849,6 +1871,9 @@ class RollCallTimerWindow(QWidget):
                 except (TypeError, ValueError):
                     continue
             drawn = {idx for idx in normalized_base if idx not in remaining_set}
+            if group != "全部" and existing_global:
+                # 在恢复时合并先前记录的全局名单，防止由于意外写入丢失导致遗漏
+                drawn.update(idx for idx in existing_global if idx in normalized_base)
             seq = list(self._group_remaining_indices.get(group, []))
             seq.extend(idx for idx in normalized_base if idx not in seq)
             self._group_initial_sequences[group] = seq
@@ -1859,9 +1884,12 @@ class RollCallTimerWindow(QWidget):
                 self._group_drawn_history[group] = drawn
                 self._global_drawn_students.update(drawn)
 
-        # 最后让“全部”分组重新对齐全局集合，确保切换时不会出现错判
-        self._group_drawn_history["全部"].clear()
-        self._group_drawn_history["全部"].update(self._global_drawn_students)
+        # 合并持久化阶段记录的全局集合，防止遗漏尚未恢复的记录
+        if existing_global:
+            self._global_drawn_students.update(existing_global)
+
+        # 最后重新指定“全部”分组引用当前全局集合，保持一致性
+        self._group_drawn_history["全部"] = self._global_drawn_students
         self._refresh_all_group_pool()
 
     def _ensure_group_pool(self, group_name: str, force_reset: bool = False) -> None:
@@ -2149,6 +2177,11 @@ class RollCallTimerWindow(QWidget):
             sec["group_last"] = json.dumps(last_payload, ensure_ascii=False)
         except TypeError:
             sec["group_last"] = json.dumps({}, ensure_ascii=False)
+        try:
+            global_drawn_payload = sorted(int(idx) for idx in self._global_drawn_students)
+            sec["global_drawn"] = json.dumps(global_drawn_payload, ensure_ascii=False)
+        except TypeError:
+            sec["global_drawn"] = json.dumps([], ensure_ascii=False)
         settings["RollCallTimer"] = sec
         self.settings_manager.save_settings(settings)
 
