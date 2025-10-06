@@ -1672,6 +1672,7 @@ class RollCallTimerWindow(QWidget):
         self.mode = s.get("mode", "roll_call") if s.get("mode", "roll_call") in {"roll_call", "timer"} else "roll_call"
         self.timer_modes = ["countdown", "stopwatch", "clock"]
         self.timer_mode_index = self.timer_modes.index(s.get("timer_mode", "countdown")) if s.get("timer_mode", "countdown") in self.timer_modes else 0
+        self._active_timer_mode: Optional[str] = None
 
         self.timer_countdown_minutes = _get_int("timer_countdown_minutes", 5)
         self.timer_countdown_seconds = _get_int("timer_countdown_seconds", 0)
@@ -2042,8 +2043,25 @@ class RollCallTimerWindow(QWidget):
         self.reset_button.setVisible(is_roll)
         self.updateGeometry()
 
+    def _handle_timer_mode_transition(self, previous_mode: Optional[str], new_mode: str) -> None:
+        if previous_mode == new_mode:
+            return
+        if new_mode in {"countdown", "stopwatch"}:
+            self.timer_running = False
+            self.count_timer.stop()
+            self.timer_start_pause_button.setText("开始")
+            if new_mode == "countdown":
+                total = max(0, self.timer_countdown_minutes * 60 + self.timer_countdown_seconds)
+                self.timer_seconds_left = total
+            else:
+                self.timer_stopwatch_seconds = 0
+
     def update_timer_mode_ui(self) -> None:
         mode = self.timer_modes[self.timer_mode_index]
+        previous_mode = self._active_timer_mode
+        if previous_mode is not None:
+            self._handle_timer_mode_transition(previous_mode, mode)
+        self._active_timer_mode = mode
         self.clock_timer.stop()
         if mode == "countdown":
             self.timer_mode_button.setText("倒计时")
