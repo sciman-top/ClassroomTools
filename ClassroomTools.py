@@ -3,13 +3,16 @@ from __future__ import annotations
 
 import base64
 import configparser
+import contextlib
 import ctypes
+import importlib
 import io
 import json
 import math
 import os
 import random
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -312,6 +315,94 @@ def str_to_bool(value: str, default: bool = False) -> bool:
 
 def bool_to_str(value: bool) -> str:
     return "True" if value else "False"
+
+
+def dedupe_strings(values: List[str]) -> List[str]:
+    seen: set[str] = set()
+    unique: List[str] = []
+    for value in values:
+        normalized = value.strip() if isinstance(value, str) else ""
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        unique.append(normalized)
+    return unique
+
+
+def _try_import_module(module: str) -> bool:
+    try:
+        importlib.import_module(module)
+        return True
+    except Exception:
+        return False
+
+
+def _count_windows_voice_tokens() -> tuple[int, Optional[str]]:
+    if not WINREG_AVAILABLE:
+        return -1, "无法访问 Windows 注册表"
+    token_names: set[str] = set()
+    path = r"SOFTWARE\\Microsoft\\Speech\\Voices\\Tokens"
+    flags = {0}
+    for attr in ("KEY_WOW64_32KEY", "KEY_WOW64_64KEY"):
+        flag = getattr(winreg, attr, 0) if WINREG_AVAILABLE else 0  # type: ignore[name-defined]
+        if flag:
+            flags.add(flag)
+    try:
+        for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):  # type: ignore[name-defined]
+            for flag in flags:
+                access = getattr(winreg, "KEY_READ", 0) | flag  # type: ignore[name-defined]
+                try:
+                    handle = winreg.OpenKey(hive, path, 0, access)  # type: ignore[name-defined]
+                except FileNotFoundError:
+                    continue
+                except OSError as exc:
+                    return 0, str(exc)
+                with contextlib.closing(handle):
+                    index = 0
+                    while True:
+                        try:
+                            name = winreg.EnumKey(handle, index)  # type: ignore[name-defined]
+                        except OSError:
+                            break
+                        token_names.add(str(name))
+                        index += 1
+    except Exception as exc:
+        return 0, str(exc)
+    return len(token_names), None
+
+
+def detect_speech_environment_issues() -> tuple[str, List[str]]:
+    issues: List[str] = []
+    suggestions: List[str] = []
+    if sys.platform == "win32":
+        missing: List[str] = []
+        module_hints = (
+            ("pyttsx3", "请安装 pyttsx3（pip install pyttsx3）后重新启动程序。"),
+            ("comtypes.client", "请安装 comtypes（pip install comtypes）后重新启动程序。"),
+            ("win32com.client", "请安装 pywin32（pip install pywin32）后重新启动程序。"),
+        )
+        for module_name, hint in module_hints:
+            if not _try_import_module(module_name):
+                base_name = module_name.split(".")[0]
+                if base_name not in missing:
+                    missing.append(base_name)
+                suggestions.append(hint)
+        if missing:
+            issues.append(f"缺少语音依赖：{'、'.join(sorted(missing))}")
+        token_count, token_error = _count_windows_voice_tokens()
+        if token_error:
+            issues.append(f"无法读取语音包：{token_error}")
+        elif token_count == 0:
+            issues.append("系统未检测到任何语音包")
+            suggestions.append("请在 Windows 的“设置 -> 时间和语言 -> 语音”中下载并启用语音包。")
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            issues.append("未检测到 PowerShell，可用的语音播报方式受限")
+            suggestions.append("请确认系统已安装 PowerShell 5+ 或 PowerShell 7，并在环境变量中可用。")
+        suggestions.append("如已安装语音组件，请尝试以管理员权限首次运行程序以初始化语音服务。")
+    else:
+        suggestions.append("请确保系统已配置可用的语音引擎后重新启动程序。")
+    return "；".join(issues), dedupe_strings(suggestions)
 
 
 class QuietInfoPopup(QWidget):
@@ -1472,7 +1563,7 @@ class OverlayWindow(QWidget):
 
 # ---------- 语音 ----------
 class TTSManager(QObject):
-    """简单封装 pyttsx3，实现点名时的语音播报。"""
+    """简单封装语音播报，优先使用 pyttsx3，必要时回退到 PowerShell。"""
 
     def __init__(self, preferred_voice_id: str = "", parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
@@ -1482,39 +1573,67 @@ class TTSManager(QObject):
         self.current_voice_id = ""
         self.failure_reason = ""
         self.failure_suggestions: List[str] = []
+        self.supports_voice_selection = False
+        self._mode: str = "none"
+        self._powershell_path = ""
+        self._powershell_busy = False
         self._queue: Queue[str] = Queue()
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._pump)
-        try:
-            init_kwargs = {"driverName": "sapi5"} if sys.platform == "win32" else {}
-            self.engine = pyttsx3.init(**init_kwargs)
-            voices = self.engine.getProperty("voices") or []
-            self.voice_ids = [v.id for v in voices if getattr(v, "id", None)]
-            if not self.voice_ids:
-                self._record_failure("未检测到任何可用的发音人")
-                self.shutdown()
-                return
-            self.default_voice_id = self.voice_ids[0]
-            self.current_voice_id = preferred_voice_id if preferred_voice_id in self.voice_ids else self.default_voice_id
-            if self.current_voice_id:
-                try:
-                    self.engine.setProperty("voice", self.current_voice_id)
-                except Exception as exc:
-                    self._record_failure("无法设置默认发音人", exc)
-                    self.shutdown()
-                    return
-            self.engine.startLoop(False)
-            self._timer.start(100)
-        except Exception as exc:
-            self._record_failure("初始化语音引擎失败", exc)
-            self.engine = None
+        if pyttsx3 is not None:
+            try:
+                init_kwargs = {"driverName": "sapi5"} if sys.platform == "win32" else {}
+                self.engine = pyttsx3.init(**init_kwargs)
+                voices = self.engine.getProperty("voices") or []
+                self.voice_ids = [v.id for v in voices if getattr(v, "id", None)]
+                if not self.voice_ids:
+                    self._record_failure("未检测到任何可用的发音人")
+                    self.engine = None
+                else:
+                    self.default_voice_id = self.voice_ids[0]
+                    self.current_voice_id = (
+                        preferred_voice_id if preferred_voice_id in self.voice_ids else self.default_voice_id
+                    )
+                    if self.current_voice_id:
+                        try:
+                            self.engine.setProperty("voice", self.current_voice_id)
+                        except Exception as exc:
+                            self._record_failure("无法设置默认发音人", exc)
+                            self.engine = None
+                    if self.engine is not None:
+                        self.supports_voice_selection = True
+                        self._mode = "pyttsx3"
+                        self.engine.startLoop(False)
+                        self._timer.start(100)
+                        return
+            except Exception as exc:
+                self._record_failure("初始化语音引擎失败", exc)
+                self.engine = None
+        self._init_powershell_fallback()
 
     @property
     def available(self) -> bool:
-        return self.engine is not None
+        return self._mode in {"pyttsx3", "powershell"}
 
     def diagnostics(self) -> tuple[str, List[str]]:
         return self.failure_reason, list(self.failure_suggestions)
+
+    def _init_powershell_fallback(self) -> None:
+        if sys.platform != "win32":
+            return
+        path = shutil.which("pwsh") or shutil.which("powershell")
+        if not path:
+            return
+        self._powershell_path = path
+        self.engine = object()
+        self.voice_ids = []
+        self.default_voice_id = ""
+        self.current_voice_id = ""
+        self.supports_voice_selection = False
+        self.failure_reason = ""
+        self.failure_suggestions = []
+        self._mode = "powershell"
+        self._timer.start(120)
 
     def _record_failure(self, fallback: str, exc: Optional[Exception] = None) -> None:
         message = ""
@@ -1545,6 +1664,8 @@ class TTSManager(QObject):
         self.failure_suggestions = suggestions
 
     def set_voice(self, voice_id: str) -> None:
+        if not self.supports_voice_selection:
+            return
         if voice_id in self.voice_ids:
             self.current_voice_id = voice_id
             if self.engine:
@@ -1554,34 +1675,84 @@ class TTSManager(QObject):
                     pass
 
     def speak(self, text: str) -> None:
-        if not self.engine: return
+        if not self.available:
+            return
         while not self._queue.empty():
-            try: self._queue.get_nowait()
-            except Empty: break
+            try:
+                self._queue.get_nowait()
+            except Empty:
+                break
         self._queue.put(text)
 
     def _pump(self) -> None:
-        if not self.engine: return
+        if self._mode == "pyttsx3":
+            if not self.engine:
+                return
+            try:
+                text = self._queue.get_nowait()
+                self.engine.stop()
+                if self.current_voice_id:
+                    self.engine.setProperty("voice", self.current_voice_id)
+                self.engine.say(text)
+            except Empty:
+                pass
+            try:
+                self.engine.iterate()
+            except Exception as exc:
+                self._record_failure("语音引擎运行异常", exc)
+                self.shutdown()
+        elif self._mode == "powershell":
+            if self._powershell_busy:
+                return
+            try:
+                text = self._queue.get_nowait()
+            except Empty:
+                return
+            self._powershell_busy = True
+            worker = threading.Thread(target=self._run_powershell_speech, args=(text,), daemon=True)
+            worker.start()
+
+    def _run_powershell_speech(self, text: str) -> None:
         try:
-            text = self._queue.get_nowait()
-            self.engine.stop()
-            if self.current_voice_id: self.engine.setProperty("voice", self.current_voice_id)
-            self.engine.say(text)
-        except Empty:
-            pass
-        try:
-            self.engine.iterate()
+            if not text or not self._powershell_path:
+                return
+            payload = base64.b64encode(text.encode("utf-8")).decode("ascii")
+            script = (
+                "$msg = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('" + payload + "'));"
+                "Add-Type -AssemblyName System.Speech;"
+                "$sp = New-Object System.Speech.Synthesis.SpeechSynthesizer;"
+                "$sp.Speak($msg);"
+            )
+            startupinfo = None
+            if os.name == "nt":
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            subprocess.run(
+                [self._powershell_path, "-NoLogo", "-NonInteractive", "-NoProfile", "-Command", script],
+                check=True,
+                timeout=30,
+                startupinfo=startupinfo,
+            )
         except Exception as exc:
-            self._record_failure("语音引擎运行异常", exc)
-            self.shutdown()
+            self._record_failure("PowerShell 语音播报失败", exc)
+            QTimer.singleShot(0, self.shutdown)
+        finally:
+            self._powershell_busy = False
 
     def shutdown(self) -> None:
-        if self.engine:
-            try: self.engine.endLoop()
-            except Exception: pass
-            try: self.engine.stop()
-            except Exception: pass
-        self.engine = None; self._timer.stop()
+        if self._mode == "pyttsx3" and self.engine:
+            try:
+                self.engine.endLoop()
+            except Exception:
+                pass
+            try:
+                self.engine.stop()
+            except Exception:
+                pass
+        self.engine = None
+        self._mode = "none"
+        self._powershell_busy = False
+        self._timer.stop()
 
 
 # ---------- 点名/计时 ----------
@@ -1726,14 +1897,8 @@ class ScoreboardDialog(QDialog):
         title = QLabel("成绩展示")
         title.setObjectName("ScoreboardHeader")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setFont(QFont(calligraphy_font, 40, QFont.Weight.Bold))
+        title.setFont(QFont(calligraphy_font, 44, QFont.Weight.Bold))
         layout.addWidget(title)
-
-        subtitle = QLabel("课堂表现一目了然")
-        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        subtitle.setFont(QFont("Microsoft YaHei UI", 16, QFont.Weight.Medium))
-        subtitle.setStyleSheet("color: #1b4b8c;")
-        layout.addWidget(subtitle)
 
         grid_container = QWidget()
         grid_container.setObjectName("ScoreboardGridContainer")
@@ -1796,8 +1961,8 @@ class ScoreboardDialog(QDialog):
                 grid.setColumnStretch(col, 1)
             for row in range(rows):
                 grid.setRowStretch(row, 1)
-            item_font = QFont(calligraphy_font, 30, QFont.Weight.Bold)
-            score_font = QFont("Microsoft YaHei UI", 20, QFont.Weight.Medium)
+            item_font = QFont(calligraphy_font, 34, QFont.Weight.Bold)
+            score_font = QFont(calligraphy_font, 26, QFont.Weight.Bold)
             for idx, (_sid, name, score) in enumerate(students):
                 row = idx // columns
                 column = idx % columns
@@ -1922,14 +2087,11 @@ class RollCallTimerWindow(QWidget):
         self.clock_timer = QTimer(self); self.clock_timer.setInterval(1000); self.clock_timer.timeout.connect(self._update_clock)
 
         self.tts_manager: Optional[TTSManager] = None
-        self.speech_enabled = str_to_bool(s.get("speech_enabled", "False"), False) and PYTTSX3_AVAILABLE
+        self.speech_enabled = str_to_bool(s.get("speech_enabled", "False"), False)
         self.selected_voice_id = s.get("speech_voice_id", "")
-        if PYTTSX3_AVAILABLE:
-            manager = TTSManager(self.selected_voice_id, parent=self)
-            self.tts_manager = manager
-            if not manager.available:
-                self.speech_enabled = False
-        else:
+        manager = TTSManager(self.selected_voice_id, parent=self)
+        self.tts_manager = manager
+        if not manager.available:
             self.speech_enabled = False
         self._speech_issue_reported = False
         self._speech_check_scheduled = False
@@ -2053,7 +2215,7 @@ class RollCallTimerWindow(QWidget):
             lab.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.score_label = QLabel("成绩：--")
         self.score_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.score_label.setFont(QFont("Microsoft YaHei UI", 30, QFont.Weight.Bold))
+        self.score_label.setFont(QFont("Microsoft YaHei UI", 24, QFont.Weight.DemiBold))
         self.score_label.setStyleSheet(
             "color: #0b57d0;"
             "background-color: #e8f0fe;"
@@ -2102,16 +2264,25 @@ class RollCallTimerWindow(QWidget):
 
         menu.addSeparator()
         speech = menu.addMenu("语音播报")
+        manager = self.tts_manager
+        checked = bool(self.speech_enabled and manager and manager.available)
+        self.speech_enabled = checked
         self.speech_enabled_action = speech.addAction("启用语音播报"); self.speech_enabled_action.setCheckable(True)
-        self.speech_enabled_action.setChecked(self.speech_enabled); self.speech_enabled_action.toggled.connect(self._toggle_speech)
+        self.speech_enabled_action.setChecked(checked); self.speech_enabled_action.toggled.connect(self._toggle_speech)
         self.voice_menu = speech.addMenu("选择发音人"); self.voice_actions = []
-        if self.tts_manager and self.tts_manager.available and self.tts_manager.voice_ids:
+        if manager and manager.available:
+            self.speech_enabled_action.setEnabled(True)
             self.speech_enabled_action.setToolTip("点名时自动朗读当前学生姓名。")
-            for vid in self.tts_manager.voice_ids:
-                act = self.voice_menu.addAction(vid); act.setCheckable(True); act.setChecked(vid == self.tts_manager.current_voice_id)
-                act.triggered.connect(lambda _c, v=vid: self._set_voice(v)); self.voice_actions.append(act)
+            if manager.supports_voice_selection and manager.voice_ids:
+                for vid in manager.voice_ids:
+                    act = self.voice_menu.addAction(vid); act.setCheckable(True); act.setChecked(vid == manager.current_voice_id)
+                    act.triggered.connect(lambda _c, v=vid: self._set_voice(v)); self.voice_actions.append(act)
+            else:
+                self.voice_menu.setEnabled(False)
+                self.voice_menu.setToolTip("当前语音引擎不支持切换发音人。")
         else:
-            self.voice_menu.setEnabled(False); self.speech_enabled_action.setEnabled(False)
+            self.voice_menu.setEnabled(False)
+            self.speech_enabled_action.setEnabled(False)
             reason, suggestions = self._collect_speech_issue_details()
             tooltip_lines = [reason] if reason else []
             tooltip_lines.extend(suggestions)
@@ -2127,11 +2298,23 @@ class RollCallTimerWindow(QWidget):
         if self.show_id_action.isChecked() != self.show_id: self.show_id_action.setChecked(self.show_id)
         if self.show_name_action.isChecked() != self.show_name: self.show_name_action.setChecked(self.show_name)
         self.timer_sound_action.setChecked(self.timer_sound_enabled)
-        if self.tts_manager and self.tts_manager.available:
-            self.speech_enabled_action.setEnabled(True); self.speech_enabled_action.setChecked(self.speech_enabled)
+        manager = self.tts_manager
+        if manager and manager.available:
+            self.speech_enabled_action.setEnabled(True)
+            self.speech_enabled_action.setChecked(self.speech_enabled)
             self.speech_enabled_action.setToolTip("点名时自动朗读当前学生姓名。")
+            if manager.supports_voice_selection and manager.voice_ids:
+                self.voice_menu.setEnabled(True)
+                for act in self.voice_actions:
+                    act.setChecked(act.text() == manager.current_voice_id)
+                self.voice_menu.setToolTip("")
+            else:
+                self.voice_menu.setEnabled(False)
+                self.voice_menu.setToolTip("当前语音引擎不支持切换发音人。")
         else:
-            self.speech_enabled_action.setEnabled(False); self.speech_enabled_action.setChecked(False)
+            self.voice_menu.setEnabled(False)
+            self.speech_enabled_action.setEnabled(False)
+            self.speech_enabled_action.setChecked(False)
             reason, suggestions = self._collect_speech_issue_details()
             tooltip_lines = [reason] if reason else []
             tooltip_lines.extend(suggestions)
@@ -2152,36 +2335,51 @@ class RollCallTimerWindow(QWidget):
         return hints
 
     def _dedupe_suggestions(self, values: List[str]) -> List[str]:
-        seen: set[str] = set()
-        unique: List[str] = []
-        for value in values:
-            normalized = value.strip()
-            if not normalized or normalized in seen:
-                continue
-            seen.add(normalized)
-            unique.append(normalized)
-        return unique
+        return dedupe_strings(values)
 
     def _collect_speech_issue_details(self) -> tuple[str, List[str]]:
-        if not PYTTSX3_AVAILABLE:
-            reason = "未安装语音模块 pyttsx3"
-            suggestions = ["请安装 pyttsx3（pip install pyttsx3）后重新启动程序。"]
-            suggestions.extend(self._default_speech_suggestions())
-            return reason, self._dedupe_suggestions(suggestions)
         manager = self.tts_manager
+        reason = ""
+        suggestions: List[str] = []
         if manager is None:
-            return "无法初始化系统语音引擎", self._dedupe_suggestions(self._default_speech_suggestions())
-        if not manager.available:
+            reason = "无法初始化系统语音引擎"
+            suggestions = self._default_speech_suggestions()
+        elif not manager.available:
             reason, suggestions = manager.diagnostics()
             reason = reason or "无法初始化系统语音引擎"
             if not suggestions:
                 suggestions = self._default_speech_suggestions()
-            return reason, self._dedupe_suggestions(suggestions)
-        if not getattr(manager, "voice_ids", []):
-            suggestions = ["请在操作系统语音设置中添加语音包后重新启动程序。"]
-            suggestions.extend(self._default_speech_suggestions())
-            return "未检测到任何可用的发音人", self._dedupe_suggestions(suggestions)
-        return "", []
+        elif manager.supports_voice_selection and not getattr(manager, "voice_ids", []):
+            reason = "未检测到任何可用的发音人"
+            suggestions = self._default_speech_suggestions()
+            suggestions.append("请在操作系统语音设置中添加语音包后重新启动程序。")
+
+        env_reason, env_suggestions = detect_speech_environment_issues()
+        if env_reason:
+            if not reason:
+                reason = env_reason
+            elif env_reason not in reason:
+                reason = f"{reason}；{env_reason}"
+        suggestions.extend(env_suggestions)
+        if not suggestions and reason:
+            suggestions = self._default_speech_suggestions()
+        return reason, self._dedupe_suggestions(suggestions)
+
+    def _ensure_speech_manager(self) -> Optional[TTSManager]:
+        manager = self.tts_manager
+        if manager and manager.available:
+            return manager
+        if manager is not None:
+            try:
+                manager.shutdown()
+            except Exception:
+                pass
+        manager = TTSManager(self.selected_voice_id, parent=self)
+        self.tts_manager = manager
+        if manager.available:
+            self._speech_issue_reported = False
+            QTimer.singleShot(0, self._update_menu_state)
+        return manager
 
     def _diagnose_speech_engine(self) -> None:
         if self._speech_issue_reported:
@@ -2225,10 +2423,20 @@ class RollCallTimerWindow(QWidget):
             self.speech_enabled = False
             self._schedule_save()
             return
-        manager = self.tts_manager
-        if not manager or not manager.available or not getattr(manager, "voice_ids", []):
+        manager = self._ensure_speech_manager()
+        if not manager or not manager.available:
             reason, suggestions = self._collect_speech_issue_details()
             message = reason or "未检测到语音引擎，无法开启语音播报。"
+            advice = "\n".join(f"· {line}" for line in suggestions)
+            if advice:
+                message = f"{message}\n{advice}"
+            show_quiet_information(self, message, "语音播报提示")
+            self.speech_enabled_action.setChecked(False)
+            self._speech_issue_reported = True
+            return
+        if manager.supports_voice_selection and not getattr(manager, "voice_ids", []):
+            reason, suggestions = self._collect_speech_issue_details()
+            message = reason or "未检测到可用的发音人。"
             advice = "\n".join(f"· {line}" for line in suggestions)
             if advice:
                 message = f"{message}\n{advice}"
@@ -2240,8 +2448,10 @@ class RollCallTimerWindow(QWidget):
         self._schedule_save()
 
     def _set_voice(self, voice_id: str) -> None:
-        if not self.tts_manager: return
-        self.tts_manager.set_voice(voice_id); self.selected_voice_id = voice_id
+        manager = self._ensure_speech_manager()
+        if not manager or not manager.supports_voice_selection:
+            return
+        manager.set_voice(voice_id); self.selected_voice_id = voice_id
         for a in self.voice_actions: a.setChecked(a.text() == voice_id)
         self._schedule_save()
 
@@ -2333,7 +2543,7 @@ class RollCallTimerWindow(QWidget):
         self._pending_passive_student = None
         self._update_score_display()
         self._persist_student_scores()
-        self._speak_text("加一分")
+        self._speak_text("加分")
 
     def show_scoreboard(self) -> None:
         if self.mode != "roll_call":
