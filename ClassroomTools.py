@@ -2833,6 +2833,8 @@ class LauncherWindow(QWidget):
             self.bubble.close()
         if self.roll_call_window is not None: self.roll_call_window.close()
         if self.overlay is not None: self.overlay.close()
+        # 启动器关闭视为重新开课，清理点名历史以便下次全新开始
+        self.settings_manager.clear_roll_call_history()
         super().closeEvent(e)
 
 
@@ -2845,6 +2847,8 @@ def main() -> None:
     QToolTip.setFont(QFont("Microsoft YaHei UI", 9))
 
     settings_manager = SettingsManager()
+    # 每次启动器运行时先清空上一轮的点名记录，确保不会延续上一课堂的名单
+    settings_manager.clear_roll_call_history()
     student_data = load_student_data(None) if PANDAS_AVAILABLE else None
 
     window = LauncherWindow(settings_manager, student_data)
@@ -2852,5 +2856,8 @@ def main() -> None:
     sys.exit(app.exec())
 
 
+# Nuitka 打包指令（根据当前依赖整理的推荐参数，保持在单行便于复制）：
+# 单文件：python -m nuitka --onefile --enable-plugin=pyqt6 --include-qt-plugins=sensible --windows-disable-console --windows-icon-from-ico=icon.ico --include-data-file=students.xlsx=students.xlsx --include-data-file=settings.ini=settings.ini ClassroomTools.py
+# 独立目录：python -m nuitka --standalone --enable-plugin=pyqt6 --include-qt-plugins=sensible --windows-disable-console --windows-icon-from-ico=icon.ico --output-dir=dist --include-data-file=students.xlsx=students.xlsx --include-data-file=settings.ini=settings.ini ClassroomTools.py
 if __name__ == "__main__":
     main()
