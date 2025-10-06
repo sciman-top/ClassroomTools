@@ -50,7 +50,6 @@ from PyQt6.QtWidgets import (
     QApplication,
     QButtonGroup,
     QCheckBox,
-    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFrame,
@@ -1635,6 +1634,19 @@ class ClickableFrame(QFrame):
         super().mousePressEvent(e)
 
 
+def preferred_calligraphy_font(default: str = "Microsoft YaHei UI") -> str:
+    """返回系统中更具书法风格的字体，若不可用则回退到默认字体。"""
+
+    try:
+        families = set(QFontDatabase().families())
+    except Exception:
+        return default
+    for candidate in ("楷体", "KaiTi", "Kaiti SC", "STKaiti", "DFKai-SB", "FZKai-Z03S"):
+        if candidate in families:
+            return candidate
+    return default
+
+
 class StudentListDialog(QDialog):
     def __init__(self, parent: Optional[QWidget], students: List[tuple[str, str, int]]) -> None:
         super().__init__(parent)
@@ -1702,55 +1714,124 @@ class ScoreboardDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("成绩展示")
         self.setModal(True)
+        self.setObjectName("ScoreboardDialog")
+        self._pending_maximize = True
+
+        calligraphy_font = preferred_calligraphy_font()
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
+        layout.setContentsMargins(32, 32, 32, 32)
+        layout.setSpacing(24)
 
-        grid = QGridLayout()
-        grid.setSpacing(8)
+        title = QLabel("成绩展示")
+        title.setObjectName("ScoreboardHeader")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setFont(QFont(calligraphy_font, 40, QFont.Weight.Bold))
+        layout.addWidget(title)
 
-        header = QLabel("姓名 / 成绩")
-        header.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        header.setFont(QFont("Microsoft YaHei UI", 11, QFont.Weight.Bold))
-        layout.addWidget(header)
+        subtitle = QLabel("课堂表现一目了然")
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        subtitle.setFont(QFont("Microsoft YaHei UI", 16, QFont.Weight.Medium))
+        subtitle.setStyleSheet("color: #1b4b8c;")
+        layout.addWidget(subtitle)
 
-        count = len(students)
-        if count == 0:
-            layout.addWidget(QLabel("暂无成绩数据"))
-        else:
-            screen = QApplication.primaryScreen()
-            available_width = screen.availableGeometry().width() if screen else 960
-            column_width = 220
-            columns = max(1, min(6, available_width // column_width))
-            rows = math.ceil(count / columns)
-            label_font = QFont("Microsoft YaHei UI", 10, QFont.Weight.Medium)
-            for col in range(columns):
-                grid.setColumnStretch(col, 1)
-            for idx, (sid, name, score) in enumerate(students):
-                row = idx // columns
-                column = idx % columns
-                if sid:
-                    text = f"{name}（{sid}）  {score}分"
-                else:
-                    text = f"{name}  {score}分"
-                detail = QLabel(text)
-                detail.setFont(label_font)
-                detail.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-                detail.setStyleSheet("padding: 4px 6px; background-color: #ffffff; border-radius: 6px;")
-                grid.addWidget(detail, row, column)
-            layout.addLayout(grid)
+        grid_container = QWidget()
+        grid_container.setObjectName("ScoreboardGridContainer")
+        grid = QGridLayout(grid_container)
+        grid.setContentsMargins(12, 12, 12, 12)
+        grid.setHorizontalSpacing(24)
+        grid.setVerticalSpacing(18)
+        layout.addWidget(grid_container, 1)
 
         box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=self)
+        close_button = box.button(QDialogButtonBox.StandardButton.Close)
+        if close_button is not None:
+            close_button.setText("关闭")
+            close_button.setMinimumHeight(42)
+            close_button.setCursor(Qt.CursorShape.PointingHandCursor)
         box.rejected.connect(self.reject)
         layout.addWidget(box)
 
-        if count:
+        self.setStyleSheet(
+            "#ScoreboardDialog {"
+            "    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,"
+            "        stop:0 #f7f9fc, stop:1 #e3edff);"
+            "}"
+            "#ScoreboardGridContainer {"
+            "    background-color: rgba(255, 255, 255, 0.85);"
+            "    border-radius: 24px;"
+            "}"
+            "QLabel#ScoreboardHeader {"
+            "    color: #0b3d91;"
+            "}"
+            "QLabel[class=\"scoreboardItem\"] {"
+            "    color: #103d73;"
+            "}"
+            "QWidget[class=\"scoreboardWrapper\"] {"
+            "    background-color: rgba(255, 255, 255, 0.95);"
+            "    border-radius: 18px;"
+            "    border: 1px solid rgba(16, 61, 115, 0.12);"
+            "    padding: 16px 18px;"
+            "}"
+        )
+
+        count = len(students)
+        if count == 0:
+            empty = QLabel("暂无成绩数据")
+            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            empty.setFont(QFont(calligraphy_font, 28, QFont.Weight.Bold))
+            empty.setStyleSheet("color: #103d73;")
+            grid.addWidget(empty, 0, 0)
+            grid.setColumnStretch(0, 1)
+        else:
             if screen := QApplication.primaryScreen():
                 available = screen.availableGeometry()
-                width = min(int(available.width() * 0.9), max(520, columns * 220 + 48))
-                height = min(int(available.height() * 0.9), rows * 56 + header.sizeHint().height() + box.sizeHint().height() + 80)
-                self.resize(width, height)
+                width = max(1, available.width())
+                columns = max(2, min(6, width // 320))
+            else:
+                columns = 4
+            columns = min(columns, count)
+            rows = math.ceil(count / columns)
+            for col in range(columns):
+                grid.setColumnStretch(col, 1)
+            for row in range(rows):
+                grid.setRowStretch(row, 1)
+            item_font = QFont(calligraphy_font, 30, QFont.Weight.Bold)
+            score_font = QFont("Microsoft YaHei UI", 20, QFont.Weight.Medium)
+            for idx, (_sid, name, score) in enumerate(students):
+                row = idx // columns
+                column = idx % columns
+                text = f"{idx + 1}. {name}"
+                label = QLabel(text)
+                label.setProperty("class", "scoreboardItem")
+                label.setWordWrap(True)
+                label.setFont(item_font)
+                label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                detail = QLabel(f"{score} 分")
+                detail.setFont(score_font)
+                detail.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                detail.setStyleSheet("color: #1b4b8c; margin-top: 8px;")
+
+                wrapper = QWidget()
+                wrapper.setProperty("class", "scoreboardWrapper")
+                wrapper_layout = QVBoxLayout(wrapper)
+                wrapper_layout.setContentsMargins(0, 0, 0, 0)
+                wrapper_layout.setSpacing(6)
+                wrapper_layout.addWidget(label)
+                wrapper_layout.addWidget(detail)
+                wrapper_layout.addStretch(1)
+                grid.addWidget(wrapper, row, column)
+
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            self.setGeometry(available)
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        if self._pending_maximize:
+            self._pending_maximize = False
+            self.setWindowState(self.windowState() | Qt.WindowState.WindowMaximized)
 
 
 class RollCallTimerWindow(QWidget):
@@ -1913,29 +1994,17 @@ class RollCallTimerWindow(QWidget):
         self.group_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         top.addWidget(self.group_label, 0, Qt.AlignmentFlag.AlignLeft)
 
-        self.group_combo = QComboBox(); self.group_combo.addItems(self.groups); self.group_combo.setCurrentText(self.current_group_name)
-        self.group_combo.setFixedHeight(28)
-        self.group_combo.setMinimumContentsLength(3)
-        self.group_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self.group_combo.currentTextChanged.connect(self.on_group_change)
-
-        self.group_placeholder = QWidget()
-        self.group_placeholder.setFixedHeight(28)
-
-        self.group_stack = QStackedWidget()
-        self.group_stack.setFixedHeight(28)
-        self.group_stack.addWidget(self.group_combo)
-        self.group_stack.addWidget(self.group_placeholder)
-        combo_hint = max(96, min(126, self.group_combo.sizeHint().width()))
-        self.group_combo.setFixedWidth(combo_hint)
-        self.group_placeholder.setFixedWidth(combo_hint)
-        self.group_stack.setFixedWidth(combo_hint)
-        self.group_combo.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self.group_placeholder.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self.group_stack.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        top.addWidget(self.group_stack, 0, Qt.AlignmentFlag.AlignLeft)
-        popup_width = max(combo_hint + 20, 170)
-        self.group_combo.view().setMinimumWidth(popup_width)
+        self.group_bar = QWidget()
+        self.group_bar.setFixedHeight(28)
+        self.group_bar.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        self.group_bar_layout = QHBoxLayout(self.group_bar)
+        self.group_bar_layout.setContentsMargins(0, 0, 0, 0)
+        self.group_bar_layout.setSpacing(4)
+        self.group_button_group = QButtonGroup(self)
+        self.group_button_group.setExclusive(True)
+        self.group_buttons: Dict[str, QPushButton] = {}
+        self._rebuild_group_buttons_ui()
+        top.addWidget(self.group_bar, 1, Qt.AlignmentFlag.AlignLeft)
 
         self.reset_button = QPushButton("重置")
         self.reset_button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1984,8 +2053,13 @@ class RollCallTimerWindow(QWidget):
             lab.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.score_label = QLabel("成绩：--")
         self.score_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.score_label.setFont(QFont("Microsoft YaHei UI", 20, QFont.Weight.Bold))
-        self.score_label.setStyleSheet("color: #1a73e8;")
+        self.score_label.setFont(QFont("Microsoft YaHei UI", 30, QFont.Weight.Bold))
+        self.score_label.setStyleSheet(
+            "color: #0b57d0;"
+            "background-color: #e8f0fe;"
+            "border-radius: 12px;"
+            "padding: 10px 16px;"
+        )
 
         rl.addWidget(self.id_label, 0, 0); rl.addWidget(self.name_label, 0, 1)
         rl.addWidget(self.score_label, 1, 0, 1, 2)
@@ -2175,6 +2249,36 @@ class RollCallTimerWindow(QWidget):
         self.timer_sound_enabled = enabled
         self._schedule_save()
 
+    def _speak_text(self, text: str) -> None:
+        if not text:
+            return
+        manager = self.tts_manager
+        if not (self.speech_enabled and manager and manager.available):
+            return
+        manager.speak(text)
+
+    def _announce_current_student(self) -> None:
+        if (
+            not self.speech_enabled
+            or self.tts_manager is None
+            or not self.tts_manager.available
+            or self.current_student_index is None
+            or self.student_data is None
+            or self.student_data.empty
+        ):
+            return
+        try:
+            stu = self.student_data.loc[self.current_student_index]
+        except Exception:
+            return
+        name_value = stu.get("姓名", "")
+        if isinstance(name_value, str):
+            name = name_value.strip()
+        else:
+            name = str(name_value).strip() if pd.notna(name_value) else ""
+        if name:
+            self._speak_text(name)
+
     def show_student_selector(self) -> None:
         if self.mode != "roll_call":
             return
@@ -2207,6 +2311,7 @@ class RollCallTimerWindow(QWidget):
                 self.current_student_index = selected
                 self._pending_passive_student = None
                 self.display_current_student()
+                self._announce_current_student()
 
     def increment_current_score(self) -> None:
         if self.mode != "roll_call":
@@ -2228,6 +2333,7 @@ class RollCallTimerWindow(QWidget):
         self._pending_passive_student = None
         self._update_score_display()
         self._persist_student_scores()
+        self._speak_text("加一分")
 
     def show_scoreboard(self) -> None:
         if self.mode != "roll_call":
@@ -2291,17 +2397,19 @@ class RollCallTimerWindow(QWidget):
         self.title_label.setText("点名" if is_roll else "计时")
         self.mode_button.setText("切换到计时" if is_roll else "切换到点名")
         self.group_label.setVisible(is_roll)
+        if hasattr(self, "group_bar"):
+            self.group_bar.setVisible(is_roll)
         self._update_roll_call_controls()
         if is_roll:
             if self._placeholder_on_show:
                 self.current_student_index = None
-            self.stack.setCurrentWidget(self.roll_call_frame); self.group_stack.setCurrentWidget(self.group_combo)
+            self.stack.setCurrentWidget(self.roll_call_frame)
             self.count_timer.stop(); self.clock_timer.stop(); self.timer_running = False; self.timer_start_pause_button.setText("开始")
             self.update_display_layout(); self.display_current_student()
             self.schedule_font_update()
             self._placeholder_on_show = False
         else:
-            self.stack.setCurrentWidget(self.timer_frame); self.group_stack.setCurrentWidget(self.group_placeholder)
+            self.stack.setCurrentWidget(self.timer_frame)
             changed = False
             if force_timer_reset:
                 changed = self.reset_timer(persist=False)
@@ -2433,24 +2541,26 @@ class RollCallTimerWindow(QWidget):
             threading.Thread(target=_play, daemon=True).start()
 
     def on_group_change(self, group_name: Optional[str] = None, initial: bool = False) -> None:
+        if not self.groups:
+            return
         if group_name is None:
-            group_name = self.group_combo.currentText()
+            group_name = self.current_group_name
         if group_name not in self.groups:
-            group_name = "全部"
-            if self.group_combo.currentText() != group_name:
-                self.group_combo.setCurrentText(group_name)
+            group_name = "全部" if "全部" in self.groups else self.groups[0]
+        previous_group = self.current_group_name
         self.current_group_name = group_name
+        self._update_group_button_state(group_name)
         if self.student_data.empty:
             self.current_student_index = None
             self.display_current_student()
-            if not initial:
+            if not initial and previous_group != group_name:
                 self._schedule_save()
             return
         self._pending_passive_student = None
         self._ensure_group_pool(group_name)
         self.current_student_index = None
         self.display_current_student()
-        if not initial:
+        if not initial and previous_group != group_name:
             self._schedule_save()
 
     def roll_student(self, speak: bool = True) -> None:
@@ -2477,10 +2587,8 @@ class RollCallTimerWindow(QWidget):
         self._group_last_student[group_name] = self.current_student_index
         self._mark_student_drawn(self.current_student_index)
         self.display_current_student()
-        if speak and self.speech_enabled and self.tts_manager and self.tts_manager.available:
-            stu = self.student_data.loc[self.current_student_index]
-            name = str(stu["姓名"]) if "姓名" in stu and pd.notna(stu["姓名"]) else ""
-            if name: self.tts_manager.speak(name)
+        if speak:
+            self._announce_current_student()
         # 即时同步保存配置，防止异常退出导致未点名名单丢失。
         self.save_settings()
 
@@ -2917,6 +3025,58 @@ class RollCallTimerWindow(QWidget):
         if not self.show_name: layout.setColumnStretch(1, 0)
         self.schedule_font_update()
 
+    def _rebuild_group_buttons_ui(self) -> None:
+        if not hasattr(self, "group_bar_layout"):
+            return
+        for button in list(self.group_button_group.buttons()):
+            self.group_button_group.removeButton(button)
+        while self.group_bar_layout.count():
+            item = self.group_bar_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self.group_buttons = {}
+        if not self.groups:
+            return
+        button_font = QFont("Microsoft YaHei UI", 9, QFont.Weight.Medium)
+        for group in self.groups:
+            button = QPushButton(group)
+            button.setCheckable(True)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setFixedHeight(28)
+            button.setFont(button_font)
+            button.setStyleSheet(
+                "QPushButton {"
+                "    padding: 4px 14px;"
+                "    border-radius: 14px;"
+                "    border: 1px solid #d0d7de;"
+                "    background-color: #ffffff;"
+                "    color: #1b1f24;"
+                "}"
+                "QPushButton:hover {"
+                "    border-color: #1a73e8;"
+                "}"
+                "QPushButton:checked {"
+                "    background-color: #1a73e8;"
+                "    color: #ffffff;"
+                "    border-color: #1a73e8;"
+                "}"
+            )
+            button.clicked.connect(lambda _checked=False, name=group: self.on_group_change(name))
+            self.group_bar_layout.addWidget(button)
+            self.group_button_group.addButton(button)
+            self.group_buttons[group] = button
+        self.group_bar_layout.addStretch(1)
+        self._update_group_button_state(self.current_group_name)
+
+    def _update_group_button_state(self, active_group: str) -> None:
+        if not hasattr(self, "group_buttons"):
+            return
+        for name, button in self.group_buttons.items():
+            block = button.blockSignals(True)
+            button.setChecked(name == active_group)
+            button.blockSignals(block)
+
     def _update_score_display(self) -> None:
         if not hasattr(self, "score_label"):
             return
@@ -2968,7 +3128,7 @@ class RollCallTimerWindow(QWidget):
             w = max(60, self.score_label.width())
             h = max(32, self.score_label.height())
             text = self.score_label.text()
-            size = max(self.MIN_FONT_SIZE, min(36, self._calc_font_size(w, h, text)))
+            size = max(self.MIN_FONT_SIZE, min(54, self._calc_font_size(w, h, text)))
             self.score_label.setFont(QFont("Microsoft YaHei UI", size, QFont.Weight.Bold))
         if self.timer_frame.isVisible():
             text = self.time_display_label.text()
