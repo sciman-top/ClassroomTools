@@ -542,20 +542,6 @@ class SettingsManager:
             settings["RollCallTimer"] = section
             self.save_settings(settings)
 
-    def clear_roll_call_history(self) -> None:
-        """清空点名相关的历史记录，保证新启动时重新开始。"""
-
-        settings = self.load_settings()
-        section = settings.get("RollCallTimer", {})
-        removed = False
-        for key in ("group_remaining", "group_last", "global_drawn"):
-            if key in section:
-                section.pop(key, None)
-                removed = True
-        if removed:
-            settings["RollCallTimer"] = section
-            self.save_settings(settings)
-
 
 # ---------- 自绘置顶 ToolTip ----------
 class TipWindow(QWidget):
@@ -1641,7 +1627,7 @@ class RollCallTimerWindow(QWidget):
         self.group_stack.setFixedHeight(28)
         self.group_stack.addWidget(self.group_combo)
         self.group_stack.addWidget(self.group_placeholder)
-        combo_hint = max(108, min(138, self.group_combo.sizeHint().width()))
+        combo_hint = max(96, min(126, self.group_combo.sizeHint().width()))
         self.group_combo.setFixedWidth(combo_hint)
         self.group_placeholder.setFixedWidth(combo_hint)
         self.group_stack.setFixedWidth(combo_hint)
@@ -2713,7 +2699,7 @@ class LauncherWindow(QWidget):
 
         self.about_button = QPushButton("关于"); self.about_button.clicked.connect(self.show_about); bottom.addWidget(self.about_button)
         self.exit_button = QPushButton("退出")
-        self.exit_button.clicked.connect(QApplication.instance().quit)
+        self.exit_button.clicked.connect(self.request_exit)
         bottom.addWidget(self.exit_button)
         v.addLayout(bottom)
 
@@ -2844,6 +2830,26 @@ class LauncherWindow(QWidget):
         if not WINREG_AVAILABLE: return
         enabled = self.autostart_check.isChecked()
         self.set_autostart(enabled); self.save_position()
+
+    def request_exit(self) -> None:
+        """优雅地关闭应用程序，确保所有窗口在退出前持久化状态。"""
+
+        app = QApplication.instance()
+        if not self.close():
+            return
+        if app is not None:
+            QTimer.singleShot(0, app.quit)
+
+    def handle_about_to_quit(self) -> None:
+        """在应用退出前的最后一道保险，保证关键状态已经写入配置。"""
+
+        self.save_position()
+        window = self.roll_call_window
+        if window is not None:
+            try:
+                window.save_settings()
+            except RuntimeError:
+                pass
 
     def minimize_launcher(self, from_settings: bool = False) -> None:
         """将启动器收纳为悬浮圆球。"""
@@ -2984,6 +2990,7 @@ def main() -> None:
     student_data = load_student_data(None) if PANDAS_AVAILABLE else None
 
     window = LauncherWindow(settings_manager, student_data)
+    app.aboutToQuit.connect(window.handle_about_to_quit)
     window.show()
     sys.exit(app.exec())
 
