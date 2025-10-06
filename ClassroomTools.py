@@ -11,6 +11,7 @@ import json
 import math
 import os
 import random
+import re
 import shutil
 import subprocess
 import sys
@@ -2229,7 +2230,7 @@ class ScoreboardDialog(QDialog):
         name_font_size = int(max(26, min(110, base_font_value)))
         primary_font_size = int(max(20, min(name_font_size * 0.55, card_height * 0.22)))
         secondary_font_size = int(max(18, min(primary_font_size * 0.85, card_height * 0.18)))
-        score_font_size = int(max(24, min(name_font_size * 0.75, card_height * 0.3)))
+        score_font_size = name_font_size
         padding_v = max(14, int(card_height * 0.16))
         padding_h = max(14, int(card_width * 0.12))
         inner_spacing = max(6, int(card_height * 0.08))
@@ -2808,8 +2809,8 @@ class RollCallTimerWindow(QWidget):
         records: List[tuple[int, str, str, int]] = []
         for idx, row in self.student_data.iterrows():
             sid_value = row.get("学号", "")
-            sid_display = "" if (isinstance(sid_value, float) and math.isnan(sid_value)) else str(sid_value).strip()
-            name = str(row.get("姓名", "")).strip()
+            sid_display = re.sub(r"\s+", "", _normalize_text(sid_value))
+            name = re.sub(r"\s+", "", _normalize_text(row.get("姓名", "")))
             try:
                 sort_key = int(sid_display) if sid_display else sys.maxsize
             except (TypeError, ValueError):
@@ -2866,8 +2867,8 @@ class RollCallTimerWindow(QWidget):
         records: List[tuple[str, str, int]] = []
         for _, row in self.student_data.iterrows():
             sid_value = row.get("学号", "")
-            sid_display = "" if (isinstance(sid_value, float) and math.isnan(sid_value)) else str(sid_value).strip()
-            name = str(row.get("姓名", "")).strip() or "未命名"
+            sid_display = re.sub(r"\s+", "", _normalize_text(sid_value))
+            name = re.sub(r"\s+", "", _normalize_text(row.get("姓名", ""))) or "未命名"
             value = row.get("成绩", 0)
             try:
                 score = int(value)
@@ -2890,11 +2891,8 @@ class RollCallTimerWindow(QWidget):
         try:
             with self._score_write_lock:
                 df = self.student_data.copy()
-                preferred_columns = [col for col in ["学号", "姓名", "分组", "成绩"] if col in df.columns]
-                if preferred_columns:
-                    df.to_excel(self.STUDENT_FILE, index=False, columns=preferred_columns)
-                else:
-                    df.to_excel(self.STUDENT_FILE, index=False)
+                df = _normalize_student_dataframe(df, drop_incomplete=False)
+                _write_student_workbook(self.STUDENT_FILE, df)
             self._score_persist_failed = False
         except Exception as exc:
             if not self._score_persist_failed:
@@ -3524,7 +3522,10 @@ class RollCallTimerWindow(QWidget):
             self.name_label.setText("学生" if self.show_name else "")
         else:
             stu = self.student_data.loc[self.current_student_index]
-            sid = str(stu["学号"]) if pd.notna(stu["学号"]) else ""; name = str(stu["姓名"]) if pd.notna(stu["姓名"]) else ""
+            raw_sid = stu.get("学号", "")
+            raw_name = stu.get("姓名", "")
+            sid = re.sub(r"\s+", "", _normalize_text(raw_sid))
+            name = re.sub(r"\s+", "", _normalize_text(raw_name))
             self.id_label.setText(sid if self.show_id else ""); self.name_label.setText(name if self.show_name else "")
             if not self.show_id: self.id_label.setText("")
             if not self.show_name: self.name_label.setText("")
@@ -3803,6 +3804,113 @@ class AboutDialog(QDialog):
 
 
 # ---------- 数据 ----------
+def _normalize_text(value: object) -> str:
+    if PANDAS_AVAILABLE and pd is not None:
+        if pd.isna(value):
+            return ""
+    else:
+        if value is None:
+            return ""
+        if isinstance(value, float) and math.isnan(value):
+            return ""
+        if isinstance(value, str) and not value:
+            return ""
+    text = str(value).strip()
+    lowered = text.lower()
+    if lowered in {"nan", "none", "nat"}:
+        return ""
+    return text
+
+
+def _normalize_student_dataframe(df: pd.DataFrame, drop_incomplete: bool = True) -> pd.DataFrame:
+    if not (PANDAS_AVAILABLE and pd is not None):
+        return df.copy()
+
+    normalized = df.copy()
+    for column in ("学号", "姓名", "分组", "成绩"):
+        if column not in normalized.columns:
+            normalized[column] = pd.NA
+
+    normalized["姓名"] = normalized["姓名"].apply(lambda v: re.sub(r"\s+", "", _normalize_text(v)))
+    normalized["分组"] = normalized["分组"].apply(lambda v: re.sub(r"\s+", "", _normalize_text(v))).str.upper()
+
+    id_series = normalized["学号"].apply(lambda v: re.sub(r"\s+", "", _normalize_text(v)))
+    id_numeric = pd.to_numeric(id_series.replace("", pd.NA), errors="coerce")
+    if not id_numeric.empty:
+        fractional_mask = id_numeric.notna() & (id_numeric != id_numeric.round())
+        id_numeric = id_numeric.where(~fractional_mask)
+    normalized["学号"] = id_numeric.round().astype("Int64")
+
+    score_series = normalized["成绩"].apply(lambda v: re.sub(r"\s+", "", _normalize_text(v)))
+    score_numeric = pd.to_numeric(score_series.replace("", pd.NA), errors="coerce").fillna(0)
+    score_numeric = score_numeric.round()
+    normalized["成绩"] = score_numeric.astype("Int64")
+
+    for column in normalized.select_dtypes(include=["object"]).columns:
+        if column in {"姓名", "分组"}:
+            continue
+        normalized[column] = normalized[column].apply(_normalize_text)
+
+    ordered_columns = [col for col in ["学号", "姓名", "分组", "成绩"] if col in normalized.columns]
+    extra_columns = [col for col in normalized.columns if col not in ordered_columns]
+    normalized = normalized[ordered_columns + extra_columns]
+
+    if drop_incomplete:
+        normalized = normalized[(normalized["学号"].notna()) & (normalized["姓名"] != "")].copy()
+        normalized.reset_index(drop=True, inplace=True)
+
+    return normalized
+
+
+def _write_student_workbook(file_path: str, df: pd.DataFrame) -> None:
+    try:
+        export_df = _normalize_student_dataframe(df, drop_incomplete=False)
+    except Exception:
+        export_df = df.copy()
+
+    if not OPENPYXL_AVAILABLE:
+        export_df.to_excel(file_path, index=False)
+        return
+
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font
+    except Exception:
+        export_df.to_excel(file_path, index=False)
+        return
+
+    try:
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.title = "students"
+
+        headers = list(export_df.columns)
+        worksheet.append(headers)
+        header_font = Font(name="等线", size=12, bold=True)
+        body_font = Font(name="等线", size=12)
+        for cell in worksheet[1]:
+            cell.font = header_font
+
+        for row_values in export_df.itertuples(index=False, name=None):
+            normalized_row = []
+            for value in row_values:
+                if pd.isna(value):
+                    normalized_row.append(None)
+                else:
+                    normalized_row.append(value)
+            worksheet.append(tuple(normalized_row))
+
+        for row in worksheet.iter_rows(min_row=2):
+            for cell in row:
+                cell.font = body_font
+                if isinstance(cell.value, str):
+                    cell.value = cell.value.strip()
+
+        workbook.save(file_path)
+    except Exception:
+        export_df.to_excel(file_path, index=False)
+
+
 def load_student_data(parent: Optional[QWidget]) -> Optional[pd.DataFrame]:
     """从 students.xlsx 读取点名所需的数据，不存在时自动生成模板。"""
     if not (PANDAS_AVAILABLE and OPENPYXL_AVAILABLE):
@@ -3811,26 +3919,20 @@ def load_student_data(parent: Optional[QWidget]) -> Optional[pd.DataFrame]:
     file_path = RollCallTimerWindow.STUDENT_FILE
     if not os.path.exists(file_path):
         try:
-            df = pd.DataFrame({"学号": [101, 102, 103], "姓名": ["张三", "李四", "王五"], "分组": ["A", "B", "A"], "成绩": [0, 0, 0]})
-            df.to_excel(file_path, index=False)
+            df = pd.DataFrame(
+                {"学号": [101, 102, 103], "姓名": ["张三", "李四", "王五"], "分组": ["A", "B", "A"], "成绩": [0, 0, 0]}
+            )
+            df = _normalize_student_dataframe(df)
+            _write_student_workbook(file_path, df)
             show_quiet_information(parent, f"未找到学生名单，已为您创建模板文件：{file_path}")
         except Exception as exc:
             QMessageBox.critical(parent, "错误", f"创建模板文件失败：{exc}")
             return None
     try:
         df = pd.read_excel(file_path)
-        for column in ("学号", "姓名", "分组"):
-            if column not in df.columns:
-                df[column] = ""
-        df["学号"] = pd.to_numeric(df["学号"], errors="coerce").astype("Int64")
-        df["姓名"] = df["姓名"].astype(str).str.strip()
-        df["分组"] = df["分组"].astype(str).str.strip().str.upper()
-        if "成绩" not in df.columns:
-            df["成绩"] = 0
-        df["成绩"] = pd.to_numeric(df["成绩"], errors="coerce").fillna(0).astype("Int64")
-        df.dropna(subset=["学号", "姓名"], inplace=True)
-        ordered_columns = [col for col in ["学号", "姓名", "分组", "成绩"] if col in df.columns]
-        return df[ordered_columns]
+        df = _normalize_student_dataframe(df)
+        _write_student_workbook(file_path, df)
+        return df
     except Exception as exc:
         QMessageBox.critical(parent, "错误", f"无法加载学生名单，请检查文件格式。\n错误：{exc}")
         return None
