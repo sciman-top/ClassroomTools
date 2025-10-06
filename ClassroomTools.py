@@ -18,7 +18,7 @@ import tempfile
 import threading
 import time
 from queue import Empty, Queue
-from typing import Dict, List, Optional, Mapping
+from typing import Callable, Dict, List, Optional, Mapping
 
 from PyQt6.QtCore import (
     QByteArray,
@@ -519,6 +519,7 @@ class SettingsManager:
                 "id_font_size": "48",
                 "name_font_size": "60",
                 "timer_font_size": "56",
+                "scoreboard_order": "rank",
             },
             "Paint": {"x": "260", "y": "260", "brush_size": "12", "brush_color": "#ff0000"},
         }
@@ -1856,20 +1857,31 @@ class StudentListDialog(QDialog):
 
         grid = QGridLayout()
         grid.setContentsMargins(0, 0, 0, 0)
-        grid.setSpacing(6)
+        grid.setHorizontalSpacing(6)
+        grid.setVerticalSpacing(6)
+        grid.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
 
         button_font = QFont("Microsoft YaHei UI", 10, QFont.Weight.Medium)
         metrics = QFontMetrics(button_font)
         max_text = max((metrics.horizontalAdvance(f"{sid} {name}") for sid, name, _ in students), default=120)
         min_button_width = max(120, max_text + 24)
+        button_height = max(36, metrics.height() + 14)
 
         screen = QApplication.primaryScreen()
         available_width = screen.availableGeometry().width() if screen else 1280
         max_width_per_button = max(96, int((available_width * 0.9 - 40) / 10))
         button_width = min(min_button_width, max_width_per_button)
+        button_size = QSize(button_width, button_height)
+
+        total_rows = max(1, math.ceil(len(students) / 10))
 
         for column in range(10):
-            grid.setColumnStretch(column, 1)
+            grid.setColumnStretch(column, 0)
+            grid.setColumnMinimumWidth(column, button_width)
+
+        for row in range(total_rows):
+            grid.setRowStretch(row, 0)
+            grid.setRowMinimumHeight(row, button_height)
 
         for position, (sid, name, data_index) in enumerate(students):
             row = position // 10
@@ -1877,11 +1889,10 @@ class StudentListDialog(QDialog):
             button = QPushButton(f"{sid} {name}")
             button.setFont(button_font)
             button.setCursor(Qt.CursorShape.PointingHandCursor)
-            button.setMinimumWidth(button_width)
-            button.setFixedHeight(36)
-            button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            button.setFixedSize(button_size)
+            button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             button.clicked.connect(lambda _checked=False, value=data_index: self._select_student(value))
-            grid.addWidget(button, row, column)
+            grid.addWidget(button, row, column, Qt.AlignmentFlag.AlignCenter)
 
         layout.addLayout(grid)
 
@@ -1891,9 +1902,14 @@ class StudentListDialog(QDialog):
 
         if screen is not None:
             available = screen.availableGeometry()
-            rows = max(1, math.ceil(len(students) / 10))
-            preferred_width = min(int(available.width() * 0.9), button_width * 10 + 40)
-            preferred_height = min(int(available.height() * 0.85), rows * 44 + box.sizeHint().height() + 48)
+            rows = total_rows
+            h_spacing = grid.horizontalSpacing() if grid.horizontalSpacing() is not None else 6
+            v_spacing = grid.verticalSpacing() if grid.verticalSpacing() is not None else 6
+            preferred_width = min(int(available.width() * 0.9), button_width * 10 + h_spacing * 9 + 40)
+            preferred_height = min(
+                int(available.height() * 0.85),
+                rows * button_height + max(0, rows - 1) * v_spacing + box.sizeHint().height() + 48,
+            )
             self.resize(preferred_width, preferred_height)
 
     def _select_student(self, index: int) -> None:
@@ -1906,14 +1922,30 @@ class StudentListDialog(QDialog):
 
 
 class ScoreboardDialog(QDialog):
-    def __init__(self, parent: Optional[QWidget], students: List[tuple[str, str, int]]) -> None:
+    ORDER_RANK = "rank"
+    ORDER_ID = "id"
+
+    def __init__(
+        self,
+        parent: Optional[QWidget],
+        students: List[tuple[str, str, int]],
+        order: str = "rank",
+        order_changed: Optional[Callable[[str], None]] = None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("成绩展示")
         self.setModal(True)
         self.setObjectName("ScoreboardDialog")
         self._pending_maximize = True
 
+        self.students = list(students)
+        self._order_changed_callback = order_changed
+        self._order = order if order in {self.ORDER_RANK, self.ORDER_ID} else self.ORDER_RANK
+        self._grid_row_count = 0
+        self._grid_column_count = 0
+
         calligraphy_font = preferred_calligraphy_font()
+        self._calligraphy_font = calligraphy_font
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(32, 32, 32, 32)
@@ -1925,12 +1957,37 @@ class ScoreboardDialog(QDialog):
         title.setFont(QFont(calligraphy_font, 44, QFont.Weight.Bold))
         layout.addWidget(title)
 
+        order_layout = QHBoxLayout()
+        order_layout.setContentsMargins(0, 0, 0, 0)
+        order_layout.setSpacing(12)
+        order_label = QLabel("排序方式：")
+        order_label.setFont(QFont(calligraphy_font, 28, QFont.Weight.Bold))
+        order_layout.addWidget(order_label, 0, Qt.AlignmentFlag.AlignLeft)
+
+        button_font = QFont(calligraphy_font, 22, QFont.Weight.Bold)
+        self.order_button_group = QButtonGroup(self)
+        self.order_button_group.setExclusive(True)
+        self.order_buttons: Dict[str, QPushButton] = {}
+        for key, text in ((self.ORDER_RANK, "按排名"), (self.ORDER_ID, "按学号")):
+            button = QPushButton(text)
+            button.setCheckable(True)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setProperty("class", "orderButton")
+            button.setFont(button_font)
+            button.setFixedSize(140, 44)
+            self.order_button_group.addButton(button)
+            button.clicked.connect(lambda _checked=False, value=key: self._on_order_button_clicked(value))
+            order_layout.addWidget(button, 0, Qt.AlignmentFlag.AlignLeft)
+            self.order_buttons[key] = button
+        order_layout.addStretch(1)
+        layout.addLayout(order_layout)
+
         grid_container = QWidget()
         grid_container.setObjectName("ScoreboardGridContainer")
-        grid = QGridLayout(grid_container)
-        grid.setContentsMargins(18, 18, 18, 18)
-        grid.setHorizontalSpacing(20)
-        grid.setVerticalSpacing(20)
+        self.grid_layout = QGridLayout(grid_container)
+        self.grid_layout.setContentsMargins(18, 18, 18, 18)
+        self.grid_layout.setHorizontalSpacing(20)
+        self.grid_layout.setVerticalSpacing(20)
         layout.addWidget(grid_container, 1)
 
         box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=self)
@@ -1956,7 +2013,16 @@ class ScoreboardDialog(QDialog):
             "QLabel#ScoreboardHeader {"
             "    color: #0b3d91;"
             "}"
-            "QLabel[class=\"scoreboardItem\"] {"
+            "QLabel[class=\"scoreboardName\"] {"
+            "    color: #103d73;"
+            "}"
+            "QLabel[class=\"scoreboardMetaPrimary\"] {"
+            "    color: #1b4b8c;"
+            "}"
+            "QLabel[class=\"scoreboardMetaSecondary\"] {"
+            "    color: rgba(16, 61, 115, 0.78);"
+            "}"
+            "QLabel[class=\"scoreboardScore\"] {"
             "    color: #103d73;"
             "}"
             "QWidget[class=\"scoreboardWrapper\"] {"
@@ -1964,74 +2030,229 @@ class ScoreboardDialog(QDialog):
             "    border-radius: 18px;"
             "    border: 1px solid rgba(16, 61, 115, 0.12);"
             "}"
+            "QPushButton[class=\"orderButton\"] {"
+            "    background-color: rgba(255, 255, 255, 0.88);"
+            "    border-radius: 22px;"
+            "    border: 1px solid rgba(16, 61, 115, 0.24);"
+            "    padding: 4px 18px;"
+            "    color: #0b3d91;"
+            "}"
+            "QPushButton[class=\"orderButton\"]:hover {"
+            "    border-color: #1a73e8;"
+            "    background-color: rgba(26, 115, 232, 0.12);"
+            "}"
+            "QPushButton[class=\"orderButton\"]:checked {"
+            "    background-color: #1a73e8;"
+            "    border-color: #1a73e8;"
+            "    color: #ffffff;"
+            "}"
         )
 
         screen = QApplication.primaryScreen()
-        available = screen.availableGeometry() if screen is not None else QRect(0, 0, 1920, 1080)
+        self._available_geometry = screen.availableGeometry() if screen is not None else QRect(0, 0, 1920, 1080)
 
-        count = len(students)
+        self._update_order_buttons()
+        self._populate_grid()
+
+        if screen is not None:
+            self.setGeometry(self._available_geometry)
+
+    def _update_order_buttons(self) -> None:
+        for key, button in self.order_buttons.items():
+            block = button.blockSignals(True)
+            button.setChecked(key == self._order)
+            button.blockSignals(block)
+
+    def _on_order_button_clicked(self, order: str) -> None:
+        if order not in {self.ORDER_RANK, self.ORDER_ID}:
+            self._update_order_buttons()
+            return
+        if order == self._order:
+            self._update_order_buttons()
+            return
+        self._order = order
+        if callable(self._order_changed_callback):
+            try:
+                self._order_changed_callback(order)
+            except Exception:
+                pass
+        self._update_order_buttons()
+        self._populate_grid()
+
+    def _clear_grid(self) -> None:
+        while self.grid_layout.count():
+            item = self.grid_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        for row in range(self._grid_row_count):
+            self.grid_layout.setRowStretch(row, 0)
+            self.grid_layout.setRowMinimumHeight(row, 0)
+        for column in range(self._grid_column_count):
+            self.grid_layout.setColumnStretch(column, 0)
+            self.grid_layout.setColumnMinimumWidth(column, 0)
+        self._grid_row_count = 0
+        self._grid_column_count = 0
+
+    def _sort_students(self) -> List[tuple[str, str, int]]:
+        data = list(self.students)
+        if self._order == self.ORDER_ID:
+            def _id_key(item: tuple[str, str, int]) -> tuple[int, str, str]:
+                sid_text = str(item[0]).strip()
+                try:
+                    sid_value = int(sid_text)
+                except (TypeError, ValueError):
+                    sid_value = sys.maxsize
+                return (sid_value, sid_text, item[1])
+
+            data.sort(key=_id_key)
+        else:
+            def _rank_key(item: tuple[str, str, int]) -> tuple[int, int, str]:
+                sid_text = str(item[0]).strip()
+                try:
+                    sid_value = int(sid_text)
+                except (TypeError, ValueError):
+                    sid_value = sys.maxsize
+                return (-item[2], sid_value, item[1])
+
+            data.sort(key=_rank_key)
+        return data
+
+    def _create_card(
+        self,
+        index: int,
+        sid: str,
+        name: str,
+        score: int,
+        card_width: int,
+        card_height: int,
+        name_font_size: int,
+        primary_font_size: int,
+        secondary_font_size: int,
+        score_font_size: int,
+        padding_h: int,
+        padding_v: int,
+        inner_spacing: int,
+    ) -> QWidget:
+        calligraphy_font = self._calligraphy_font
+        wrapper = QWidget()
+        wrapper.setProperty("class", "scoreboardWrapper")
+        wrapper.setFixedSize(card_width, card_height)
+        wrapper.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(padding_h, padding_v, padding_h, padding_v)
+        layout.setSpacing(inner_spacing)
+
+        name_label = QLabel(name or "未命名")
+        name_label.setProperty("class", "scoreboardName")
+        name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        name_label.setWordWrap(True)
+        name_label.setFont(QFont(calligraphy_font, name_font_size, QFont.Weight.Bold))
+        layout.addWidget(name_label)
+
+        sid_display = str(sid).strip() or "—"
+        primary_text = f"第 {index + 1} 名" if self._order == self.ORDER_RANK else f"学号 {sid_display}"
+        secondary_text = f"学号 {sid_display}" if self._order == self.ORDER_RANK else f"第 {index + 1} 名"
+
+        primary_label = QLabel(primary_text)
+        primary_label.setProperty("class", "scoreboardMetaPrimary")
+        primary_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        primary_label.setFont(QFont(calligraphy_font, primary_font_size, QFont.Weight.Bold))
+        layout.addWidget(primary_label)
+
+        secondary_label = QLabel(secondary_text)
+        secondary_label.setProperty("class", "scoreboardMetaSecondary")
+        secondary_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        secondary_label.setFont(QFont(calligraphy_font, secondary_font_size, QFont.Weight.Bold))
+        layout.addWidget(secondary_label)
+
+        score_label = QLabel(f"{score} 分")
+        score_label.setProperty("class", "scoreboardScore")
+        score_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        score_label.setFont(QFont(calligraphy_font, score_font_size, QFont.Weight.Bold))
+        score_label.setStyleSheet(f"margin-top: {max(8, inner_spacing)}px;")
+        layout.addWidget(score_label)
+
+        layout.addStretch(1)
+        return wrapper
+
+    def _populate_grid(self) -> None:
+        self._clear_grid()
+        count = len(self.students)
+        layout = self.grid_layout
+        calligraphy_font = self._calligraphy_font
+
         if count == 0:
             empty = QLabel("暂无成绩数据")
             empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
             empty.setFont(QFont(calligraphy_font, 28, QFont.Weight.Bold))
             empty.setStyleSheet("color: #103d73;")
-            grid.addWidget(empty, 0, 0)
-            grid.setColumnStretch(0, 1)
-        else:
-            usable_width = max(available.width() - 160, 640)
-            usable_height = max(available.height() - 240, 480)
-            columns = 10 if count > 0 else 1
-            rows = max(1, math.ceil(count / max(1, columns)))
-            for col in range(columns):
-                grid.setColumnStretch(col, 1)
-            for row in range(rows):
-                grid.setRowStretch(row, 1)
-            horizontal_spacing = max(6, int(usable_width * 0.02 / max(1, columns)))
-            vertical_spacing = max(6, int(usable_height * 0.08 / max(1, rows)))
-            grid.setHorizontalSpacing(horizontal_spacing)
-            grid.setVerticalSpacing(vertical_spacing)
-            margins = grid.contentsMargins()
-            total_spacing_x = horizontal_spacing * max(0, columns - 1)
-            total_spacing_y = vertical_spacing * max(0, rows - 1)
-            usable_cell_width = (usable_width - margins.left() - margins.right() - total_spacing_x) / max(1, columns)
-            usable_cell_height = (usable_height - margins.top() - margins.bottom() - total_spacing_y) / max(1, rows)
-            base_font_value = min(usable_cell_width * 0.2, usable_cell_height * 0.36)
-            base_font_size = int(max(26, min(108, base_font_value)))
-            score_font_size = int(max(20, min(base_font_size * 0.58, usable_cell_height * 0.26)))
-            item_font = QFont(calligraphy_font, base_font_size, QFont.Weight.Bold)
-            score_font = QFont(calligraphy_font, score_font_size, QFont.Weight.Bold)
-            detail_margin = max(4, int(usable_cell_height * 0.04))
-            for idx, (_sid, name, score) in enumerate(students):
-                row = idx // columns
-                column = idx % columns
-                text = f"{idx + 1}. {name}"
-                label = QLabel(text)
-                label.setProperty("class", "scoreboardItem")
-                label.setWordWrap(True)
-                label.setFont(item_font)
-                label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                detail = QLabel(f"{score} 分")
-                detail.setFont(score_font)
-                detail.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                detail.setStyleSheet(f"color: #1b4b8c; margin-top: {detail_margin}px;")
+            layout.addWidget(empty, 0, 0, Qt.AlignmentFlag.AlignCenter)
+            layout.setRowStretch(0, 1)
+            layout.setColumnStretch(0, 1)
+            self._grid_row_count = 1
+            self._grid_column_count = 1
+            return
 
-                wrapper = QWidget()
-                wrapper.setProperty("class", "scoreboardWrapper")
-                wrapper_layout = QVBoxLayout(wrapper)
-                wrapper_layout.setContentsMargins(0, 0, 0, 0)
-                wrapper_layout.setSpacing(max(4, int(base_font_size * 0.12)))
-                wrapper_layout.addWidget(label)
-                wrapper_layout.addWidget(detail)
-                wrapper_layout.addStretch(1)
-                padding_v = max(12, int(usable_cell_height * 0.1))
-                padding_h = max(12, int(usable_cell_width * 0.08))
-                wrapper.setStyleSheet(
-                    f"background-color: rgba(255, 255, 255, 0.95); border-radius: 18px; border: 1px solid rgba(16, 61, 115, 0.12); padding: {padding_v}px {padding_h}px;"
-                )
-                grid.addWidget(wrapper, row, column)
+        available = self._available_geometry
+        usable_width = max(available.width() - 160, 640)
+        usable_height = max(available.height() - 240, 480)
+        columns = 10
+        rows = max(1, math.ceil(count / columns))
 
-        if screen is not None:
-            self.setGeometry(available)
+        horizontal_spacing = max(12, int(usable_width * 0.018))
+        vertical_spacing = max(12, int(usable_height * 0.06 / rows))
+        layout.setHorizontalSpacing(horizontal_spacing)
+        layout.setVerticalSpacing(vertical_spacing)
+
+        margins = layout.contentsMargins()
+        total_spacing_x = horizontal_spacing * max(0, columns - 1)
+        total_spacing_y = vertical_spacing * max(0, rows - 1)
+        available_width_for_cards = usable_width - margins.left() - margins.right() - total_spacing_x
+        available_height_for_cards = usable_height - margins.top() - margins.bottom() - total_spacing_y
+        cell_width = max(160.0, available_width_for_cards / columns)
+        cell_height = max(160.0, available_height_for_cards / rows)
+        card_width = int(cell_width)
+        card_height = int(cell_height)
+
+        for column in range(columns):
+            layout.setColumnStretch(column, 1)
+            layout.setColumnMinimumWidth(column, card_width)
+        for row in range(rows):
+            layout.setRowStretch(row, 1)
+            layout.setRowMinimumHeight(row, card_height)
+        self._grid_row_count = rows
+        self._grid_column_count = columns
+
+        base_font_value = min(card_width * 0.28, card_height * 0.34)
+        name_font_size = int(max(26, min(110, base_font_value)))
+        primary_font_size = int(max(20, min(name_font_size * 0.55, card_height * 0.22)))
+        secondary_font_size = int(max(18, min(primary_font_size * 0.85, card_height * 0.18)))
+        score_font_size = int(max(24, min(name_font_size * 0.75, card_height * 0.3)))
+        padding_v = max(14, int(card_height * 0.16))
+        padding_h = max(14, int(card_width * 0.12))
+        inner_spacing = max(6, int(card_height * 0.08))
+
+        for idx, (sid, name, score) in enumerate(self._sort_students()):
+            row = idx // columns
+            column = idx % columns
+            card = self._create_card(
+                idx,
+                sid,
+                name,
+                score,
+                card_width,
+                card_height,
+                name_font_size,
+                primary_font_size,
+                secondary_font_size,
+                score_font_size,
+                padding_h,
+                padding_v,
+                inner_spacing,
+            )
+            layout.addWidget(card, row, column, Qt.AlignmentFlag.AlignCenter)
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
@@ -2119,6 +2340,9 @@ class RollCallTimerWindow(QWidget):
         self.timer_seconds_left = max(0, _get_int("timer_seconds_left", self.timer_countdown_minutes * 60 + self.timer_countdown_seconds))
         self.timer_stopwatch_seconds = max(0, _get_int("timer_stopwatch_seconds", 0))
         self.timer_running = str_to_bool(s.get("timer_running", "False"), False)
+
+        order_value = str(s.get("scoreboard_order", "rank")).strip().lower()
+        self.scoreboard_order = order_value if order_value in {"rank", "id"} else "rank"
 
         self.last_id_font_size = max(self.MIN_FONT_SIZE, _get_int("id_font_size", 48))
         self.last_name_font_size = max(self.MIN_FONT_SIZE, _get_int("name_font_size", 60))
@@ -2228,14 +2452,6 @@ class RollCallTimerWindow(QWidget):
         control_layout.setContentsMargins(0, 0, 0, 0)
         control_layout.setSpacing(0)
 
-        self.reset_button = QPushButton("重置"); _setup_secondary_button(self.reset_button)
-        self.reset_button.clicked.connect(self.reset_roll_call_pools)
-        control_layout.addWidget(self.reset_button)
-
-        self.showcase_button = QPushButton("展示"); _setup_secondary_button(self.showcase_button)
-        self.showcase_button.clicked.connect(self.show_scoreboard)
-        control_layout.addWidget(self.showcase_button)
-
         self.list_button = QPushButton("名单"); _setup_secondary_button(self.list_button)
         self.list_button.clicked.connect(self.show_student_selector)
         control_layout.addWidget(self.list_button)
@@ -2244,6 +2460,14 @@ class RollCallTimerWindow(QWidget):
         self.add_score_button.setEnabled(False)
         self.add_score_button.clicked.connect(self.increment_current_score)
         control_layout.addWidget(self.add_score_button)
+
+        self.showcase_button = QPushButton("展示"); _setup_secondary_button(self.showcase_button)
+        self.showcase_button.clicked.connect(self.show_scoreboard)
+        control_layout.addWidget(self.showcase_button)
+
+        self.reset_button = QPushButton("重置"); _setup_secondary_button(self.reset_button)
+        self.reset_button.clicked.connect(self.reset_roll_call_pools)
+        control_layout.addWidget(self.reset_button)
 
         top.addWidget(control_bar, 0, Qt.AlignmentFlag.AlignLeft)
         top.addStretch(1)
@@ -2295,9 +2519,9 @@ class RollCallTimerWindow(QWidget):
         self.score_label.setFont(QFont("Microsoft YaHei UI", 24, QFont.Weight.DemiBold))
         self.score_label.setStyleSheet(
             "color: #0b57d0;"
-            "background-color: #e8f0fe;"
-            "border-radius: 12px;"
-            "padding: 10px 16px;"
+            " background-color: #e8f0fe;"
+            " border-radius: 12px;"
+            " padding: 4px 16px;"
         )
 
         rl.addWidget(self.id_label, 0, 0); rl.addWidget(self.name_label, 0, 1)
@@ -2536,6 +2760,15 @@ class RollCallTimerWindow(QWidget):
         self.timer_sound_enabled = enabled
         self._schedule_save()
 
+    def _set_scoreboard_order(self, order: str) -> None:
+        normalized = str(order).strip().lower()
+        if normalized not in {"rank", "id"}:
+            return
+        if self.scoreboard_order == normalized:
+            return
+        self.scoreboard_order = normalized
+        self._schedule_save()
+
     def _speak_text(self, text: str) -> None:
         if not text:
             return
@@ -2641,16 +2874,12 @@ class RollCallTimerWindow(QWidget):
             except (TypeError, ValueError):
                 score = 0
             records.append((sid_display, name, score))
-        def _score_sort_key(item: tuple[str, str, int]) -> tuple[int, int, str]:
-            sid_text, student_name, score_value = item
-            try:
-                sid_numeric = int(sid_text) if sid_text else sys.maxsize
-            except (TypeError, ValueError):
-                sid_numeric = sys.maxsize
-            return (-score_value, sid_numeric, student_name)
-
-        records.sort(key=_score_sort_key)
-        dialog = ScoreboardDialog(self, records)
+        dialog = ScoreboardDialog(
+            self,
+            records,
+            order=self.scoreboard_order,
+            order_changed=self._set_scoreboard_order,
+        )
         dialog.exec()
 
     def _persist_student_scores(self) -> None:
@@ -3505,6 +3734,7 @@ class RollCallTimerWindow(QWidget):
         sec["id_font_size"] = str(self.last_id_font_size)
         sec["name_font_size"] = str(self.last_name_font_size)
         sec["timer_font_size"] = str(self.last_timer_font_size)
+        sec["scoreboard_order"] = self.scoreboard_order
         remaining_payload: Dict[str, List[int]] = {}
         for group, indices in self._group_remaining_indices.items():
             cleaned: List[int] = []
