@@ -2089,9 +2089,10 @@ class ScoreboardDialog(QDialog):
         self._grid_row_count = 0
         self._grid_column_count = 0
 
-    def _sort_students(self) -> List[tuple[str, str, int]]:
+    def _sort_students(self, order: Optional[str] = None) -> List[tuple[str, str, int]]:
         data = list(self.students)
-        if self._order == self.ORDER_ID:
+        current_order = self._order if order is None else order
+        if current_order == self.ORDER_ID:
             def _id_key(item: tuple[str, str, int]) -> tuple[int, str, str]:
                 sid_text = str(item[0]).strip()
                 try:
@@ -2137,8 +2138,12 @@ class ScoreboardDialog(QDialog):
         name_label = QLabel(display_text or "未命名")
         name_label.setProperty("class", "scoreboardName")
         name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        name_label.setWordWrap(True)
+        name_label.setWordWrap(False)
+        name_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
         name_label.setFont(QFont(calligraphy_font, font_size, QFont.Weight.Bold))
+        name_label.setStyleSheet("margin: 0px; padding: 0px;")
         layout.addWidget(name_label)
 
         score_label = QLabel(score_text)
@@ -2152,8 +2157,13 @@ class ScoreboardDialog(QDialog):
         return wrapper
 
     def _format_display_text(self, index: int, sid: str, name: str) -> str:
+        return self._format_display_text_for_order(self._order, index, sid, name)
+
+    def _format_display_text_for_order(
+        self, order: str, index: int, sid: str, name: str
+    ) -> str:
         clean_name = (name or "").strip() or "未命名"
-        if self._order == self.ORDER_ID:
+        if order == self.ORDER_ID:
             sid_display = str(sid).strip() or "—"
             return f"{sid_display}.{clean_name}"
         return f"{index + 1}.{clean_name}"
@@ -2223,8 +2233,8 @@ class ScoreboardDialog(QDialog):
         columns = 10
         rows = max(1, math.ceil(count / columns))
 
-        horizontal_spacing = max(10, int(usable_width * 0.016))
-        vertical_spacing = max(12, int(usable_height * 0.05 / rows))
+        horizontal_spacing = max(6, int(usable_width * 0.012))
+        vertical_spacing = max(10, int(usable_height * 0.042 / rows))
         layout.setHorizontalSpacing(horizontal_spacing)
         layout.setVerticalSpacing(vertical_spacing)
 
@@ -2247,22 +2257,34 @@ class ScoreboardDialog(QDialog):
         self._grid_row_count = rows
         self._grid_column_count = columns
 
-        padding_v = max(16, int(card_height * 0.14))
-        padding_h = max(16, int(card_width * 0.11))
-        inner_spacing = max(8, int(card_height * 0.06))
+        padding_v = max(14, int(card_height * 0.11))
+        padding_h = max(14, int(card_width * 0.09))
+        inner_spacing = max(6, int(card_height * 0.05))
 
         sorted_students = self._sort_students()
+        alternate_order = (
+            self.ORDER_ID if self._order == self.ORDER_RANK else self.ORDER_RANK
+        )
+        alternate_students = self._sort_students(alternate_order)
         display_entries: List[tuple[int, str, str]] = []
+        display_candidates: List[str] = []
         longest_display = ""
         longest_score = ""
         for idx, (sid, name, score) in enumerate(sorted_students):
             display_text = self._format_display_text(idx, sid, name)
             score_text = self._format_score_text(score)
             display_entries.append((idx, display_text, score_text))
-            if len(display_text) > len(longest_display):
-                longest_display = display_text
+            display_candidates.append(display_text)
             if len(score_text) > len(longest_score):
                 longest_score = score_text
+
+        for idx, (sid, name, _score) in enumerate(alternate_students):
+            display_candidates.append(
+                self._format_display_text_for_order(alternate_order, idx, sid, name)
+            )
+
+        if display_candidates:
+            longest_display = max(display_candidates, key=len)
 
         content_height = card_height - 2 * padding_v - inner_spacing
         content_height = max(60, content_height)
