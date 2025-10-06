@@ -6,6 +6,7 @@ import configparser
 import ctypes
 import io
 import json
+import math
 import os
 import random
 import shutil
@@ -38,6 +39,7 @@ from PyQt6.QtGui import (
     QIcon,
     QPainter,
     QPainterPath,
+    QPainterPathStroker,
     QPen,
     QPixmap,
     QKeyEvent,
@@ -529,7 +531,7 @@ class SettingsManager:
         self._settings_cache = {section: values.copy() for section, values in snapshot.items()}
 
     def clear_roll_call_history(self) -> None:
-        """清空点名相关的历史记录，保证新启动时重新开始。"""
+        """清除点名历史信息，仅在用户主动重置时调用。"""
 
         settings = self.load_settings()
         section = settings.get("RollCallTimer", {})
@@ -644,6 +646,10 @@ class PenSettingsDialog(QDialog):
     def get_settings(self) -> tuple[int, QColor]:
         return self.size_slider.value(), self.pen_color
 
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        ensure_widget_within_screen(self)
+
 
 class ShapeSettingsDialog(QDialog):
     """图形工具的快捷选择窗口。"""
@@ -676,6 +682,10 @@ class ShapeSettingsDialog(QDialog):
     def get_shape(self) -> Optional[str]:
         return self.selected_shape
 
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        ensure_widget_within_screen(self)
+
 
 class BoardColorDialog(QDialog):
     """白板背景颜色选择对话框。"""
@@ -706,6 +716,10 @@ class BoardColorDialog(QDialog):
 
     def get_color(self) -> Optional[QColor]:
         return self.selected_color
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        ensure_widget_within_screen(self)
 
 
 # ---------- 标题栏 ----------
@@ -1025,6 +1039,10 @@ class OverlayWindow(QWidget):
         self._last_shape_type: Optional[str] = None
         self._restoring_tool = False
         self._eraser_last_point: Optional[QPoint] = None
+        self._stroke_points: List[QPointF] = []
+        self._stroke_timestamps: List[float] = []
+        self._stroke_speed: float = 0.0
+        self._stroke_last_midpoint: Optional[QPointF] = None
         self.whiteboard_active = False
         self.whiteboard_color = QColor(0, 0, 0, 0); self.last_board_color = QColor("#ffffff")
         self.cursor_pixmap = QPixmap()
@@ -1251,7 +1269,13 @@ class OverlayWindow(QWidget):
             self._push_history()
             self.drawing = True
             pointf = e.position(); self.last_point = pointf; self.prev_point = pointf
-            self.last_width = self.pen_size * 0.4
+            now = time.time()
+            self.last_time = now
+            self._stroke_points = [QPointF(pointf)]
+            self._stroke_timestamps = [now]
+            self._stroke_speed = 0.0
+            self._stroke_last_midpoint = QPointF(pointf)
+            self.last_width = max(1.0, float(self.pen_size) * 0.4)
             self.shape_start_point = e.pos() if self.mode == "shape" else None
             self._eraser_last_point = e.pos() if self.mode == "eraser" else None
             self.raise_toolbar()
@@ -1274,6 +1298,9 @@ class OverlayWindow(QWidget):
             self.drawing = False; self.shape_start_point = None; self.update()
             if self.mode == "eraser":
                 self._eraser_last_point = None
+            if self.mode == "brush":
+                self._stroke_points.clear(); self._stroke_timestamps.clear()
+                self._stroke_last_midpoint = None; self._stroke_speed = 0.0
             self.raise_toolbar()
         super().mouseReleaseEvent(e)
 
@@ -1283,42 +1310,91 @@ class OverlayWindow(QWidget):
         super().keyPressEvent(e)
 
     def _draw_brush_line(self, cur: QPointF) -> None:
-        cur = QPointF(cur); self.last_point = QPointF(self.last_point); self.prev_point = QPointF(self.prev_point)
-        distance = (cur - self.last_point).manhattanLength()
-        speed = distance / max(1.0, self.pen_size)
-        speed_factor = 1.0 - min(1.0, speed)
-        delta_prev = self.last_point - self.prev_point; delta_current = cur - self.last_point
-        angle = abs(delta_prev.x() * delta_current.y() - delta_prev.y() * delta_current.x())
-        angle_factor = min(1.0, angle / (self.pen_size * 20.0))
-        elapsed = time.time() - self.last_time; self.last_time = time.time()
-        pressure = min(1.0, elapsed * 5.0)
-        target_w = self.pen_size * (0.35 + 0.55 * speed_factor + 0.35 * angle_factor) * (1.0 + 0.4 * pressure)
-        cur_w = self.last_width * 0.65 + target_w * 0.35
-        mid = (self.last_point + cur) / 2.0
+        now = time.time()
+        cur_point = QPointF(cur)
+        if not self._stroke_points:
+            self._stroke_points = [QPointF(cur_point)]
+            self._stroke_timestamps = [now]
+            self.prev_point = QPointF(cur_point)
+            self.last_point = QPointF(cur_point)
+            self._stroke_last_midpoint = QPointF(cur_point)
+            self.last_time = now
+            return
 
-        path = QPainterPath(); path.moveTo(self.prev_point); path.quadTo(self.last_point, mid)
-        p = QPainter(self.canvas); p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        fade = QColor(self.pen_color); fade.setAlpha(70)
-        p.setPen(QPen(fade, cur_w * 1.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)); p.drawPath(path)
-        p.setPen(QPen(self.pen_color, cur_w, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)); p.drawPath(path)
-        p.end()
+        last_point = QPointF(self._stroke_points[-1])
+        self._stroke_points.append(cur_point)
+        self._stroke_timestamps.append(now)
+        if len(self._stroke_points) > 5:
+            self._stroke_points.pop(0)
+            self._stroke_timestamps.pop(0)
 
-        self.prev_point = self.last_point; self.last_point = cur; self.last_width = cur_w
+        elapsed = max(1e-4, now - self._stroke_timestamps[-2])
+        distance = math.hypot(cur_point.x() - last_point.x(), cur_point.y() - last_point.y())
+        speed = distance / elapsed
+        self._stroke_speed = self._stroke_speed * 0.65 + speed * 0.35
+
+        curvature = 0.0
+        if len(self._stroke_points) >= 3:
+            p0 = self._stroke_points[-3]
+            p1 = self._stroke_points[-2]
+            p2 = self._stroke_points[-1]
+            v1x, v1y = p1.x() - p0.x(), p1.y() - p0.y()
+            v2x, v2y = p2.x() - p1.x(), p2.y() - p1.y()
+            denom = math.hypot(v1x, v1y) * math.hypot(v2x, v2y)
+            if denom > 1e-5:
+                curvature = abs(v1x * v2y - v1y * v2x) / denom
+
+        pressure = min(1.0, (now - self.last_time) * 4.5)
+        self.last_time = now
+
+        base_size = float(max(1, self.pen_size))
+        speed_scale = 1.0 / (1.0 + self._stroke_speed / (base_size * 18.0 + 36.0))
+        curve_scale = min(1.0, curvature * base_size * 0.65)
+        target_w = base_size * (0.42 + 0.45 * speed_scale + 0.25 * curve_scale)
+        target_w *= 1.0 + 0.3 * pressure
+        cur_w = self.last_width * 0.55 + target_w * 0.45
+
+        last_mid = QPointF(self._stroke_last_midpoint) if self._stroke_last_midpoint else QPointF(last_point)
+        current_mid = (last_point + cur_point) / 2.0
+
+        path = QPainterPath(last_mid)
+        path.quadTo(last_point, current_mid)
+        painter = QPainter(self.canvas)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        fade = QColor(self.pen_color)
+        fade_alpha = int(max(30, min(200, 200 * speed_scale)))
+        fade.setAlpha(fade_alpha)
+        painter.setPen(QPen(fade, cur_w * 1.35, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        painter.drawPath(path)
+        painter.setPen(QPen(self.pen_color, cur_w, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        painter.drawPath(path)
+        painter.end()
+
+        self.prev_point = QPointF(last_point)
+        self.last_point = QPointF(cur_point)
+        self._stroke_last_midpoint = QPointF(current_mid)
+        self.last_width = cur_w
 
     def _erase_at(self, pos) -> None:
         current = QPointF(pos) if isinstance(pos, QPointF) else QPointF(QPoint(pos))
-        start_point = QPointF(self._eraser_last_point) if isinstance(self._eraser_last_point, QPoint) else current
+        if not isinstance(self._eraser_last_point, QPoint):
+            self._eraser_last_point = current.toPoint()
+        start_point = QPointF(self._eraser_last_point)
         path = QPainterPath(start_point)
         path.lineTo(current)
+
+        radius = max(8.0, float(self.pen_size) * 1.6)
+        stroker = QPainterPathStroker()
+        stroker.setWidth(max(12.0, radius * 2.0))
+        stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
+        stroker.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        erase_path = stroker.createStroke(path)
+        erase_path.addEllipse(current, radius, radius)
 
         painter = QPainter(self.canvas)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
-        radius = max(8.0, float(self.pen_size) * 1.6)
-        stroke_width = max(12, int(radius * 2.0))
-        pen = QPen(QColor(255, 255, 255, 0), stroke_width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
-        painter.setPen(pen)
-        painter.drawPath(path)
+        painter.fillPath(erase_path, QColor(0, 0, 0, 0))
         painter.end()
 
         self._eraser_last_point = current.toPoint()
@@ -1473,6 +1549,10 @@ class CountdownSettingsDialog(QDialog):
     def _accept(self) -> None:
         self.result = (self.minutes_spin.value(), self.seconds_spin.value()); self.accept()
 
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        ensure_widget_within_screen(self)
+
 
 class ClickableFrame(QFrame):
     clicked = pyqtSignal()
@@ -1494,9 +1574,14 @@ class RollCallTimerWindow(QWidget):
         super().__init__(parent)
         self.setWindowTitle("点名 / 计时")
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        self.setWindowFlag(Qt.WindowType.WindowMinimizeButtonHint, False)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.settings_manager = settings_manager
         self.student_data = student_data
+        try:
+            self._rng = random.SystemRandom()
+        except NotImplementedError:
+            self._rng = random.Random()
 
         s = self.settings_manager.load_settings().get("RollCallTimer", {})
         def _get_int(key: str, default: int) -> int:
@@ -1562,6 +1647,8 @@ class RollCallTimerWindow(QWidget):
             if not self.tts_manager.available: self.tts_manager = None; self.speech_enabled = False
         else:
             self.speech_enabled = False
+        self._speech_issue_reported = False
+        self._speech_check_scheduled = False
 
         # QFontDatabase 在 Qt 6 中以静态方法为主，这里直接调用类方法避免实例化失败
         families_list = []
@@ -1577,6 +1664,12 @@ class RollCallTimerWindow(QWidget):
                     families_list = []
         families = set(families_list)
         self.name_font_family = "楷体" if "楷体" in families else ("KaiTi" if "KaiTi" in families else "Microsoft YaHei UI")
+
+        # 使用轻量级的延迟写入机制，避免频繁操作磁盘。
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(250)
+        self._save_timer.timeout.connect(self.save_settings)
 
         self._build_ui()
         self._apply_saved_fonts()
@@ -1723,6 +1816,42 @@ class RollCallTimerWindow(QWidget):
             self.speech_enabled_action.setEnabled(True); self.speech_enabled_action.setChecked(self.speech_enabled)
         else:
             self.speech_enabled_action.setEnabled(False); self.speech_enabled_action.setChecked(False)
+            if not self._speech_issue_reported:
+                self._diagnose_speech_engine()
+
+    def _diagnose_speech_engine(self) -> None:
+        if self._speech_issue_reported:
+            return
+        action = getattr(self, "speech_enabled_action", None)
+        if action is None or action.isEnabled():
+            return
+        if not self.isVisible():
+            if not self._speech_check_scheduled:
+                self._speech_check_scheduled = True
+                QTimer.singleShot(200, self._diagnose_speech_engine)
+            return
+        reason = ""
+        suggestions: List[str] = []
+        if not PYTTSX3_AVAILABLE:
+            reason = "未安装语音模块 pyttsx3"
+            suggestions.append("请安装 pyttsx3（pip install pyttsx3）后重新启动程序。")
+        elif not self.tts_manager:
+            reason = "无法初始化系统语音引擎"
+            if sys.platform == "win32":
+                suggestions.append("请确认 Windows 已启用 SAPI5 中文语音包。")
+            suggestions.append("可尝试重新安装 pyttsx3 或检查语音服务状态后重启软件。")
+        elif not getattr(self.tts_manager, "voice_ids", []):
+            reason = "未检测到任何可用的发音人"
+            suggestions.append("请在操作系统语音设置中添加语音包后重新启动程序。")
+        else:
+            return
+        advice = "\n".join(f"· {line}" for line in suggestions)
+        message = f"语音播报功能当前不可用：{reason}"
+        if advice:
+            message = f"{message}\n{advice}"
+        show_quiet_information(self, message, "语音播报提示")
+        self._speech_issue_reported = True
+        self._speech_check_scheduled = False
 
     def eventFilter(self, obj, e):
         if obj in (self.id_label, self.name_label) and e.type() == QEvent.Type.MouseButtonPress:
@@ -1737,6 +1866,7 @@ class RollCallTimerWindow(QWidget):
         self.show_name = self.show_name_action.isChecked()
         self.update_display_layout()
         self.display_current_student()
+        self._schedule_save()
 
     def _toggle_speech(self, enabled: bool) -> None:
         if not self.tts_manager or not self.tts_manager.available:
@@ -1744,20 +1874,24 @@ class RollCallTimerWindow(QWidget):
             self.speech_enabled_action.setChecked(False)
             return
         self.speech_enabled = enabled
+        self._schedule_save()
 
     def _set_voice(self, voice_id: str) -> None:
         if not self.tts_manager: return
         self.tts_manager.set_voice(voice_id); self.selected_voice_id = voice_id
         for a in self.voice_actions: a.setChecked(a.text() == voice_id)
+        self._schedule_save()
 
     def _toggle_timer_sound(self, enabled: bool) -> None:
         self.timer_sound_enabled = enabled
+        self._schedule_save()
 
     def toggle_mode(self) -> None:
         self.mode = "timer" if self.mode == "roll_call" else "roll_call"
         if self.mode == "roll_call":
             self._placeholder_on_show = True
         self.update_mode_ui()
+        self._schedule_save()
 
     def update_mode_ui(self) -> None:
         is_roll = self.mode == "roll_call"
@@ -1803,6 +1937,7 @@ class RollCallTimerWindow(QWidget):
     def toggle_timer_mode(self) -> None:
         if self.timer_running: return
         self.timer_mode_index = (self.timer_mode_index + 1) % len(self.timer_modes); self.update_timer_mode_ui()
+        self._schedule_save()
 
     def start_pause_timer(self) -> None:
         if self.timer_modes[self.timer_mode_index] == "clock": return
@@ -1813,6 +1948,7 @@ class RollCallTimerWindow(QWidget):
         else:
             self.timer_start_pause_button.setText("开始")
             self.count_timer.stop()
+        self._schedule_save()
 
     def reset_timer(self) -> None:
         self.timer_running = False; self.count_timer.stop(); self.timer_start_pause_button.setText("开始")
@@ -1822,11 +1958,13 @@ class RollCallTimerWindow(QWidget):
         elif m == "stopwatch":
             self.timer_stopwatch_seconds = 0
         self.update_timer_display()
+        self._schedule_save()
 
     def set_countdown_time(self) -> None:
         d = CountdownSettingsDialog(self, self.timer_countdown_minutes, self.timer_countdown_seconds)
         if d.exec() and d.result:
             mi, se = d.result; self.timer_countdown_minutes = mi; self.timer_countdown_seconds = se; self.reset_timer()
+            self._schedule_save()
 
     def _on_count_timer(self) -> None:
         m = self.timer_modes[self.timer_mode_index]
@@ -1878,10 +2016,14 @@ class RollCallTimerWindow(QWidget):
         if self.student_data.empty:
             self.current_student_index = None
             self.display_current_student()
+            if not initial:
+                self._schedule_save()
             return
         self._ensure_group_pool(group_name)
         self.current_student_index = None
         self.display_current_student()
+        if not initial:
+            self._schedule_save()
 
     def roll_student(self, speak: bool = True) -> None:
         if self.mode != "roll_call": return
@@ -1932,8 +2074,15 @@ class RollCallTimerWindow(QWidget):
     def _reset_roll_call_state(self) -> None:
         """清空全部点名历史并重新洗牌。"""
 
+        self.settings_manager.clear_roll_call_history()
         self._rebuild_group_indices()
         self._ensure_group_pool(self.current_group_name)
+
+    def _shuffle(self, values: List[int]) -> None:
+        try:
+            self._rng.shuffle(values)
+        except Exception:
+            random.shuffle(values)
 
     def reset_roll_call_pools(self) -> None:
         """根据当前分组执行重置：子分组独立重置，“全部”重置所有。"""
@@ -1962,7 +2111,7 @@ class RollCallTimerWindow(QWidget):
             except (TypeError, ValueError):
                 continue
         shuffled = list(base_indices)
-        random.shuffle(shuffled)
+        self._shuffle(shuffled)
         self._group_remaining_indices[group_name] = shuffled
         self._group_initial_sequences[group_name] = list(shuffled)
         self._group_last_student[group_name] = None
@@ -2010,7 +2159,7 @@ class RollCallTimerWindow(QWidget):
 
         for group_name, indices in all_indices.items():
             pool = list(indices)
-            random.shuffle(pool)
+            self._shuffle(pool)
             remaining[group_name] = pool
             initial_sequences[group_name] = list(pool)
             last_student[group_name] = None
@@ -2179,7 +2328,7 @@ class RollCallTimerWindow(QWidget):
                 entry.add("全部")
             # 新增分组时同步生成初始顺序
             shuffled = list(base_list)
-            random.shuffle(shuffled)
+            self._shuffle(shuffled)
             self._group_initial_sequences[group_name] = shuffled
 
         base_indices: List[int] = []
@@ -2199,7 +2348,7 @@ class RollCallTimerWindow(QWidget):
             # “全部”分组直接依据全局集合生成剩余名单，避免与各子分组脱节
             if group_name not in self._group_initial_sequences:
                 shuffled = list(base_indices)
-                random.shuffle(shuffled)
+                self._shuffle(shuffled)
                 self._group_initial_sequences[group_name] = shuffled
             self._refresh_all_group_pool()
             self._group_last_student.setdefault(group_name, None)
@@ -2208,7 +2357,7 @@ class RollCallTimerWindow(QWidget):
         if force_reset or group_name not in self._group_remaining_indices:
             drawn_history.clear()
             pool = list(base_indices)
-            random.shuffle(pool)
+            self._shuffle(pool)
             self._group_remaining_indices[group_name] = pool
             self._group_last_student.setdefault(group_name, None)
             self._group_initial_sequences[group_name] = list(pool)
@@ -2283,7 +2432,7 @@ class RollCallTimerWindow(QWidget):
         base_all = self._group_all_indices.get("全部", [])
         if "全部" not in self._group_initial_sequences:
             shuffled = list(base_all)
-            random.shuffle(shuffled)
+            self._shuffle(shuffled)
             self._group_initial_sequences["全部"] = shuffled
         order = list(self._group_initial_sequences.get("全部", []))
         normalized: List[int] = []
@@ -2378,6 +2527,8 @@ class RollCallTimerWindow(QWidget):
         self.visibility_changed.emit(True)
         self.schedule_font_update()
         ensure_widget_within_screen(self)
+        if not self._speech_issue_reported:
+            self._diagnose_speech_engine()
 
     def resizeEvent(self, e: QResizeEvent) -> None:
         super().resizeEvent(e)
@@ -2397,7 +2548,16 @@ class RollCallTimerWindow(QWidget):
         self.window_closed.emit()
         super().closeEvent(e)
 
+    def _schedule_save(self) -> None:
+        """延迟写入设置，避免频繁保存导致的磁盘抖动。"""
+
+        if self._save_timer.isActive():
+            self._save_timer.stop()
+        self._save_timer.start()
+
     def save_settings(self) -> None:
+        if self._save_timer.isActive():
+            self._save_timer.stop()
         settings = self.settings_manager.load_settings()
         sec = settings.get("RollCallTimer", {})
         sec["geometry"] = geometry_to_text(self)
@@ -2478,6 +2638,10 @@ class AboutDialog(QDialog):
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         layout.addWidget(btn, alignment=Qt.AlignmentFlag.AlignCenter)
         self.setFixedSize(self.sizeHint())
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        ensure_widget_within_screen(self)
 
 
 # ---------- 数据 ----------
@@ -2613,6 +2777,10 @@ class LauncherBubble(QWidget):
                 self.position_changed.emit(self.pos())
             self._dragging = False
         super().mouseReleaseEvent(event)
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        ensure_widget_within_screen(self)
 
 
 class LauncherWindow(QWidget):
@@ -2971,8 +3139,6 @@ class LauncherWindow(QWidget):
             self.bubble.close()
         if self.roll_call_window is not None: self.roll_call_window.close()
         if self.overlay is not None: self.overlay.close()
-        # 启动器关闭视为重新开课，清理点名历史以便下次全新开始
-        self.settings_manager.clear_roll_call_history()
         super().closeEvent(e)
 
 
@@ -2985,8 +3151,6 @@ def main() -> None:
     QToolTip.setFont(QFont("Microsoft YaHei UI", 9))
 
     settings_manager = SettingsManager()
-    # 每次启动器运行时先清空上一轮的点名记录，确保不会延续上一课堂的名单
-    settings_manager.clear_roll_call_history()
     student_data = load_student_data(None) if PANDAS_AVAILABLE else None
 
     window = LauncherWindow(settings_manager, student_data)
