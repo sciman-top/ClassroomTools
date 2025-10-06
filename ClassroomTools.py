@@ -1963,7 +1963,6 @@ class ScoreboardDialog(QDialog):
             "    background-color: rgba(255, 255, 255, 0.95);"
             "    border-radius: 18px;"
             "    border: 1px solid rgba(16, 61, 115, 0.12);"
-            "    padding: 16px 18px;"
             "}"
         )
 
@@ -1981,31 +1980,27 @@ class ScoreboardDialog(QDialog):
         else:
             usable_width = max(available.width() - 160, 640)
             usable_height = max(available.height() - 240, 480)
-            aspect = usable_width / max(1, usable_height)
-            ideal_columns = max(1, int(round(math.sqrt(count * aspect))))
-            columns = max(1, min(8, ideal_columns))
-            columns = min(columns, count)
-            if columns <= 0:
-                columns = 1
-            rows = max(1, math.ceil(count / columns))
-            while rows > 1 and (rows - 1) * columns >= count:
-                rows -= 1
+            columns = 10 if count > 0 else 1
+            rows = max(1, math.ceil(count / max(1, columns)))
             for col in range(columns):
                 grid.setColumnStretch(col, 1)
             for row in range(rows):
                 grid.setRowStretch(row, 1)
+            horizontal_spacing = max(6, int(usable_width * 0.02 / max(1, columns)))
+            vertical_spacing = max(6, int(usable_height * 0.08 / max(1, rows)))
+            grid.setHorizontalSpacing(horizontal_spacing)
+            grid.setVerticalSpacing(vertical_spacing)
             margins = grid.contentsMargins()
-            spacing_x = grid.horizontalSpacing() or 0
-            spacing_y = grid.verticalSpacing() or 0
-            total_spacing_x = spacing_x * max(0, columns - 1)
-            total_spacing_y = spacing_y * max(0, rows - 1)
-            usable_cell_width = (usable_width - margins.left() - margins.right() - total_spacing_x) / columns
-            usable_cell_height = (usable_height - margins.top() - margins.bottom() - total_spacing_y) / rows
-            base_font_value = min(usable_cell_width * 0.18, usable_cell_height * 0.32)
-            base_font_size = int(max(26, min(96, base_font_value)))
-            score_font_size = int(max(20, min(base_font_size * 0.6, usable_cell_height * 0.24)))
+            total_spacing_x = horizontal_spacing * max(0, columns - 1)
+            total_spacing_y = vertical_spacing * max(0, rows - 1)
+            usable_cell_width = (usable_width - margins.left() - margins.right() - total_spacing_x) / max(1, columns)
+            usable_cell_height = (usable_height - margins.top() - margins.bottom() - total_spacing_y) / max(1, rows)
+            base_font_value = min(usable_cell_width * 0.2, usable_cell_height * 0.36)
+            base_font_size = int(max(26, min(108, base_font_value)))
+            score_font_size = int(max(20, min(base_font_size * 0.58, usable_cell_height * 0.26)))
             item_font = QFont(calligraphy_font, base_font_size, QFont.Weight.Bold)
             score_font = QFont(calligraphy_font, score_font_size, QFont.Weight.Bold)
+            detail_margin = max(4, int(usable_cell_height * 0.04))
             for idx, (_sid, name, score) in enumerate(students):
                 row = idx // columns
                 column = idx % columns
@@ -2018,16 +2013,21 @@ class ScoreboardDialog(QDialog):
                 detail = QLabel(f"{score} 分")
                 detail.setFont(score_font)
                 detail.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                detail.setStyleSheet("color: #1b4b8c; margin-top: 8px;")
+                detail.setStyleSheet(f"color: #1b4b8c; margin-top: {detail_margin}px;")
 
                 wrapper = QWidget()
                 wrapper.setProperty("class", "scoreboardWrapper")
                 wrapper_layout = QVBoxLayout(wrapper)
                 wrapper_layout.setContentsMargins(0, 0, 0, 0)
-                wrapper_layout.setSpacing(6)
+                wrapper_layout.setSpacing(max(4, int(base_font_size * 0.12)))
                 wrapper_layout.addWidget(label)
                 wrapper_layout.addWidget(detail)
                 wrapper_layout.addStretch(1)
+                padding_v = max(12, int(usable_cell_height * 0.1))
+                padding_h = max(12, int(usable_cell_width * 0.08))
+                wrapper.setStyleSheet(
+                    f"background-color: rgba(255, 255, 255, 0.95); border-radius: 18px; border: 1px solid rgba(16, 61, 115, 0.12); padding: {padding_v}px {padding_h}px;"
+                )
                 grid.addWidget(wrapper, row, column)
 
         if screen is not None:
@@ -2179,6 +2179,7 @@ class RollCallTimerWindow(QWidget):
         toolbar_layout.setSpacing(2)
 
         top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
         top.setSpacing(4)
         self.title_label = QLabel("点名"); f = QFont("Microsoft YaHei UI", 10, QFont.Weight.Bold)
         self.title_label.setFont(f); self.title_label.setStyleSheet("color: #202124;")
@@ -2195,37 +2196,6 @@ class RollCallTimerWindow(QWidget):
         self.mode_button.setFixedWidth(target_width)  # 固定宽度，避免文本切换导致按钮位置跳动
         self.mode_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         top.addWidget(self.mode_button, 0, Qt.AlignmentFlag.AlignLeft)
-
-        self.group_label = QLabel("分组")
-        self.group_label.setFont(QFont("Microsoft YaHei UI", 9, QFont.Weight.Medium))
-        self.group_label.setStyleSheet("color: #3c4043;")
-        self.group_label.setFixedHeight(28)
-        self.group_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
-        self.group_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        top.addWidget(self.group_label, 0, Qt.AlignmentFlag.AlignLeft)
-
-        self.group_bar = QWidget()
-        self.group_bar.setFixedHeight(28)
-        self.group_bar.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-        self.group_bar_layout = QHBoxLayout(self.group_bar)
-        self.group_bar_layout.setContentsMargins(0, 0, 0, 0)
-        self.group_bar_layout.setSpacing(4)
-        self.group_button_group = QButtonGroup(self)
-        self.group_button_group.setExclusive(True)
-        self.group_buttons: Dict[str, QPushButton] = {}
-        self._rebuild_group_buttons_ui()
-        top.addWidget(self.group_bar, 1, Qt.AlignmentFlag.AlignLeft)
-
-        self.menu_button = QToolButton(); self.menu_button.setText("..."); self.menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self.menu_button.setFixedSize(28, 28); self.menu_button.setStyleSheet("font-size: 18px; padding-bottom: 6px;")
-        self.main_menu = self._build_menu(); self.menu_button.setMenu(self.main_menu)
-        top.addStretch(1)
-        top.addWidget(self.menu_button, 0, Qt.AlignmentFlag.AlignRight)
-        toolbar_layout.addLayout(top)
-
-        secondary_row = QHBoxLayout()
-        secondary_row.setContentsMargins(0, 0, 0, 0)
-        secondary_row.setSpacing(2)
 
         compact_font = QFont("Microsoft YaHei UI", 9, QFont.Weight.Medium)
         button_style = (
@@ -2247,30 +2217,68 @@ class RollCallTimerWindow(QWidget):
 
         def _setup_secondary_button(button: QPushButton) -> None:
             button.setCursor(Qt.CursorShape.PointingHandCursor)
-            button.setFixedHeight(26)
+            button.setFixedHeight(28)
             button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             button.setFont(compact_font)
             button.setStyleSheet(button_style)
 
+        control_bar = QWidget()
+        control_bar.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        control_layout = QHBoxLayout(control_bar)
+        control_layout.setContentsMargins(0, 0, 0, 0)
+        control_layout.setSpacing(0)
+
         self.reset_button = QPushButton("重置"); _setup_secondary_button(self.reset_button)
         self.reset_button.clicked.connect(self.reset_roll_call_pools)
-        secondary_row.addWidget(self.reset_button)
+        control_layout.addWidget(self.reset_button)
 
         self.showcase_button = QPushButton("展示"); _setup_secondary_button(self.showcase_button)
         self.showcase_button.clicked.connect(self.show_scoreboard)
-        secondary_row.addWidget(self.showcase_button)
+        control_layout.addWidget(self.showcase_button)
 
         self.list_button = QPushButton("名单"); _setup_secondary_button(self.list_button)
         self.list_button.clicked.connect(self.show_student_selector)
-        secondary_row.addWidget(self.list_button)
+        control_layout.addWidget(self.list_button)
 
         self.add_score_button = QPushButton("加分"); _setup_secondary_button(self.add_score_button)
         self.add_score_button.setEnabled(False)
         self.add_score_button.clicked.connect(self.increment_current_score)
-        secondary_row.addWidget(self.add_score_button)
+        control_layout.addWidget(self.add_score_button)
 
-        secondary_row.addStretch(1)
-        toolbar_layout.addLayout(secondary_row)
+        top.addWidget(control_bar, 0, Qt.AlignmentFlag.AlignLeft)
+        top.addStretch(1)
+
+        self.menu_button = QToolButton(); self.menu_button.setText("..."); self.menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.menu_button.setFixedSize(28, 28); self.menu_button.setStyleSheet("font-size: 18px; padding-bottom: 6px;")
+        self.main_menu = self._build_menu(); self.menu_button.setMenu(self.main_menu)
+        top.addWidget(self.menu_button, 0, Qt.AlignmentFlag.AlignRight)
+        toolbar_layout.addLayout(top)
+
+        group_row = QHBoxLayout()
+        group_row.setContentsMargins(0, 0, 0, 0)
+        group_row.setSpacing(4)
+
+        self.group_label = QLabel("分组")
+        self.group_label.setFont(QFont("Microsoft YaHei UI", 9, QFont.Weight.Medium))
+        self.group_label.setStyleSheet("color: #3c4043;")
+        self.group_label.setFixedHeight(28)
+        self.group_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        self.group_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        group_row.addWidget(self.group_label, 0, Qt.AlignmentFlag.AlignLeft)
+
+        self.group_bar = QWidget()
+        self.group_bar.setFixedHeight(28)
+        self.group_bar.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        self.group_bar_layout = QHBoxLayout(self.group_bar)
+        self.group_bar_layout.setContentsMargins(0, 0, 0, 0)
+        self.group_bar_layout.setSpacing(2)
+        self.group_button_group = QButtonGroup(self)
+        self.group_button_group.setExclusive(True)
+        self.group_buttons: Dict[str, QPushButton] = {}
+        self._rebuild_group_buttons_ui()
+        group_row.addWidget(self.group_bar, 1, Qt.AlignmentFlag.AlignLeft)
+        group_row.addStretch(1)
+        toolbar_layout.addLayout(group_row)
         layout.addLayout(toolbar_layout)
 
         self.stack = QStackedWidget(); layout.addWidget(self.stack, 1)
