@@ -1751,7 +1751,7 @@ class RollCallTimerWindow(QWidget):
         self._build_ui()
         self._apply_saved_fonts()
         self._update_menu_state()
-        self.update_mode_ui()
+        self.update_mode_ui(force_timer_reset=self.mode == "timer")
         self.on_group_change(initial=True)
         self.display_current_student()
 
@@ -2021,10 +2021,10 @@ class RollCallTimerWindow(QWidget):
         self.mode = "timer" if self.mode == "roll_call" else "roll_call"
         if self.mode == "roll_call":
             self._placeholder_on_show = True
-        self.update_mode_ui()
+        self.update_mode_ui(force_timer_reset=self.mode == "timer")
         self._schedule_save()
 
-    def update_mode_ui(self) -> None:
+    def update_mode_ui(self, force_timer_reset: bool = False) -> None:
         is_roll = self.mode == "roll_call"
         self.title_label.setText("点名" if is_roll else "计时")
         self.mode_button.setText("切换到计时" if is_roll else "切换到点名")
@@ -2038,7 +2038,13 @@ class RollCallTimerWindow(QWidget):
             self.schedule_font_update()
             self._placeholder_on_show = False
         else:
-            self.stack.setCurrentWidget(self.timer_frame); self.group_stack.setCurrentWidget(self.group_placeholder); self.update_timer_mode_ui()
+            self.stack.setCurrentWidget(self.timer_frame); self.group_stack.setCurrentWidget(self.group_placeholder)
+            changed = False
+            if force_timer_reset:
+                changed = self.reset_timer(persist=False)
+            self.update_timer_mode_ui()
+            if changed:
+                self._schedule_save()
             self.schedule_font_update()
         self.reset_button.setVisible(is_roll)
         self.updateGeometry()
@@ -2098,21 +2104,31 @@ class RollCallTimerWindow(QWidget):
             self.count_timer.stop()
         self._schedule_save()
 
-    def reset_timer(self) -> None:
+    def reset_timer(self, persist: bool = True) -> bool:
+        changed = self.timer_running
         self.timer_running = False; self.count_timer.stop(); self.timer_start_pause_button.setText("开始")
         m = self.timer_modes[self.timer_mode_index]
         if m == "countdown":
-            self.timer_seconds_left = max(0, self.timer_countdown_minutes * 60 + self.timer_countdown_seconds)
+            baseline = max(0, self.timer_countdown_minutes * 60 + self.timer_countdown_seconds)
+            if self.timer_seconds_left != baseline:
+                self.timer_seconds_left = baseline
+                changed = True
         elif m == "stopwatch":
-            self.timer_stopwatch_seconds = 0
+            if self.timer_stopwatch_seconds != 0:
+                self.timer_stopwatch_seconds = 0
+                changed = True
         self.update_timer_display()
-        self._schedule_save()
+        if persist and changed:
+            self._schedule_save()
+        return changed
 
     def set_countdown_time(self) -> None:
         d = CountdownSettingsDialog(self, self.timer_countdown_minutes, self.timer_countdown_seconds)
         if d.exec() and d.result:
-            mi, se = d.result; self.timer_countdown_minutes = mi; self.timer_countdown_seconds = se; self.reset_timer()
-            self._schedule_save()
+            mi, se = d.result; self.timer_countdown_minutes = mi; self.timer_countdown_seconds = se
+            changed = self.reset_timer()
+            if not changed:
+                self._schedule_save()
 
     def _on_count_timer(self) -> None:
         m = self.timer_modes[self.timer_mode_index]
@@ -2672,6 +2688,12 @@ class RollCallTimerWindow(QWidget):
             self.current_student_index = None
             self.display_current_student()
             self._placeholder_on_show = False
+        elif self.mode == "timer":
+            active_mode = self.timer_modes[self.timer_mode_index]
+            if active_mode in {"countdown", "stopwatch"}:
+                if self.reset_timer(persist=False):
+                    self._schedule_save()
+                self.update_timer_mode_ui()
         self.visibility_changed.emit(True)
         self.schedule_font_update()
         ensure_widget_within_screen(self)
