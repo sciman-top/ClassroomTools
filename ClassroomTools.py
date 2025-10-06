@@ -240,6 +240,12 @@ def apply_geometry_from_text(widget: QWidget, geometry: str) -> None:
     base_min_width = getattr(widget, "_base_minimum_width", widget.minimumWidth())
     base_min_height = getattr(widget, "_base_minimum_height", widget.minimumHeight())
 
+    custom_min_width = getattr(widget, "_ensure_min_width", 160)
+    custom_min_height = getattr(widget, "_ensure_min_height", 120)
+
+    min_width = max(base_min_width, custom_min_width)
+    min_height = max(base_min_height, custom_min_height)
+
     screen = QApplication.screenAt(QPoint(x, y))
     if screen is None:
         try:
@@ -248,14 +254,14 @@ def apply_geometry_from_text(widget: QWidget, geometry: str) -> None:
             screen = QApplication.primaryScreen()
     if screen is not None:
         available = screen.availableGeometry()
-        max_width = max(base_min_width, 320, int(available.width() * 0.9))
-        max_height = max(base_min_height, 240, int(available.height() * 0.9))
-        width = max(base_min_width, min(width, max_width))
-        height = max(base_min_height, min(height, max_height))
+        max_width = max(min_width, 320, int(available.width() * 0.9))
+        max_height = max(min_height, 240, int(available.height() * 0.9))
+        width = max(min_width, min(width, max_width))
+        height = max(min_height, min(height, max_height))
         x = max(available.left(), min(x, available.right() - width))
         y = max(available.top(), min(y, available.bottom() - height))
-    target_width = max(base_min_width, max(160, width))
-    target_height = max(base_min_height, max(120, height))
+    target_width = max(min_width, width)
+    target_height = max(min_height, height)
     widget.resize(target_width, target_height)
     widget.move(x, y)
 
@@ -273,14 +279,20 @@ def ensure_widget_within_screen(widget: QWidget) -> None:
     base_min_width = getattr(widget, "_base_minimum_width", widget.minimumWidth())
     base_min_height = getattr(widget, "_base_minimum_height", widget.minimumHeight())
 
+    custom_min_width = getattr(widget, "_ensure_min_width", 160)
+    custom_min_height = getattr(widget, "_ensure_min_height", 120)
+
+    min_width = max(base_min_width, custom_min_width)
+    min_height = max(base_min_height, custom_min_height)
+
     available = screen.availableGeometry()
     geom = widget.frameGeometry()
     width = widget.width() or geom.width() or widget.sizeHint().width()
     height = widget.height() or geom.height() or widget.sizeHint().height()
-    max_width = min(available.width(), max(base_min_width, int(available.width() * 0.9)))
-    max_height = min(available.height(), max(base_min_height, int(available.height() * 0.9)))
-    width = max(base_min_width, min(width, max_width))
-    height = max(base_min_height, min(height, max_height))
+    max_width = min(available.width(), max(min_width, int(available.width() * 0.9)))
+    max_height = min(available.height(), max(min_height, int(available.height() * 0.9)))
+    width = max(min_width, min(width, max_width))
+    height = max(min_height, min(height, max_height))
     left_limit = available.x()
     top_limit = available.y()
     right_limit = max(left_limit, available.x() + available.width() - width)
@@ -797,6 +809,10 @@ class FloatingToolbar(QWidget):
         self.move(int(settings.get("x", "260")), int(settings.get("y", "260")))
         self.adjustSize()
         self.setFixedSize(self.sizeHint())
+        self._base_minimum_width = self.width()
+        self._base_minimum_height = self.height()
+        self._ensure_min_width = self.width()
+        self._ensure_min_height = self.height()
 
     def _build_ui(self) -> None:
         self.setStyleSheet(
@@ -1016,6 +1032,10 @@ class FloatingToolbar(QWidget):
     def enterEvent(self, event) -> None:
         self.overlay.raise_toolbar()
         super().enterEvent(event)
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        ensure_widget_within_screen(self)
 
 
 # ---------- 叠加层（画笔/白板） ----------
@@ -1453,6 +1473,8 @@ class TTSManager(QObject):
         self.voice_ids: List[str] = []
         self.default_voice_id = ""
         self.current_voice_id = ""
+        self.failure_reason = ""
+        self.failure_suggestions: List[str] = []
         self._queue: Queue[str] = Queue()
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._pump)
@@ -1460,17 +1482,60 @@ class TTSManager(QObject):
             init_kwargs = {"driverName": "sapi5"} if sys.platform == "win32" else {}
             self.engine = pyttsx3.init(**init_kwargs)
             voices = self.engine.getProperty("voices") or []
-            self.voice_ids = [v.id for v in voices]
-            if self.voice_ids: self.default_voice_id = self.voice_ids[0]
+            self.voice_ids = [v.id for v in voices if getattr(v, "id", None)]
+            if not self.voice_ids:
+                self._record_failure("未检测到任何可用的发音人")
+                self.shutdown()
+                return
+            self.default_voice_id = self.voice_ids[0]
             self.current_voice_id = preferred_voice_id if preferred_voice_id in self.voice_ids else self.default_voice_id
-            if self.current_voice_id: self.engine.setProperty("voice", self.current_voice_id)
-            self.engine.startLoop(False); self._timer.start(100)
-        except Exception:
+            if self.current_voice_id:
+                try:
+                    self.engine.setProperty("voice", self.current_voice_id)
+                except Exception as exc:
+                    self._record_failure("无法设置默认发音人", exc)
+                    self.shutdown()
+                    return
+            self.engine.startLoop(False)
+            self._timer.start(100)
+        except Exception as exc:
+            self._record_failure("初始化语音引擎失败", exc)
             self.engine = None
 
     @property
     def available(self) -> bool:
         return self.engine is not None
+
+    def diagnostics(self) -> tuple[str, List[str]]:
+        return self.failure_reason, list(self.failure_suggestions)
+
+    def _record_failure(self, fallback: str, exc: Optional[Exception] = None) -> None:
+        message = ""
+        if exc is not None:
+            message = str(exc).strip()
+        if message and message not in fallback:
+            reason = f"{fallback}：{message}"
+        else:
+            reason = fallback
+        self.failure_reason = reason
+        suggestions: List[str] = []
+        lower = message.lower()
+        if "comtypes" in lower:
+            suggestions.append("请安装 comtypes（pip install comtypes）后重新启动程序。")
+        if "pywin32" in lower or "win32" in lower:
+            suggestions.append("请安装 pywin32（pip install pywin32）后重新启动程序。")
+        platform_hint = []
+        if sys.platform == "win32":
+            platform_hint.append("请确认 Windows 已启用 SAPI5 中文语音包。")
+        elif sys.platform == "darwin":
+            platform_hint.append("请在系统“辅助功能 -> 语音”中启用所需的语音包。")
+        else:
+            platform_hint.append("请确保系统已安装可用的语音引擎（如 espeak）并重新启动程序。")
+        platform_hint.append("可尝试重新安装 pyttsx3 或检查语音服务状态后重启软件。")
+        for hint in platform_hint:
+            if hint not in suggestions:
+                suggestions.append(hint)
+        self.failure_suggestions = suggestions
 
     def set_voice(self, voice_id: str) -> None:
         if voice_id in self.voice_ids:
@@ -1499,7 +1564,8 @@ class TTSManager(QObject):
             pass
         try:
             self.engine.iterate()
-        except Exception:
+        except Exception as exc:
+            self._record_failure("语音引擎运行异常", exc)
             self.shutdown()
 
     def shutdown(self) -> None:
@@ -1573,8 +1639,14 @@ class RollCallTimerWindow(QWidget):
     def __init__(self, settings_manager: SettingsManager, student_data, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("点名 / 计时")
-        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
-        self.setWindowFlag(Qt.WindowType.WindowMinimizeButtonHint, False)
+        flags = (
+            Qt.WindowType.Window
+            | Qt.WindowType.WindowTitleHint
+            | Qt.WindowType.WindowCloseButtonHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.CustomizeWindowHint
+        )
+        self.setWindowFlags(flags)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.settings_manager = settings_manager
         self.student_data = student_data
@@ -1594,6 +1666,8 @@ class RollCallTimerWindow(QWidget):
         # 记录初始最小宽高，供后续还原窗口尺寸时使用
         self._base_minimum_width = self.minimumWidth()
         self._base_minimum_height = self.minimumHeight()
+        self._ensure_min_width = self._base_minimum_width
+        self._ensure_min_height = self._base_minimum_height
 
         self.mode = s.get("mode", "roll_call") if s.get("mode", "roll_call") in {"roll_call", "timer"} else "roll_call"
         self.timer_modes = ["countdown", "stopwatch", "clock"]
@@ -1643,8 +1717,10 @@ class RollCallTimerWindow(QWidget):
         self.speech_enabled = str_to_bool(s.get("speech_enabled", "False"), False) and PYTTSX3_AVAILABLE
         self.selected_voice_id = s.get("speech_voice_id", "")
         if PYTTSX3_AVAILABLE:
-            self.tts_manager = TTSManager(self.selected_voice_id, parent=self)
-            if not self.tts_manager.available: self.tts_manager = None; self.speech_enabled = False
+            manager = TTSManager(self.selected_voice_id, parent=self)
+            self.tts_manager = manager
+            if not manager.available:
+                self.speech_enabled = False
         else:
             self.speech_enabled = False
         self._speech_issue_reported = False
@@ -1796,12 +1872,18 @@ class RollCallTimerWindow(QWidget):
         self.speech_enabled_action = speech.addAction("启用语音播报"); self.speech_enabled_action.setCheckable(True)
         self.speech_enabled_action.setChecked(self.speech_enabled); self.speech_enabled_action.toggled.connect(self._toggle_speech)
         self.voice_menu = speech.addMenu("选择发音人"); self.voice_actions = []
-        if hasattr(self, "tts_manager") and self.tts_manager and self.tts_manager.voice_ids:
+        if self.tts_manager and self.tts_manager.available and self.tts_manager.voice_ids:
+            self.speech_enabled_action.setToolTip("点名时自动朗读当前学生姓名。")
             for vid in self.tts_manager.voice_ids:
                 act = self.voice_menu.addAction(vid); act.setCheckable(True); act.setChecked(vid == self.tts_manager.current_voice_id)
                 act.triggered.connect(lambda _c, v=vid: self._set_voice(v)); self.voice_actions.append(act)
         else:
             self.voice_menu.setEnabled(False); self.speech_enabled_action.setEnabled(False)
+            reason, suggestions = self._collect_speech_issue_details()
+            tooltip_lines = [reason] if reason else []
+            tooltip_lines.extend(suggestions)
+            if tooltip_lines:
+                self.speech_enabled_action.setToolTip("\n".join(tooltip_lines))
 
         menu.addSeparator()
         self.timer_sound_action = menu.addAction("倒计时结束提示音"); self.timer_sound_action.setCheckable(True)
@@ -1812,12 +1894,61 @@ class RollCallTimerWindow(QWidget):
         if self.show_id_action.isChecked() != self.show_id: self.show_id_action.setChecked(self.show_id)
         if self.show_name_action.isChecked() != self.show_name: self.show_name_action.setChecked(self.show_name)
         self.timer_sound_action.setChecked(self.timer_sound_enabled)
-        if self.tts_manager:
+        if self.tts_manager and self.tts_manager.available:
             self.speech_enabled_action.setEnabled(True); self.speech_enabled_action.setChecked(self.speech_enabled)
+            self.speech_enabled_action.setToolTip("点名时自动朗读当前学生姓名。")
         else:
             self.speech_enabled_action.setEnabled(False); self.speech_enabled_action.setChecked(False)
+            reason, suggestions = self._collect_speech_issue_details()
+            tooltip_lines = [reason] if reason else []
+            tooltip_lines.extend(suggestions)
+            if tooltip_lines:
+                self.speech_enabled_action.setToolTip("\n".join(tooltip_lines))
             if not self._speech_issue_reported:
                 self._diagnose_speech_engine()
+
+    def _default_speech_suggestions(self) -> List[str]:
+        hints: List[str] = []
+        if sys.platform == "win32":
+            hints.append("请确认 Windows 已启用 SAPI5 中文语音包。")
+        elif sys.platform == "darwin":
+            hints.append("请在系统“辅助功能 -> 语音”中启用所需的语音包。")
+        else:
+            hints.append("请确保系统已安装可用的语音引擎（如 espeak）并重新启动程序。")
+        hints.append("可尝试重新安装 pyttsx3 或检查语音服务状态后重启软件。")
+        return hints
+
+    def _dedupe_suggestions(self, values: List[str]) -> List[str]:
+        seen: set[str] = set()
+        unique: List[str] = []
+        for value in values:
+            normalized = value.strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            unique.append(normalized)
+        return unique
+
+    def _collect_speech_issue_details(self) -> tuple[str, List[str]]:
+        if not PYTTSX3_AVAILABLE:
+            reason = "未安装语音模块 pyttsx3"
+            suggestions = ["请安装 pyttsx3（pip install pyttsx3）后重新启动程序。"]
+            suggestions.extend(self._default_speech_suggestions())
+            return reason, self._dedupe_suggestions(suggestions)
+        manager = self.tts_manager
+        if manager is None:
+            return "无法初始化系统语音引擎", self._dedupe_suggestions(self._default_speech_suggestions())
+        if not manager.available:
+            reason, suggestions = manager.diagnostics()
+            reason = reason or "无法初始化系统语音引擎"
+            if not suggestions:
+                suggestions = self._default_speech_suggestions()
+            return reason, self._dedupe_suggestions(suggestions)
+        if not getattr(manager, "voice_ids", []):
+            suggestions = ["请在操作系统语音设置中添加语音包后重新启动程序。"]
+            suggestions.extend(self._default_speech_suggestions())
+            return "未检测到任何可用的发音人", self._dedupe_suggestions(suggestions)
+        return "", []
 
     def _diagnose_speech_engine(self) -> None:
         if self._speech_issue_reported:
@@ -1830,20 +1961,8 @@ class RollCallTimerWindow(QWidget):
                 self._speech_check_scheduled = True
                 QTimer.singleShot(200, self._diagnose_speech_engine)
             return
-        reason = ""
-        suggestions: List[str] = []
-        if not PYTTSX3_AVAILABLE:
-            reason = "未安装语音模块 pyttsx3"
-            suggestions.append("请安装 pyttsx3（pip install pyttsx3）后重新启动程序。")
-        elif not self.tts_manager:
-            reason = "无法初始化系统语音引擎"
-            if sys.platform == "win32":
-                suggestions.append("请确认 Windows 已启用 SAPI5 中文语音包。")
-            suggestions.append("可尝试重新安装 pyttsx3 或检查语音服务状态后重启软件。")
-        elif not getattr(self.tts_manager, "voice_ids", []):
-            reason = "未检测到任何可用的发音人"
-            suggestions.append("请在操作系统语音设置中添加语音包后重新启动程序。")
-        else:
+        reason, suggestions = self._collect_speech_issue_details()
+        if not reason:
             return
         advice = "\n".join(f"· {line}" for line in suggestions)
         message = f"语音播报功能当前不可用：{reason}"
@@ -1869,9 +1988,20 @@ class RollCallTimerWindow(QWidget):
         self._schedule_save()
 
     def _toggle_speech(self, enabled: bool) -> None:
-        if not self.tts_manager or not self.tts_manager.available:
-            show_quiet_information(self, "未检测到语音引擎，无法开启语音播报。")
+        if not enabled:
+            self.speech_enabled = False
+            self._schedule_save()
+            return
+        manager = self.tts_manager
+        if not manager or not manager.available or not getattr(manager, "voice_ids", []):
+            reason, suggestions = self._collect_speech_issue_details()
+            message = reason or "未检测到语音引擎，无法开启语音播报。"
+            advice = "\n".join(f"· {line}" for line in suggestions)
+            if advice:
+                message = f"{message}\n{advice}"
+            show_quiet_information(self, message, "语音播报提示")
             self.speech_enabled_action.setChecked(False)
+            self._speech_issue_reported = True
             return
         self.speech_enabled = enabled
         self._schedule_save()
@@ -2693,6 +2823,8 @@ class LauncherBubble(QWidget):
         self._diameter = max(32, diameter)
         self.setFixedSize(self._diameter, self._diameter)
         self.setWindowOpacity(0.74)
+        self._ensure_min_width = self._diameter
+        self._ensure_min_height = self._diameter
         self._dragging = False
         self._drag_offset = QPoint()
         self._moved = False
@@ -2915,6 +3047,8 @@ class LauncherWindow(QWidget):
         self.setFixedSize(self.sizeHint())
         self._base_minimum_width = self.minimumWidth()
         self._base_minimum_height = self.minimumHeight()
+        self._ensure_min_width = self.width()
+        self._ensure_min_height = self.height()
 
     def _action_button_width(self) -> int:
         """计算“画笔”与“点名/计时”按钮的统一宽度，保证观感一致。"""
