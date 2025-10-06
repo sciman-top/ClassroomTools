@@ -399,6 +399,8 @@ def detect_speech_environment_issues() -> tuple[str, List[str]]:
         if not powershell:
             issues.append("未检测到 PowerShell，可用的语音播报方式受限")
             suggestions.append("请确认系统已安装 PowerShell 5+ 或 PowerShell 7，并在环境变量中可用。")
+        if getattr(sys, "frozen", False):
+            suggestions.append("若为打包版本，请在打包配置中包含 pyttsx3、comtypes、pywin32 等语音依赖或在目标电脑上单独安装它们。")
         suggestions.append("如已安装语音组件，请尝试以管理员权限首次运行程序以初始化语音服务。")
     else:
         suggestions.append("请确保系统已配置可用的语音引擎后重新启动程序。")
@@ -1623,8 +1625,31 @@ class TTSManager(QObject):
             return
         path = shutil.which("pwsh") or shutil.which("powershell")
         if not path:
+            system_root = os.environ.get("SystemRoot") or os.environ.get("WINDIR")
+            candidate_paths: List[str] = []
+            if system_root:
+                candidate_paths.extend(
+                    [
+                        os.path.join(system_root, "System32", "WindowsPowerShell", "v1.0", "pwsh.exe"),
+                        os.path.join(system_root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+                        os.path.join(system_root, "SysWOW64", "WindowsPowerShell", "v1.0", "powershell.exe"),
+                    ]
+                )
+            candidate_paths.extend(
+                [
+                    os.path.join("C:\\Program Files\\PowerShell\\7", "pwsh.exe"),
+                    os.path.join("C:\\Program Files\\PowerShell\\6", "pwsh.exe"),
+                ]
+            )
+            for candidate in candidate_paths:
+                if candidate and os.path.exists(candidate):
+                    path = candidate
+                    break
+        if not path:
+            if not self.failure_reason:
+                self._record_failure("未检测到 PowerShell，可用的语音播报方式受限")
             return
-        self._powershell_path = path
+        self._powershell_path = os.path.abspath(path)
         self.engine = object()
         self.voice_ids = []
         self.default_voice_id = ""
@@ -1903,17 +1928,19 @@ class ScoreboardDialog(QDialog):
         grid_container = QWidget()
         grid_container.setObjectName("ScoreboardGridContainer")
         grid = QGridLayout(grid_container)
-        grid.setContentsMargins(12, 12, 12, 12)
-        grid.setHorizontalSpacing(24)
-        grid.setVerticalSpacing(18)
+        grid.setContentsMargins(18, 18, 18, 18)
+        grid.setHorizontalSpacing(20)
+        grid.setVerticalSpacing(20)
         layout.addWidget(grid_container, 1)
 
         box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=self)
+        box.setFont(QFont(calligraphy_font, 22, QFont.Weight.Bold))
         close_button = box.button(QDialogButtonBox.StandardButton.Close)
         if close_button is not None:
             close_button.setText("关闭")
             close_button.setMinimumHeight(42)
             close_button.setCursor(Qt.CursorShape.PointingHandCursor)
+            close_button.setFont(QFont(calligraphy_font, 22, QFont.Weight.Bold))
         box.rejected.connect(self.reject)
         layout.addWidget(box)
 
@@ -1940,6 +1967,9 @@ class ScoreboardDialog(QDialog):
             "}"
         )
 
+        screen = QApplication.primaryScreen()
+        available = screen.availableGeometry() if screen is not None else QRect(0, 0, 1920, 1080)
+
         count = len(students)
         if count == 0:
             empty = QLabel("暂无成绩数据")
@@ -1949,20 +1979,33 @@ class ScoreboardDialog(QDialog):
             grid.addWidget(empty, 0, 0)
             grid.setColumnStretch(0, 1)
         else:
-            if screen := QApplication.primaryScreen():
-                available = screen.availableGeometry()
-                width = max(1, available.width())
-                columns = max(2, min(6, width // 320))
-            else:
-                columns = 4
+            usable_width = max(available.width() - 160, 640)
+            usable_height = max(available.height() - 240, 480)
+            aspect = usable_width / max(1, usable_height)
+            ideal_columns = max(1, int(round(math.sqrt(count * aspect))))
+            columns = max(1, min(8, ideal_columns))
             columns = min(columns, count)
-            rows = math.ceil(count / columns)
+            if columns <= 0:
+                columns = 1
+            rows = max(1, math.ceil(count / columns))
+            while rows > 1 and (rows - 1) * columns >= count:
+                rows -= 1
             for col in range(columns):
                 grid.setColumnStretch(col, 1)
             for row in range(rows):
                 grid.setRowStretch(row, 1)
-            item_font = QFont(calligraphy_font, 34, QFont.Weight.Bold)
-            score_font = QFont(calligraphy_font, 26, QFont.Weight.Bold)
+            margins = grid.contentsMargins()
+            spacing_x = grid.horizontalSpacing() or 0
+            spacing_y = grid.verticalSpacing() or 0
+            total_spacing_x = spacing_x * max(0, columns - 1)
+            total_spacing_y = spacing_y * max(0, rows - 1)
+            usable_cell_width = (usable_width - margins.left() - margins.right() - total_spacing_x) / columns
+            usable_cell_height = (usable_height - margins.top() - margins.bottom() - total_spacing_y) / rows
+            base_font_value = min(usable_cell_width * 0.18, usable_cell_height * 0.32)
+            base_font_size = int(max(26, min(96, base_font_value)))
+            score_font_size = int(max(20, min(base_font_size * 0.6, usable_cell_height * 0.24)))
+            item_font = QFont(calligraphy_font, base_font_size, QFont.Weight.Bold)
+            score_font = QFont(calligraphy_font, score_font_size, QFont.Weight.Bold)
             for idx, (_sid, name, score) in enumerate(students):
                 row = idx // columns
                 column = idx % columns
@@ -1987,9 +2030,7 @@ class ScoreboardDialog(QDialog):
                 wrapper_layout.addStretch(1)
                 grid.addWidget(wrapper, row, column)
 
-        screen = QApplication.primaryScreen()
         if screen is not None:
-            available = screen.availableGeometry()
             self.setGeometry(available)
 
     def showEvent(self, event) -> None:  # type: ignore[override]
@@ -2129,9 +2170,16 @@ class RollCallTimerWindow(QWidget):
 
     def _build_ui(self) -> None:
         self.setStyleSheet("background-color: #f4f5f7;")
-        layout = QVBoxLayout(self); layout.setContentsMargins(8, 8, 8, 8); layout.setSpacing(6)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
 
-        top = QHBoxLayout(); top.setSpacing(4)
+        toolbar_layout = QVBoxLayout()
+        toolbar_layout.setContentsMargins(0, 0, 0, 0)
+        toolbar_layout.setSpacing(2)
+
+        top = QHBoxLayout()
+        top.setSpacing(4)
         self.title_label = QLabel("点名"); f = QFont("Microsoft YaHei UI", 10, QFont.Weight.Bold)
         self.title_label.setFont(f); self.title_label.setStyleSheet("color: #202124;")
         self.title_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
@@ -2168,41 +2216,62 @@ class RollCallTimerWindow(QWidget):
         self._rebuild_group_buttons_ui()
         top.addWidget(self.group_bar, 1, Qt.AlignmentFlag.AlignLeft)
 
-        self.reset_button = QPushButton("重置")
-        self.reset_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.reset_button.setFixedHeight(28)
-        self.reset_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self.reset_button.clicked.connect(self.reset_roll_call_pools)
-        top.addWidget(self.reset_button, 0, Qt.AlignmentFlag.AlignLeft)
-
-        self.list_button = QPushButton("名单")
-        self.list_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.list_button.setFixedHeight(28)
-        self.list_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self.list_button.clicked.connect(self.show_student_selector)
-        top.addWidget(self.list_button, 0, Qt.AlignmentFlag.AlignLeft)
-
-        self.add_score_button = QPushButton("加分")
-        self.add_score_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.add_score_button.setFixedHeight(28)
-        self.add_score_button.setEnabled(False)
-        self.add_score_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self.add_score_button.clicked.connect(self.increment_current_score)
-        top.addWidget(self.add_score_button, 0, Qt.AlignmentFlag.AlignLeft)
-
-        self.showcase_button = QPushButton("展示")
-        self.showcase_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.showcase_button.setFixedHeight(28)
-        self.showcase_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self.showcase_button.clicked.connect(self.show_scoreboard)
-        top.addWidget(self.showcase_button, 0, Qt.AlignmentFlag.AlignLeft)
-
         self.menu_button = QToolButton(); self.menu_button.setText("..."); self.menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.menu_button.setFixedSize(28, 28); self.menu_button.setStyleSheet("font-size: 18px; padding-bottom: 6px;")
         self.main_menu = self._build_menu(); self.menu_button.setMenu(self.main_menu)
         top.addStretch(1)
         top.addWidget(self.menu_button, 0, Qt.AlignmentFlag.AlignRight)
-        layout.addLayout(top)
+        toolbar_layout.addLayout(top)
+
+        secondary_row = QHBoxLayout()
+        secondary_row.setContentsMargins(0, 0, 0, 0)
+        secondary_row.setSpacing(2)
+
+        compact_font = QFont("Microsoft YaHei UI", 9, QFont.Weight.Medium)
+        button_style = (
+            "QPushButton {"
+            "    padding: 2px 10px;"
+            "    border-radius: 11px;"
+            "    border: 1px solid #c3c7cf;"
+            "    background-color: #ffffff;"
+            "    color: #1a1c1f;"
+            "}"
+            "QPushButton:hover {"
+            "    border-color: #1a73e8;"
+            "    background-color: #eaf2ff;"
+            "}"
+            "QPushButton:pressed {"
+            "    background-color: #d7e7ff;"
+            "}"
+        )
+
+        def _setup_secondary_button(button: QPushButton) -> None:
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setFixedHeight(26)
+            button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            button.setFont(compact_font)
+            button.setStyleSheet(button_style)
+
+        self.reset_button = QPushButton("重置"); _setup_secondary_button(self.reset_button)
+        self.reset_button.clicked.connect(self.reset_roll_call_pools)
+        secondary_row.addWidget(self.reset_button)
+
+        self.showcase_button = QPushButton("展示"); _setup_secondary_button(self.showcase_button)
+        self.showcase_button.clicked.connect(self.show_scoreboard)
+        secondary_row.addWidget(self.showcase_button)
+
+        self.list_button = QPushButton("名单"); _setup_secondary_button(self.list_button)
+        self.list_button.clicked.connect(self.show_student_selector)
+        secondary_row.addWidget(self.list_button)
+
+        self.add_score_button = QPushButton("加分"); _setup_secondary_button(self.add_score_button)
+        self.add_score_button.setEnabled(False)
+        self.add_score_button.clicked.connect(self.increment_current_score)
+        secondary_row.addWidget(self.add_score_button)
+
+        secondary_row.addStretch(1)
+        toolbar_layout.addLayout(secondary_row)
+        layout.addLayout(toolbar_layout)
 
         self.stack = QStackedWidget(); layout.addWidget(self.stack, 1)
 
@@ -3323,6 +3392,7 @@ class RollCallTimerWindow(QWidget):
         QTimer.singleShot(0, self.update_dynamic_fonts)
 
     def update_dynamic_fonts(self) -> None:
+        name_font_size = self.last_name_font_size
         for lab in (self.id_label, self.name_label):
             if not lab.isVisible(): continue
             w = max(40, lab.width()); h = max(40, lab.height()); text = lab.text()
@@ -3331,15 +3401,16 @@ class RollCallTimerWindow(QWidget):
                 weight = QFont.Weight.Normal if self.name_font_family in {"楷体", "KaiTi"} else QFont.Weight.Bold
                 lab.setFont(QFont(self.name_font_family, size, weight))
                 self.last_name_font_size = size
+                name_font_size = size
             else:
                 lab.setFont(QFont("Microsoft YaHei UI", size, QFont.Weight.Bold))
                 self.last_id_font_size = size
         if hasattr(self, "score_label") and self.score_label.isVisible():
-            w = max(60, self.score_label.width())
-            h = max(32, self.score_label.height())
-            text = self.score_label.text()
-            size = max(self.MIN_FONT_SIZE, min(54, self._calc_font_size(w, h, text)))
-            self.score_label.setFont(QFont("Microsoft YaHei UI", size, QFont.Weight.Bold))
+            base = name_font_size if name_font_size > 0 else self.last_name_font_size
+            if base <= 0:
+                base = self.MIN_FONT_SIZE * 4
+            score_size = max(1, int(round(base / 4)))
+            self.score_label.setFont(QFont("Microsoft YaHei UI", score_size, QFont.Weight.Bold))
         if self.timer_frame.isVisible():
             text = self.time_display_label.text()
             w = max(60, self.time_display_label.width())
