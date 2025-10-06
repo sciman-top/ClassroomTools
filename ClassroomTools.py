@@ -928,7 +928,7 @@ class FloatingToolbar(QWidget):
         layout.addLayout(button_row)
 
         tooltip_text = {
-            self.btn_cursor: "光标（再次点击恢复画笔）",
+            self.btn_cursor: "光标",
             self.btn_shape: "图形",
             self.btn_undo: "撤销",
             self.btn_eraser: "橡皮（再次点击恢复画笔）",
@@ -948,7 +948,7 @@ class FloatingToolbar(QWidget):
             self.tool_buttons.addButton(btn)
         self.tool_buttons.setExclusive(True)
 
-        self.btn_cursor.clicked.connect(self.overlay.toggle_cursor_mode)
+        self.btn_cursor.clicked.connect(lambda: self.overlay.set_mode("cursor"))
         for color_hex, button in zip([c for c, _ in brush_configs], brush_buttons):
             button.clicked.connect(lambda _checked, c=color_hex: self.overlay.use_brush_color(c))
         self.btn_shape.clicked.connect(self._select_shape)
@@ -1180,15 +1180,6 @@ class OverlayWindow(QWidget):
         else:
             self._update_last_tool_snapshot()
             self.set_mode("eraser")
-
-    def toggle_cursor_mode(self) -> None:
-        """切换光标穿透模式；再次点击恢复上一次的画笔或图形配置。"""
-        if self.mode == "cursor":
-            self._restore_last_tool()
-            return
-        if self.mode in {"brush", "shape"}:
-            self._update_last_tool_snapshot()
-        self.set_mode("cursor")
 
     def update_cursor(self) -> None:
         if self.mode == "cursor":
