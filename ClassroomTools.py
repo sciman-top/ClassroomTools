@@ -66,6 +66,30 @@ from PyQt6.QtWidgets import (
     QToolTip,
 )
 
+# ---------- 运行环境准备 ----------
+
+def _prepare_windows_tts_environment() -> None:
+    """确保 Windows 打包环境下的语音依赖可以写入缓存。"""
+
+    if sys.platform != "win32":
+        return
+    cache_dir = os.environ.get("COMTYPES_CACHE_DIR", "").strip()
+    if cache_dir and os.path.isdir(cache_dir):
+        return
+    try:
+        base = os.environ.get("LOCALAPPDATA")
+        if not base:
+            base = os.path.join(os.path.expanduser("~"), "AppData", "Local")
+        cache_dir = os.path.join(base, "ClassroomTools", "comtypes_cache")
+        os.makedirs(cache_dir, exist_ok=True)
+        os.environ["COMTYPES_CACHE_DIR"] = cache_dir
+    except Exception:
+        # 打包环境下若目录创建失败，也不要阻塞主程序。
+        pass
+
+
+_prepare_windows_tts_environment()
+
 # ---------- 图标 ----------
 class IconManager:
     """集中管理浮动工具条的 SVG 图标，方便后续统一换肤。"""
@@ -1266,7 +1290,8 @@ class TTSManager(QObject):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._pump)
         try:
-            self.engine = pyttsx3.init()
+            init_kwargs = {"driverName": "sapi5"} if sys.platform == "win32" else {}
+            self.engine = pyttsx3.init(**init_kwargs)
             voices = self.engine.getProperty("voices") or []
             self.voice_ids = [v.id for v in voices]
             if self.voice_ids: self.default_voice_id = self.voice_ids[0]
