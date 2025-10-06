@@ -7,6 +7,7 @@ import ctypes
 import json
 import os
 import random
+import shutil
 import sys
 import threading
 import time
@@ -376,7 +377,8 @@ class SettingsManager:
     """负责读取/写入配置文件的轻量封装。"""
 
     def __init__(self, filename: str = "settings.ini") -> None:
-        self.filename = filename
+        # 统一维护配置文件的存放路径，优先使用用户配置目录，保证跨次启动仍能读取到历史点名状态。
+        self.filename = self._prepare_storage_path(filename)
         self.config = configparser.ConfigParser()
         self.defaults: Dict[str, Dict[str, str]] = {
             "Launcher": {
@@ -408,6 +410,50 @@ class SettingsManager:
             },
             "Paint": {"x": "260", "y": "260", "brush_size": "12", "brush_color": "#ff0000"},
         }
+
+    def _get_config_dir(self) -> str:
+        """返回当前系统下建议的配置目录。"""
+
+        home = os.path.expanduser("~")
+        if sys.platform.startswith("win"):
+            base = os.environ.get("APPDATA") or os.path.join(home, "AppData", "Roaming")
+            return os.path.join(base, "ClassroomTools")
+        if sys.platform == "darwin":
+            return os.path.join(home, "Library", "Application Support", "ClassroomTools")
+        base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
+        return os.path.join(base, "ClassroomTools")
+
+    def _prepare_storage_path(self, filename: str) -> str:
+        """根据平台选择合适的设置文件路径，并在需要时迁移旧文件。"""
+
+        base_name = os.path.basename(filename) or "settings.ini"
+        legacy_path = os.path.abspath(filename)
+        config_dir = self._get_config_dir()
+        try:
+            os.makedirs(config_dir, exist_ok=True)
+        except OSError:
+            config_dir = os.path.dirname(legacy_path) or os.getcwd()
+        target_path = os.path.join(config_dir, base_name)
+
+        if os.path.exists(legacy_path):
+            same_file = False
+            try:
+                same_file = os.path.samefile(legacy_path, target_path)
+            except (OSError, FileNotFoundError):
+                same_file = False
+            if not same_file and not os.path.exists(target_path):
+                try:
+                    shutil.copy2(legacy_path, target_path)
+                except Exception:
+                    target_path = legacy_path
+
+        try:
+            with open(target_path, "a", encoding="utf-8"):
+                pass
+        except OSError:
+            target_path = legacy_path
+
+        return target_path
 
     def get_defaults(self) -> Dict[str, Dict[str, str]]:
         return {section: values.copy() for section, values in self.defaults.items()}
@@ -1536,7 +1582,7 @@ class RollCallTimerWindow(QWidget):
         self.group_stack.setFixedHeight(28)
         self.group_stack.addWidget(self.group_combo)
         self.group_stack.addWidget(self.group_placeholder)
-        combo_hint = max(150, min(210, self.group_combo.sizeHint().width()))
+        combo_hint = max(120, min(170, self.group_combo.sizeHint().width()))
         self.group_combo.setFixedWidth(combo_hint)
         self.group_placeholder.setFixedWidth(combo_hint)
         self.group_stack.setFixedWidth(combo_hint)
@@ -1544,7 +1590,7 @@ class RollCallTimerWindow(QWidget):
         self.group_placeholder.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.group_stack.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         top.addWidget(self.group_stack, 0, Qt.AlignmentFlag.AlignLeft)
-        popup_width = max(combo_hint + 32, 210)
+        popup_width = max(combo_hint + 24, 188)
         self.group_combo.view().setMinimumWidth(popup_width)
 
         self.reset_button = QPushButton("重置")
@@ -1819,6 +1865,407 @@ class RollCallTimerWindow(QWidget):
             stu = self.student_data.loc[self.current_student_index]
             name = str(stu["姓名"]) if "姓名" in stu and pd.notna(stu["姓名"]) else ""
             if name: self.tts_manager.speak(name)
+        # 即时同步保存配置，防止异常退出导致未点名名单丢失。
+        self.save_settings()
+
+    def _all_groups_completed(self) -> bool:
+        """判断是否所有分组的学生都已点名完毕。"""
+
+        total_students = len(self._group_all_indices.get("全部", []))
+        if total_students == 0:
+            return True
+        if len(self._global_drawn_students) < total_students:
+            return False
+        for group, base in self._group_all_indices.items():
+            if not base:
+                continue
+            remaining = self._group_remaining_indices.get(group, [])
+            if remaining:
+                return False
+        return True
+
+    def _reset_roll_call_state(self) -> None:
+        """清空全部点名历史并重新洗牌。"""
+
+        self._rebuild_group_indices()
+        self._ensure_group_pool(self.current_group_name)
+
+    def reset_roll_call_pools(self) -> None:
+        """根据当前分组执行重置：子分组独立重置，“全部”重置所有。"""
+
+        group_name = self.current_group_name
+        if group_name == "全部":
+            self._reset_roll_call_state()
+        else:
+            self._reset_single_group(group_name)
+        self.current_student_index = None
+        self.display_current_student()
+        self.save_settings()
+
+    def _reset_single_group(self, group_name: str) -> None:
+        """仅重置指定分组，同时保持其它分组及全局状态不变。"""
+
+        if group_name == "全部":
+            return
+        base_indices_raw = self._group_all_indices.get(group_name)
+        if base_indices_raw is None:
+            return
+        base_indices: List[int] = []
+        for value in base_indices_raw:
+            try:
+                base_indices.append(int(value))
+            except (TypeError, ValueError):
+                continue
+        shuffled = list(base_indices)
+        random.shuffle(shuffled)
+        self._group_remaining_indices[group_name] = shuffled
+        self._group_initial_sequences[group_name] = list(shuffled)
+        self._group_last_student[group_name] = None
+
+        history = self._group_drawn_history.setdefault(group_name, set())
+        if history:
+            for idx in list(history):
+                self._remove_from_global_history(idx, ignore_group=group_name)
+            history.clear()
+
+        last_all = self._group_last_student.get("全部")
+        if last_all is not None:
+            try:
+                last_all_key = int(last_all)
+            except (TypeError, ValueError):
+                last_all_key = None
+            if last_all_key is not None and last_all_key not in self._global_drawn_students:
+                self._group_last_student["全部"] = None
+
+        self._refresh_all_group_pool()
+
+    def _rebuild_group_indices(self) -> None:
+        """重新构建各分组的学生索引池。"""
+
+        all_indices: Dict[str, List[int]] = {}
+        remaining: Dict[str, List[int]] = {}
+        last_student: Dict[str, Optional[int]] = {}
+        student_groups: Dict[int, set[str]] = {}
+        initial_sequences: Dict[str, List[int]] = {}
+
+        if self.student_data.empty:
+            all_indices["全部"] = []
+        else:
+            all_indices["全部"] = list(self.student_data.index)
+            for idx in all_indices["全部"]:
+                student_groups.setdefault(int(idx), set()).add("全部")
+            group_series = self.student_data["分组"].astype(str).str.strip().str.upper()
+            for group_name in self.groups:
+                if group_name == "全部":
+                    continue
+                mask = group_series == group_name
+                all_indices[group_name] = list(self.student_data[mask].index)
+                for idx in all_indices[group_name]:
+                    student_groups.setdefault(int(idx), set()).add(group_name)
+
+        for group_name, indices in all_indices.items():
+            pool = list(indices)
+            random.shuffle(pool)
+            remaining[group_name] = pool
+            initial_sequences[group_name] = list(pool)
+            last_student[group_name] = None
+
+        self._group_all_indices = all_indices
+        self._group_remaining_indices = remaining
+        self._group_last_student = last_student
+        self._group_initial_sequences = initial_sequences
+        self._student_groups = student_groups
+        self._group_drawn_history = {group: set() for group in all_indices}
+        # “全部”分组直接引用全局集合，避免重复维护两份数据造成不一致
+        if "全部" in self._group_drawn_history:
+            self._global_drawn_students.clear()
+            self._group_drawn_history["全部"] = self._global_drawn_students
+        else:
+            self._group_drawn_history["全部"] = self._global_drawn_students
+
+        self._refresh_all_group_pool()
+
+    def _remove_from_global_history(self, student_index: int, ignore_group: Optional[str] = None) -> None:
+        """若学生未在其它分组被点名，则从全局记录中移除。"""
+
+        try:
+            student_key = int(student_index)
+        except (TypeError, ValueError):
+            return
+        for group, history in self._group_drawn_history.items():
+            if group == "全部" or group == ignore_group:
+                continue
+            if student_key in history:
+                return
+        self._global_drawn_students.discard(student_key)
+
+    def _restore_group_state(self, section: Mapping[str, str]) -> None:
+        """从配置中恢复各分组剩余学生池，保持未抽学生不重复。"""
+
+        def _load_dict(key: str) -> Dict[str, object]:
+            raw = section.get(key, "")
+            if not raw:
+                return {}
+            try:
+                data = json.loads(raw)
+            except Exception:
+                return {}
+            return data if isinstance(data, dict) else {}
+
+        remaining_data = _load_dict("group_remaining")
+        last_data = _load_dict("group_last")
+
+        # 读取保存的全局已点名名单，保证窗口被关闭后重新打开时仍能继承上一轮的状态
+        global_drawn_raw = section.get("global_drawn", "")
+        restored_global: set[int] = set()
+        if global_drawn_raw:
+            try:
+                payload = json.loads(global_drawn_raw)
+            except Exception:
+                payload = []
+            if isinstance(payload, list):
+                for value in payload:
+                    try:
+                        restored_global.add(int(value))
+                    except (TypeError, ValueError):
+                        continue
+
+        self._global_drawn_students.clear()
+        self._global_drawn_students.update(restored_global)
+        self._group_drawn_history["全部"] = self._global_drawn_students
+
+        # 先记录一份备份，稍后重新计算所有集合时需要与持久化信息交叉验证
+        existing_global = set(self._global_drawn_students)
+
+        # 从头构建全局集合，避免旧对象上的引用导致状态被意外清空
+        self._global_drawn_students = set()
+        self._group_drawn_history["全部"] = self._global_drawn_students
+
+        for group, indices in remaining_data.items():
+            if group not in self._group_all_indices:
+                continue
+            base_list = self._group_all_indices[group]
+            base_set = set(base_list)
+            restored: List[int] = []
+            if isinstance(indices, list):
+                seen: set[int] = set()
+                for value in indices:
+                    try:
+                        idx = int(value)
+                    except (TypeError, ValueError):
+                        continue
+                    if idx not in base_set or idx in seen:
+                        continue
+                    restored.append(idx)
+                    seen.add(idx)
+            self._group_remaining_indices[group] = restored
+
+        for group, value in last_data.items():
+            if group not in self._group_all_indices:
+                continue
+            if value is None:
+                self._group_last_student[group] = None
+                continue
+            try:
+                idx = int(value)
+            except (TypeError, ValueError):
+                continue
+            if idx in self._group_all_indices[group]:
+                self._group_last_student[group] = idx
+
+        # 根据恢复后的剩余名单推导出每个分组已点名的学生集合
+        # 重新整理所有分组的已点名学生，并同步更新全局集合
+        for group, base_indices in self._group_all_indices.items():
+            normalized_base: List[int] = []
+            for value in base_indices:
+                try:
+                    normalized_base.append(int(value))
+                except (TypeError, ValueError):
+                    continue
+            remaining_set: set[int] = set()
+            for value in self._group_remaining_indices.get(group, []):
+                try:
+                    remaining_set.add(int(value))
+                except (TypeError, ValueError):
+                    continue
+            drawn = {idx for idx in normalized_base if idx not in remaining_set}
+            if group != "全部" and existing_global:
+                # 在恢复时合并先前记录的全局名单，防止由于意外写入丢失导致遗漏
+                drawn.update(idx for idx in existing_global if idx in normalized_base)
+            seq = list(self._group_remaining_indices.get(group, []))
+            seq.extend(idx for idx in normalized_base if idx not in seq)
+            self._group_initial_sequences[group] = seq
+            if group == "全部":
+                # “全部”分组的已点名集合以全局集合为准
+                self._global_drawn_students.update(drawn)
+            else:
+                self._group_drawn_history[group] = drawn
+                self._global_drawn_students.update(drawn)
+
+        # 合并持久化阶段记录的全局集合，防止遗漏尚未恢复的记录
+        if existing_global:
+            self._global_drawn_students.update(existing_global)
+
+        # 最后重新指定“全部”分组引用当前全局集合，保持一致性
+        self._group_drawn_history["全部"] = self._global_drawn_students
+        self._refresh_all_group_pool()
+
+    def _ensure_group_pool(self, group_name: str, force_reset: bool = False) -> None:
+        """确保指定分组仍有待抽取的学生，必要时重新洗牌。"""
+
+        if group_name not in self._group_all_indices:
+            if self.student_data.empty:
+                base_list: List[int] = []
+            elif group_name == "全部":
+                base_list = list(self.student_data.index)
+            else:
+                group_series = self.student_data["分组"].astype(str).str.strip().str.upper()
+                base_list = list(self.student_data[group_series == group_name].index)
+            self._group_all_indices[group_name] = base_list
+            self._group_remaining_indices[group_name] = []
+            self._group_last_student.setdefault(group_name, None)
+            if group_name == "全部":
+                self._group_drawn_history[group_name] = self._global_drawn_students
+            else:
+                self._group_drawn_history.setdefault(group_name, set())
+            for idx in base_list:
+                entry = self._student_groups.setdefault(int(idx), set())
+                entry.add(group_name)
+                entry.add("全部")
+            # 新增分组时同步生成初始顺序
+            shuffled = list(base_list)
+            random.shuffle(shuffled)
+            self._group_initial_sequences[group_name] = shuffled
+
+        base_indices: List[int] = []
+        for value in self._group_all_indices.get(group_name, []):
+            try:
+                base_indices.append(int(value))
+            except (TypeError, ValueError):
+                continue
+        if group_name == "全部":
+            drawn_history = self._group_drawn_history.setdefault("全部", self._global_drawn_students)
+            reference_drawn = self._global_drawn_students
+        else:
+            drawn_history = self._group_drawn_history.setdefault(group_name, set())
+            reference_drawn = drawn_history
+
+        if group_name == "全部":
+            # “全部”分组直接依据全局集合生成剩余名单，避免与各子分组脱节
+            if group_name not in self._group_initial_sequences:
+                shuffled = list(base_indices)
+                random.shuffle(shuffled)
+                self._group_initial_sequences[group_name] = shuffled
+            self._refresh_all_group_pool()
+            self._group_last_student.setdefault(group_name, None)
+            return
+
+        if force_reset or group_name not in self._group_remaining_indices:
+            drawn_history.clear()
+            pool = list(base_indices)
+            random.shuffle(pool)
+            self._group_remaining_indices[group_name] = pool
+            self._group_last_student.setdefault(group_name, None)
+            self._group_initial_sequences[group_name] = list(pool)
+            self._refresh_all_group_pool()
+            return
+
+        raw_pool = self._group_remaining_indices.get(group_name, [])
+        normalized_pool: List[int] = []
+        seen: set[int] = set()
+        for value in raw_pool:
+            try:
+                idx = int(value)
+            except (TypeError, ValueError):
+                continue
+            if idx in base_indices and idx not in seen and idx not in reference_drawn:
+                normalized_pool.append(idx)
+                seen.add(idx)
+
+        source_order = self._group_initial_sequences.get(group_name)
+        if source_order is None:
+            # 如果未记录初始顺序，则退回数据原有顺序
+            source_order = list(base_indices)
+            self._group_initial_sequences[group_name] = list(source_order)
+
+        for idx in source_order:
+            if idx in reference_drawn or idx in seen or idx not in base_indices:
+                continue
+            normalized_pool.append(idx)
+            seen.add(idx)
+
+        self._group_remaining_indices[group_name] = normalized_pool
+        self._group_last_student.setdefault(group_name, None)
+        self._refresh_all_group_pool()
+
+    def _mark_student_drawn(self, student_index: int) -> None:
+        """抽中学生后，从所有关联分组的候选列表中移除该学生。"""
+
+        student_key = None
+        try:
+            student_key = int(student_index)
+        except (TypeError, ValueError):
+            return
+
+        groups = self._student_groups.get(student_key)
+        if not groups:
+            return
+        self._global_drawn_students.add(student_key)
+        for group in groups:
+            if group == "全部":
+                history = self._group_drawn_history.setdefault("全部", self._global_drawn_students)
+            else:
+                history = self._group_drawn_history.setdefault(group, set())
+            history.add(student_key)
+            pool = self._group_remaining_indices.get(group)
+            if not pool:
+                continue
+            cleaned: List[int] = []
+            for value in pool:
+                try:
+                    idx = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if idx != student_key:
+                    cleaned.append(idx)
+            self._group_remaining_indices[group] = cleaned
+
+        self._refresh_all_group_pool()
+
+    def _refresh_all_group_pool(self) -> None:
+        """同步“全部”分组的剩余名单，使其与各子分组保持一致。"""
+
+        base_all = self._group_all_indices.get("全部", [])
+        if "全部" not in self._group_initial_sequences:
+            shuffled = list(base_all)
+            random.shuffle(shuffled)
+            self._group_initial_sequences["全部"] = shuffled
+        order = list(self._group_initial_sequences.get("全部", []))
+        normalized: List[int] = []
+        seen: set[int] = set()
+        for value in order:
+            try:
+                idx = int(value)
+            except (TypeError, ValueError):
+                continue
+            if idx in seen:
+                continue
+            seen.add(idx)
+            if idx in self._global_drawn_students:
+                continue
+            normalized.append(idx)
+        for value in base_all:
+            try:
+                idx = int(value)
+            except (TypeError, ValueError):
+                continue
+            if idx in seen:
+                continue
+            seen.add(idx)
+            if idx in self._global_drawn_students:
+                continue
+            normalized.append(idx)
+        self._group_remaining_indices["全部"] = normalized
 
     def _all_groups_completed(self) -> bool:
         """判断是否所有分组的学生都已点名完毕。"""
