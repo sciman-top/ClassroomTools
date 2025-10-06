@@ -906,6 +906,9 @@ class OverlayWindow(QWidget):
         self.last_width = float(self.pen_size); self.last_time = time.time()
         self._last_brush_color = QColor(self.pen_color)
         self._last_brush_size = max(1, self.pen_size)
+        self._last_draw_mode = "brush"
+        self._last_shape_type: Optional[str] = None
+        self._restoring_tool = False
         self._eraser_last_point: Optional[QPoint] = None
         self.whiteboard_active = False
         self.whiteboard_color = QColor(0, 0, 0, 0); self.last_board_color = QColor("#ffffff")
@@ -980,8 +983,8 @@ class OverlayWindow(QWidget):
             self.shape_start_point = None
         if self.mode != "eraser":
             self._eraser_last_point = None
-        if self.mode == "brush" and (not initial or prev_mode != "brush"):
-            self._remember_brush_state()
+        if self.mode in {"brush", "shape"} and not self._restoring_tool:
+            self._update_last_tool_snapshot()
         self._update_visibility_for_mode(initial=initial)
         if not initial:
             self.raise_toolbar()
@@ -993,25 +996,36 @@ class OverlayWindow(QWidget):
             return
         self.toolbar.update_tool_states(self.mode, self.pen_color)
 
-    def _remember_brush_state(self) -> None:
+    def _update_last_tool_snapshot(self) -> None:
         if self.pen_color.isValid():
             self._last_brush_color = QColor(self.pen_color)
         if self.pen_size > 0:
             self._last_brush_size = max(1, int(self.pen_size))
+        if self.mode in {"brush", "shape"}:
+            self._last_draw_mode = self.mode
+            if self.mode == "shape":
+                self._last_shape_type = self.current_shape
 
-    def _restore_brush_mode(self) -> None:
+    def _restore_last_tool(self) -> None:
         if isinstance(self._last_brush_color, QColor) and self._last_brush_color.isValid():
             self.pen_color = QColor(self._last_brush_color)
         if isinstance(self._last_brush_size, int) and self._last_brush_size > 0:
             self.pen_size = max(1, int(self._last_brush_size))
-        self.set_mode("brush")
+        target_mode = self._last_draw_mode if self._last_draw_mode in {"brush", "shape"} else "brush"
+        target_shape = self._last_shape_type if target_mode == "shape" else None
+        self._restoring_tool = True
+        try:
+            self.set_mode(target_mode, shape_type=target_shape)
+        finally:
+            self._restoring_tool = False
+        self._update_last_tool_snapshot()
 
     def toggle_eraser_mode(self) -> None:
         """切换橡皮模式；再次点击会恢复上一次的画笔配置。"""
         if self.mode == "eraser":
-            self._restore_brush_mode()
+            self._restore_last_tool()
         else:
-            self._remember_brush_state()
+            self._update_last_tool_snapshot()
             self.set_mode("eraser")
 
     def update_cursor(self) -> None:
@@ -1063,15 +1077,17 @@ class OverlayWindow(QWidget):
 
     def clear_all(self) -> None:
         """清除整块画布，同时根据需要恢复画笔模式。"""
-        restore_needed = self.mode != "brush"
+        restore_needed = self.mode not in {"brush", "shape"}
         self._push_history()
         self.canvas.fill(Qt.GlobalColor.transparent)
         self.temp_canvas.fill(Qt.GlobalColor.transparent)
         self.update()
         self._eraser_last_point = None
         if restore_needed:
-            self._restore_brush_mode()
+            self._restore_last_tool()
         else:
+            if self.mode in {"brush", "shape"}:
+                self._update_last_tool_snapshot()
             self.raise_toolbar()
         self._update_undo_button()
 
@@ -1175,18 +1191,22 @@ class OverlayWindow(QWidget):
         self.prev_point = self.last_point; self.last_point = cur; self.last_width = cur_w
 
     def _erase_at(self, pos) -> None:
-        if isinstance(pos, QPointF):
-            pos = pos.toPoint()
-        start = self._eraser_last_point or pos
-        p = QPainter(self.canvas)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
-        diameter = max(10, int(self.pen_size * 1.8) * 2)
-        pen = QPen(QColor(255, 255, 255, 0), diameter, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
-        p.setPen(pen)
-        p.drawLine(start, pos)
-        p.end()
-        self._eraser_last_point = QPoint(pos)
+        current = QPointF(pos) if isinstance(pos, QPointF) else QPointF(QPoint(pos))
+        start_point = QPointF(self._eraser_last_point) if isinstance(self._eraser_last_point, QPoint) else current
+        path = QPainterPath(start_point)
+        path.lineTo(current)
+
+        painter = QPainter(self.canvas)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+        radius = max(8.0, float(self.pen_size) * 1.6)
+        stroke_width = max(12, int(radius * 2.0))
+        pen = QPen(QColor(255, 255, 255, 0), stroke_width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.drawPath(path)
+        painter.end()
+
+        self._eraser_last_point = current.toPoint()
 
     def _draw_shape_preview(self, end_point) -> None:
         if not self.shape_start_point: return
@@ -1394,6 +1414,7 @@ class RollCallTimerWindow(QWidget):
         if self.current_group_name not in self.groups: self.current_group_name = "全部"
 
         self.current_student_index: Optional[int] = None
+        self._placeholder_on_show = True
         self._group_all_indices: Dict[str, List[int]] = {}
         self._group_remaining_indices: Dict[str, List[int]] = {}
         self._group_last_student: Dict[str, Optional[int]] = {}
@@ -1490,7 +1511,7 @@ class RollCallTimerWindow(QWidget):
         self.group_stack.setFixedHeight(28)
         self.group_stack.addWidget(self.group_combo)
         self.group_stack.addWidget(self.group_placeholder)
-        combo_hint = max(180, min(260, self.group_combo.sizeHint().width()))
+        combo_hint = max(150, min(210, self.group_combo.sizeHint().width()))
         self.group_combo.setFixedWidth(combo_hint)
         self.group_placeholder.setFixedWidth(combo_hint)
         self.group_stack.setFixedWidth(combo_hint)
@@ -1498,7 +1519,8 @@ class RollCallTimerWindow(QWidget):
         self.group_placeholder.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.group_stack.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         top.addWidget(self.group_stack, 0, Qt.AlignmentFlag.AlignLeft)
-        self.group_combo.view().setMinimumWidth(combo_hint)
+        popup_width = max(combo_hint + 32, 210)
+        self.group_combo.view().setMinimumWidth(popup_width)
 
         self.reset_button = QPushButton("重置")
         self.reset_button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1617,6 +1639,8 @@ class RollCallTimerWindow(QWidget):
 
     def toggle_mode(self) -> None:
         self.mode = "timer" if self.mode == "roll_call" else "roll_call"
+        if self.mode == "roll_call":
+            self._placeholder_on_show = True
         self.update_mode_ui()
 
     def update_mode_ui(self) -> None:
@@ -1625,10 +1649,13 @@ class RollCallTimerWindow(QWidget):
         self.mode_button.setText("切换到计时" if is_roll else "切换到点名")
         self.group_label.setVisible(is_roll)
         if is_roll:
+            if self._placeholder_on_show:
+                self.current_student_index = None
             self.stack.setCurrentWidget(self.roll_call_frame); self.group_stack.setCurrentWidget(self.group_combo)
             self.count_timer.stop(); self.clock_timer.stop(); self.timer_running = False; self.timer_start_pause_button.setText("开始")
             self.update_display_layout(); self.display_current_student()
             self.schedule_font_update()
+            self._placeholder_on_show = False
         else:
             self.stack.setCurrentWidget(self.timer_frame); self.group_stack.setCurrentWidget(self.group_placeholder); self.update_timer_mode_ui()
             self.schedule_font_update()
@@ -2226,6 +2253,10 @@ class RollCallTimerWindow(QWidget):
 
     def showEvent(self, e) -> None:
         super().showEvent(e)
+        if self.mode == "roll_call" and self._placeholder_on_show:
+            self.current_student_index = None
+            self.display_current_student()
+            self._placeholder_on_show = False
         self.visibility_changed.emit(True)
         self.schedule_font_update()
         ensure_widget_within_screen(self)
@@ -2236,6 +2267,7 @@ class RollCallTimerWindow(QWidget):
 
     def hideEvent(self, e) -> None:
         super().hideEvent(e)
+        self._placeholder_on_show = True
         self.save_settings()
         self.visibility_changed.emit(False)
 
