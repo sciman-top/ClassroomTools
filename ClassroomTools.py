@@ -2017,12 +2017,6 @@ class ScoreboardDialog(QDialog):
             "QLabel[class=\"scoreboardName\"] {"
             "    color: #103d73;"
             "}"
-            "QLabel[class=\"scoreboardMetaPrimary\"] {"
-            "    color: #1b4b8c;"
-            "}"
-            "QLabel[class=\"scoreboardMetaSecondary\"] {"
-            "    color: rgba(16, 61, 115, 0.78);"
-            "}"
             "QLabel[class=\"scoreboardScore\"] {"
             "    color: #103d73;"
             "}"
@@ -2121,16 +2115,11 @@ class ScoreboardDialog(QDialog):
 
     def _create_card(
         self,
-        index: int,
-        sid: str,
-        name: str,
-        score: int,
+        display_text: str,
+        score_text: str,
         card_width: int,
         card_height: int,
-        name_font_size: int,
-        primary_font_size: int,
-        secondary_font_size: int,
-        score_font_size: int,
+        font_size: int,
         padding_h: int,
         padding_v: int,
         inner_spacing: int,
@@ -2145,38 +2134,70 @@ class ScoreboardDialog(QDialog):
         layout.setContentsMargins(padding_h, padding_v, padding_h, padding_v)
         layout.setSpacing(inner_spacing)
 
-        name_label = QLabel(name or "未命名")
+        name_label = QLabel(display_text or "未命名")
         name_label.setProperty("class", "scoreboardName")
         name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         name_label.setWordWrap(True)
-        name_label.setFont(QFont(calligraphy_font, name_font_size, QFont.Weight.Bold))
+        name_label.setFont(QFont(calligraphy_font, font_size, QFont.Weight.Bold))
         layout.addWidget(name_label)
 
-        sid_display = str(sid).strip() or "—"
-        primary_text = f"第 {index + 1} 名" if self._order == self.ORDER_RANK else f"学号 {sid_display}"
-        secondary_text = f"学号 {sid_display}" if self._order == self.ORDER_RANK else f"第 {index + 1} 名"
-
-        primary_label = QLabel(primary_text)
-        primary_label.setProperty("class", "scoreboardMetaPrimary")
-        primary_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        primary_label.setFont(QFont(calligraphy_font, primary_font_size, QFont.Weight.Bold))
-        layout.addWidget(primary_label)
-
-        secondary_label = QLabel(secondary_text)
-        secondary_label.setProperty("class", "scoreboardMetaSecondary")
-        secondary_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        secondary_label.setFont(QFont(calligraphy_font, secondary_font_size, QFont.Weight.Bold))
-        layout.addWidget(secondary_label)
-
-        score_label = QLabel(f"{score} 分")
+        score_label = QLabel(score_text)
         score_label.setProperty("class", "scoreboardScore")
         score_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        score_label.setFont(QFont(calligraphy_font, score_font_size, QFont.Weight.Bold))
-        score_label.setStyleSheet(f"margin-top: {max(8, inner_spacing)}px;")
+        score_label.setFont(QFont(calligraphy_font, font_size, QFont.Weight.Bold))
+        score_label.setStyleSheet(f"margin-top: {max(6, inner_spacing // 2)}px;")
         layout.addWidget(score_label)
 
         layout.addStretch(1)
         return wrapper
+
+    def _format_display_text(self, index: int, sid: str, name: str) -> str:
+        clean_name = (name or "").strip() or "未命名"
+        if self._order == self.ORDER_ID:
+            sid_display = str(sid).strip() or "—"
+            return f"{sid_display}.{clean_name}"
+        return f"{index + 1}.{clean_name}"
+
+    @staticmethod
+    def _format_score_text(score: int | float | str) -> str:
+        text = "—"
+        try:
+            value = float(score)
+        except (TypeError, ValueError):
+            score_str = str(score).strip()
+            if score_str and score_str.lower() != "none":
+                text = score_str
+        else:
+            if math.isfinite(value):
+                if abs(value - int(value)) < 1e-6:
+                    text = str(int(round(value)))
+                else:
+                    text = f"{value:.2f}".rstrip("0").rstrip(".")
+        return f"{text} 分"
+
+    @staticmethod
+    def _fit_font_size(
+        text: str,
+        family: str,
+        weight: QFont.Weight,
+        max_width: int,
+        max_height: int,
+        minimum: int,
+        maximum: int,
+    ) -> int:
+        if not text:
+            return max(6, min(minimum, maximum))
+        if max_width <= 0 or max_height <= 0:
+            return max(6, min(minimum, maximum))
+        lower = max(6, min(minimum, maximum))
+        upper = max(6, max(minimum, maximum))
+        for size in range(upper, lower - 1, -1):
+            font = QFont(family, size, weight)
+            metrics = QFontMetrics(font)
+            rect = metrics.tightBoundingRect(text)
+            if rect.width() <= max_width and rect.height() <= max_height:
+                return size
+        return lower
 
     def _populate_grid(self) -> None:
         self._clear_grid()
@@ -2198,12 +2219,12 @@ class ScoreboardDialog(QDialog):
 
         available = self._available_geometry
         usable_width = max(available.width() - 160, 640)
-        usable_height = max(available.height() - 240, 480)
+        usable_height = max(available.height() - 240, 520)
         columns = 10
         rows = max(1, math.ceil(count / columns))
 
-        horizontal_spacing = max(12, int(usable_width * 0.018))
-        vertical_spacing = max(12, int(usable_height * 0.06 / rows))
+        horizontal_spacing = max(10, int(usable_width * 0.016))
+        vertical_spacing = max(12, int(usable_height * 0.05 / rows))
         layout.setHorizontalSpacing(horizontal_spacing)
         layout.setVerticalSpacing(vertical_spacing)
 
@@ -2213,7 +2234,7 @@ class ScoreboardDialog(QDialog):
         available_width_for_cards = usable_width - margins.left() - margins.right() - total_spacing_x
         available_height_for_cards = usable_height - margins.top() - margins.bottom() - total_spacing_y
         cell_width = max(160.0, available_width_for_cards / columns)
-        cell_height = max(160.0, available_height_for_cards / rows)
+        cell_height = max(172.0, available_height_for_cards / rows)
         card_width = int(cell_width)
         card_height = int(cell_height)
 
@@ -2226,29 +2247,61 @@ class ScoreboardDialog(QDialog):
         self._grid_row_count = rows
         self._grid_column_count = columns
 
-        base_font_value = min(card_width * 0.28, card_height * 0.34)
-        name_font_size = int(max(26, min(110, base_font_value)))
-        primary_font_size = int(max(20, min(name_font_size * 0.55, card_height * 0.22)))
-        secondary_font_size = int(max(18, min(primary_font_size * 0.85, card_height * 0.18)))
-        score_font_size = name_font_size
-        padding_v = max(14, int(card_height * 0.16))
-        padding_h = max(14, int(card_width * 0.12))
-        inner_spacing = max(6, int(card_height * 0.08))
+        padding_v = max(16, int(card_height * 0.14))
+        padding_h = max(16, int(card_width * 0.11))
+        inner_spacing = max(8, int(card_height * 0.06))
 
-        for idx, (sid, name, score) in enumerate(self._sort_students()):
+        sorted_students = self._sort_students()
+        display_entries: List[tuple[int, str, str]] = []
+        longest_display = ""
+        longest_score = ""
+        for idx, (sid, name, score) in enumerate(sorted_students):
+            display_text = self._format_display_text(idx, sid, name)
+            score_text = self._format_score_text(score)
+            display_entries.append((idx, display_text, score_text))
+            if len(display_text) > len(longest_display):
+                longest_display = display_text
+            if len(score_text) > len(longest_score):
+                longest_score = score_text
+
+        content_height = card_height - 2 * padding_v - inner_spacing
+        content_height = max(60, content_height)
+        name_height = int(content_height * 0.58)
+        score_height = max(32, content_height - name_height)
+        usable_width = max(60, card_width - 2 * padding_h)
+        base_font_upper = int(min(card_width * 0.32, card_height * 0.4))
+        fit_minimum = 12
+        name_fit = self._fit_font_size(
+            longest_display,
+            calligraphy_font,
+            QFont.Weight.Bold,
+            usable_width,
+            name_height,
+            fit_minimum,
+            base_font_upper,
+        )
+        score_fit = self._fit_font_size(
+            longest_score,
+            calligraphy_font,
+            QFont.Weight.Bold,
+            usable_width,
+            score_height,
+            fit_minimum,
+            base_font_upper,
+        )
+        final_font_size = min(name_fit, score_fit, base_font_upper)
+        if final_font_size <= 0:
+            final_font_size = max(fit_minimum, base_font_upper)
+
+        for idx, display_text, score_text in display_entries:
             row = idx // columns
             column = idx % columns
             card = self._create_card(
-                idx,
-                sid,
-                name,
-                score,
+                display_text,
+                score_text,
                 card_width,
                 card_height,
-                name_font_size,
-                primary_font_size,
-                secondary_font_size,
-                score_font_size,
+                final_font_size,
                 padding_h,
                 padding_v,
                 inner_spacing,
