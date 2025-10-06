@@ -4,13 +4,15 @@ from __future__ import annotations
 import base64
 import configparser
 import ctypes
+import json
 import os
 import random
+import shutil
 import sys
 import threading
 import time
 from queue import Empty, Queue
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Mapping
 
 from PyQt6.QtCore import (
     QByteArray,
@@ -29,6 +31,8 @@ from PyQt6.QtGui import (
     QColor,
     QCursor,
     QFont,
+    QFontDatabase,
+    QFontMetrics,
     QIcon,
     QPainter,
     QPainterPath,
@@ -36,6 +40,7 @@ from PyQt6.QtGui import (
     QPixmap,
     QKeyEvent,
     QResizeEvent,
+    QScreen,
 )
 from PyQt6.QtWidgets import (
     QApplication,
@@ -51,6 +56,7 @@ from PyQt6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QSpacerItem,
     QSizePolicy,
     QSlider,
     QSpinBox,
@@ -61,14 +67,38 @@ from PyQt6.QtWidgets import (
     QToolTip,
 )
 
+# ---------- 运行环境准备 ----------
+
+def _prepare_windows_tts_environment() -> None:
+    """确保 Windows 打包环境下的语音依赖可以写入缓存。"""
+
+    if sys.platform != "win32":
+        return
+    cache_dir = os.environ.get("COMTYPES_CACHE_DIR", "").strip()
+    if cache_dir and os.path.isdir(cache_dir):
+        return
+    try:
+        base = os.environ.get("LOCALAPPDATA")
+        if not base:
+            base = os.path.join(os.path.expanduser("~"), "AppData", "Local")
+        cache_dir = os.path.join(base, "ClassroomTools", "comtypes_cache")
+        os.makedirs(cache_dir, exist_ok=True)
+        os.environ["COMTYPES_CACHE_DIR"] = cache_dir
+    except Exception:
+        # 打包环境下若目录创建失败，也不要阻塞主程序。
+        pass
+
+
+_prepare_windows_tts_environment()
+
 # ---------- 图标 ----------
 class IconManager:
     """集中管理浮动工具条的 SVG 图标，方便后续统一换肤。"""
     _icons: Dict[str, str] = {
         "cursor": "PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCc+CiAgICA8cGF0aCBmaWxsPScjZjFmM2Y0JyBkPSdNNCAzLjMgMTEuNCAyMWwxLjgtNS44IDYuMy0yLjF6Jy8+CiAgICA8cGF0aCBmaWxsPScjOGFiNGY4JyBkPSdtMTIuNiAxNC40IDQuOCA0LjgtMi4xIDIuMS00LjItNC4yeicvPgo8L3N2Zz4=",
         "shape": "PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCc+CiAgICA8cmVjdCB4PSczLjUnIHk9JzMuNScgd2lkdGg9JzknIGhlaWdodD0nOScgcng9JzInIGZpbGw9JyNmMWYzZjQnLz4KICAgIDxjaXJjbGUgY3g9JzE2LjUnIGN5PScxNi41JyByPSc1LjUnIGZpbGw9J25vbmUnIHN0cm9rZT0nI2YxZjNmNCcgc3Ryb2tlLXdpZHRoPScxLjgnLz4KICAgIDxjaXJjbGUgY3g9JzE2LjUnIGN5PScxNi41JyByPSczLjUnIGZpbGw9JyM4YWI0ZjgnIGZpbGwtb3BhY2l0eT0nMC4zNScvPgo8L3N2Zz4=",
-        "eraser": "PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCc+CiAgICA8cGF0aCBmaWxsPScjZjFmM2Y0JyBkPSdtNSAxNC42IDgtOGEyLjggMi44IDAgMCAxIDQgMGwuOS45YTIuOCAyLjggMCAwIDEgMCA0bC04IDhINi40bC0xLjktMS45YTIgMiAwIDAgMSAwLTIuOHonLz4KICAgIDxyZWN0IHg9JzQnIHk9JzE5JyB3aWR0aD0nMTEnIGhlaWdodD0nMicgcng9JzEnIGZpbGw9JyM4YWI0ZjgnLz4KPC9zdmc+",
-        "clear_all": "PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCc+CiAgICA8cmVjdCB4PSczLjInIHk9JzQuMicgd2lkdGg9JzE3LjYnIGhlaWdodD0nMTEuNicgcng9JzInIHJ5PScyJyBmaWxsPSdub25lJyBzdHJva2U9JyNmMWYzZjQnIHN0cm9rZS13aWR0aD0nMS42Jy8+CiAgICA8cGF0aCBkPSdNNy4yIDE3LjJoOS42YTEgMSAwIDAgMSAxIDF2MS42SDYuMnYtMS42YTEgMSAwIDAgMSAxLTF6JyBmaWxsPScjOGFiNGY4Jy8+CiAgICA8cGF0aCBkPSdNOC41IDhoNk04LjUgMTEuNWg0JyBzdHJva2U9JyNmMWYzZjQnIHN0cm9rZS13aWR0aD0nMS42JyBzdHJva2UtbGluZWNhcD0ncm91bmQnLz4KPC9zdmc+",
+        "eraser": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+CiAgPHBhdGggZD0iTTQuNiAxNC4yIDExLjMgNy40YTIgMiAwIDAgMSAyLjggMGwzLjUgMy41YTIgMiAwIDAgMSAwIDIuOGwtNC44IDQuOEg5LjRhMiAyIDAgMCAxLTEuNC0uNmwtMy0zYTIgMiAwIDAgMSAwLTIuOHoiIGZpbGw9IiNmNGE5YjciLz4KICA8cGF0aCBkPSJNOS4yIDE5LjZoNi4xYy42IDAgMS4xLS4yIDEuNS0uNmwxLjctMS43IiBmaWxsPSJub25lIiBzdHJva2U9IiM1ZjYzNjgiIHN0cm9rZS13aWR0aD0iMS42IiBzdHJva2UtbGluZWNhcD0icm91bmQiLz4KICA8cGF0aCBkPSJtNy4yIDEyLjMgNC41IDQuNSIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjZmZmZmZmIiBzdHJva2Utd2lkdGg9IjEuNiIgc3Rya2UtbGluZWNhcD0icm91bmQiLz4KICA8cGF0aCBkPSJNMy42IDE4LjZoNiIgc3Ryb2tlPSIjNWY2MzY4IiBzdHJva2Utd2lkdGg9IjEuNiIgc3Rya2UtbGluZWNhcD0icm91bmQiLz4KPC9zdmc+",
+        "clear_all": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+CiAgPGRlZnM+CiAgICA8bGluZWFyR3JhZGllbnQgaWQ9ImciIHgxPSIwIiB4Mj0iMCIgeTE9IjAiIHkyPSIxIj4KICAgICAgPHN0b3Agb2Zmc2V0PSIwIiBzdG9wLWNvbG9yPSIjOGFiNGY4Ii8+CiAgICAgIDxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iIzFhNzNlOCIvPgogICAgPC9saW5lYXJHcmFkaWVudD4KICA8L2RlZnM+CiAgPHBhdGggZD0iTTUuNSA4aDEzbC0uOSAxMS4yQTIgMiAwIDAgMSAxNS42IDIxSDguNGEyIDIgMCAwIDEtMS45LTEuOEw1LjUgOHoiIGZpbGw9InVybCgjZykiIHN0cm9rZT0iIzFhNzNlOCIgc3Rya2Utd2lkdGg9IjEuMiIvPgogIDxwYXRoIGQ9Ik05LjUgNS41IDEwLjMgNGgzLjRsLjggMS41aDQuNSIgZmlsbD0ibm9uZSIgc3Rya2U9IiM1ZjYzNjgiIHN0cm9rZS13aWR0aD0iMS42IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz4KICA8cGF0aCBkPSJNNSA1LjVoNCIgc3Ryb2tlPSIjNWY2MzY4IiBzdHJva2Utd2lkdGg9IjEuNiIgc3Rya2UtbGluZWNhcD0icm91bmQiLz4KICA8cGF0aCBkPSJNMTAgMTEuMnY2LjFNMTQgMTEuMnY2LjEiIHN0cm9rZT0iI2ZmZmZmZiIgc3Rya2Utd2lkdGg9IjEuNCIgc3Rya2UtbGluZWNhcD0icm91bmQiLz4KICA8cGF0aCBkPSJNOC4yIDExLjJ2Ni4xIiBzdHJva2U9IiMzYjc4ZTciIHN0cm9rZS13aWR0aD0iMS40IiBzdHJva2UtbGluZWNhcD0icm91bmQiIG9wYWNpdHk9Ii43Ii8+CiAgPHBhdGggZD0iTTE1LjggMTEuMnY2LjEiIHN0cm9rZT0iIzNiNzhlNyIgc3Rya2Utd2lkdGg9IjEuNCIgc3Rya2UtbGluZWNhcD0icm91bmQiIG9wYWNpdHk9Ii43Ii8+CiAgPHBhdGggZD0iTTYuMiAzLjYgNy40IDIuNCIgc3Ryb2tlPSIjZmJiYzA0IiBzdHJva2Utd2lkdGg9IjEuNCIgc3Rya2UtbGluZWNhcD0icm91bmQiLz4KICA8cGF0aCBkPSJtMTguNCAzLjQgMS40LTEuNCIgc3Rya2U9IiMzNGE4NTMiIHN0cm9rZS13aWR0aD0iMS40IiBzdHJva2UtbGluZWNhcD0icm91bmQiLz4KPC9zdmc+",
         "settings": "PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCc+CiAgICA8Y2lyY2xlIGN4PScxMicgY3k9JzEyJyByPSczLjUnIGZpbGw9JyM4YWI0ZjgnLz4KICAgIDxwYXRoIGZpbGw9J25vbmUnIHN0cm9rZT0nI2YxZjNmNCcgc3Ryb2tlLXdpZHRoPScxLjYnIHN0cm9rZS1saW5lY2FwPSdyb3VuZCcgc3Ryb2tlLWxpbmVqb2luPSdyb3VuZCcKICAgICAgICBkPSdNMTIgNC41VjIuOG0wIDE4LjR2LTEuN203LjEtNy41SDIwbS0xOCAwaDEuNk0xNy42IDZsMS4yLTEuMk01LjIgMTguNCA2LjQgMTcuMk02LjQgNiA1LjIgNC44bTEzLjYgMTMuNi0xLjItMS4yJy8+Cjwvc3ZnPg==",
         "whiteboard": "PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCc+CiAgICA8cmVjdCB4PSczJyB5PSc0JyB3aWR0aD0nMTgnIGhlaWdodD0nMTInIHJ4PScyJyByeT0nMicgZmlsbD0nI2YxZjNmNCcgZmlsbC1vcGFjaXR5PScwLjEyJyBzdHJva2U9JyNmMWYzZjQnIHN0cm9rZS13aWR0aD0nMS42Jy8+CiAgICA8cGF0aCBkPSdtNyAxOCA1LTUgNSA1JyBmaWxsPSdub25lJyBzdHJva2U9JyM4YWI0ZjgnIHN0cm9rZS13aWR0aD0nMS44JyBzdHJva2UtbGluZWNhcD0ncm91bmQnIHN0cm9rZS1saW5lam9pbj0ncm91bmQnLz4KICAgIDxwYXRoIGQ9J004IDloOG0tOCAzaDUnIHN0cm9rZT0nI2YxZjNmNCcgc3Ryb2tlLXdpZHRoPScxLjYnIHN0cm9rZS1saW5lY2FwPSdyb3VuZCcvPgo8L3N2Zz4=",
         "undo": "PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCc+CiAgPHBhdGggZmlsbD0nI2YxZjNmNCcgZD0nTTguNCA1LjJMMyAxMC42bDUuNCA1LjQgMS40LTEuNC0yLjMtMi4zaDUuNWMzLjIgMCA1LjggMi42IDUuOCA1LjggMCAuNS0uMSAxLS4yIDEuNWwyLjEuNmMuMi0uNy4zLTEuNC4zLTIuMSAwLTQuNC0zLjYtOC04LThINy41bDIuMy0yLjMtMS40LTEuNHonLz4KPC9zdmc+",
@@ -176,8 +206,13 @@ def ensure_high_dpi_awareness() -> None:
 
 # ---------- 工具 ----------
 def geometry_to_text(widget: QWidget) -> str:
-    rect = widget.frameGeometry()
-    return f"{rect.width()}x{rect.height()}+{rect.x()}+{rect.y()}"
+    """以不含边框的尺寸记录窗口几何信息，避免重复放大。"""
+
+    frame = widget.frameGeometry()
+    inner = widget.geometry()
+    width = inner.width() or frame.width()
+    height = inner.height() or frame.height()
+    return f"{width}x{height}+{frame.x()}+{frame.y()}"
 
 
 def apply_geometry_from_text(widget: QWidget, geometry: str) -> None:
@@ -197,7 +232,60 @@ def apply_geometry_from_text(widget: QWidget, geometry: str) -> None:
         y = int(y_str)
     except ValueError:
         return
-    widget.resize(max(160, width), max(120, height))
+
+    base_min_width = getattr(widget, "_base_minimum_width", widget.minimumWidth())
+    base_min_height = getattr(widget, "_base_minimum_height", widget.minimumHeight())
+
+    screen = QApplication.screenAt(QPoint(x, y))
+    if screen is None:
+        try:
+            screen = widget.screen() or QApplication.primaryScreen()
+        except Exception:
+            screen = QApplication.primaryScreen()
+    if screen is not None:
+        available = screen.availableGeometry()
+        max_width = max(base_min_width, 320, int(available.width() * 0.9))
+        max_height = max(base_min_height, 240, int(available.height() * 0.9))
+        width = max(base_min_width, min(width, max_width))
+        height = max(base_min_height, min(height, max_height))
+        x = max(available.left(), min(x, available.right() - width))
+        y = max(available.top(), min(y, available.bottom() - height))
+    target_width = max(base_min_width, max(160, width))
+    target_height = max(base_min_height, max(120, height))
+    widget.resize(target_width, target_height)
+    widget.move(x, y)
+
+
+def ensure_widget_within_screen(widget: QWidget) -> None:
+    screen = None
+    try:
+        screen = widget.screen()
+    except Exception:
+        screen = None
+    if screen is None:
+        screen = QApplication.primaryScreen()
+    if screen is None:
+        return
+    base_min_width = getattr(widget, "_base_minimum_width", widget.minimumWidth())
+    base_min_height = getattr(widget, "_base_minimum_height", widget.minimumHeight())
+
+    available = screen.availableGeometry()
+    geom = widget.frameGeometry()
+    width = widget.width() or geom.width() or widget.sizeHint().width()
+    height = widget.height() or geom.height() or widget.sizeHint().height()
+    max_width = min(available.width(), max(base_min_width, int(available.width() * 0.9)))
+    max_height = min(available.height(), max(base_min_height, int(available.height() * 0.9)))
+    width = max(base_min_width, min(width, max_width))
+    height = max(base_min_height, min(height, max_height))
+    left_limit = available.x()
+    top_limit = available.y()
+    right_limit = max(left_limit, available.x() + available.width() - width)
+    bottom_limit = max(top_limit, available.y() + available.height() - height)
+    x = geom.x() if geom.width() else widget.x()
+    y = geom.y() if geom.height() else widget.y()
+    x = max(left_limit, min(x, right_limit))
+    y = max(top_limit, min(y, bottom_limit))
+    widget.resize(width, height)
     widget.move(x, y)
 
 
@@ -211,15 +299,95 @@ def bool_to_str(value: bool) -> str:
     return "True" if value else "False"
 
 
+class QuietInfoPopup(QWidget):
+    """提供一个静音的小型提示窗口，避免系统提示音干扰课堂。"""
+
+    _active_popups: List["QuietInfoPopup"] = []
+
+    def __init__(self, parent: Optional[QWidget], text: str, title: str) -> None:
+        flags = (
+            Qt.WindowType.Tool
+            | Qt.WindowType.WindowTitleHint
+            | Qt.WindowType.WindowCloseButtonHint
+            | Qt.WindowType.CustomizeWindowHint
+        )
+        super().__init__(parent, flags)
+        self.setWindowTitle(title)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.setWindowModality(Qt.WindowModality.ApplicationModal)
+        self.setMinimumWidth(240)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 12)
+        layout.setSpacing(12)
+
+        self.message_label = QLabel(text, self)
+        self.message_label.setWordWrap(True)
+        self.message_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(self.message_label)
+
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+        self.ok_button = QPushButton("确定", self)
+        self.ok_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.ok_button.setDefault(True)
+        self.ok_button.clicked.connect(self.close)
+        button_row.addWidget(self.ok_button)
+        layout.addLayout(button_row)
+
+        QuietInfoPopup._active_popups.append(self)
+        self.destroyed.connect(self._cleanup)
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        self.adjustSize()
+        self._relocate()
+        self.activateWindow()
+        self.ok_button.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
+
+    def _relocate(self) -> None:
+        target_rect: Optional[QRect] = None
+        parent = self.parentWidget()
+        if parent and parent.isVisible():
+            target_rect = parent.frameGeometry()
+        else:
+            screen = QApplication.primaryScreen()
+            if screen:
+                target_rect = screen.availableGeometry()
+        if not target_rect:
+            return
+        geo = self.frameGeometry()
+        geo.moveCenter(target_rect.center())
+        self.move(geo.topLeft())
+
+    def _cleanup(self, *_args) -> None:
+        try:
+            QuietInfoPopup._active_popups.remove(self)
+        except ValueError:
+            pass
+
+
+def show_quiet_information(parent: Optional[QWidget], text: str, title: str = "提示") -> None:
+    popup = QuietInfoPopup(parent, text, title)
+    popup.show()
+
+
 # ---------- 配置 ----------
 class SettingsManager:
     """负责读取/写入配置文件的轻量封装。"""
 
     def __init__(self, filename: str = "settings.ini") -> None:
-        self.filename = filename
+        # 统一维护配置文件的存放路径，优先使用用户配置目录，保证跨次启动仍能读取到历史点名状态。
+        self.filename = self._prepare_storage_path(filename)
         self.config = configparser.ConfigParser()
         self.defaults: Dict[str, Dict[str, str]] = {
-            "Launcher": {"x": "120", "y": "120"},
+            "Launcher": {
+                "x": "120",
+                "y": "120",
+                "minimized": "False",
+                "bubble_x": "120",
+                "bubble_y": "120",
+            },
             "Startup": {"autostart_enabled": "False"},
             "RollCallTimer": {
                 "geometry": "480x280+180+180",
@@ -233,9 +401,59 @@ class SettingsManager:
                 "timer_sound_enabled": "True",
                 "mode": "roll_call",
                 "timer_mode": "countdown",
+                "timer_seconds_left": "300",
+                "timer_stopwatch_seconds": "0",
+                "timer_running": "False",
+                "id_font_size": "48",
+                "name_font_size": "60",
+                "timer_font_size": "56",
             },
             "Paint": {"x": "260", "y": "260", "brush_size": "12", "brush_color": "#ff0000"},
         }
+
+    def _get_config_dir(self) -> str:
+        """返回当前系统下建议的配置目录。"""
+
+        home = os.path.expanduser("~")
+        if sys.platform.startswith("win"):
+            base = os.environ.get("APPDATA") or os.path.join(home, "AppData", "Roaming")
+            return os.path.join(base, "ClassroomTools")
+        if sys.platform == "darwin":
+            return os.path.join(home, "Library", "Application Support", "ClassroomTools")
+        base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
+        return os.path.join(base, "ClassroomTools")
+
+    def _prepare_storage_path(self, filename: str) -> str:
+        """根据平台选择合适的设置文件路径，并在需要时迁移旧文件。"""
+
+        base_name = os.path.basename(filename) or "settings.ini"
+        legacy_path = os.path.abspath(filename)
+        config_dir = self._get_config_dir()
+        try:
+            os.makedirs(config_dir, exist_ok=True)
+        except OSError:
+            config_dir = os.path.dirname(legacy_path) or os.getcwd()
+        target_path = os.path.join(config_dir, base_name)
+
+        if os.path.exists(legacy_path):
+            same_file = False
+            try:
+                same_file = os.path.samefile(legacy_path, target_path)
+            except (OSError, FileNotFoundError):
+                same_file = False
+            if not same_file and not os.path.exists(target_path):
+                try:
+                    shutil.copy2(legacy_path, target_path)
+                except Exception:
+                    target_path = legacy_path
+
+        try:
+            with open(target_path, "a", encoding="utf-8"):
+                pass
+        except OSError:
+            target_path = legacy_path
+
+        return target_path
 
     def get_defaults(self) -> Dict[str, Dict[str, str]]:
         return {section: values.copy() for section, values in self.defaults.items()}
@@ -264,6 +482,20 @@ class SettingsManager:
                 config.write(handle)
         except IOError:
             print(f"无法写入配置文件: {self.filename}")
+
+    def clear_roll_call_history(self) -> None:
+        """清空点名相关的历史记录，保证新启动时重新开始。"""
+
+        settings = self.load_settings()
+        section = settings.get("RollCallTimer", {})
+        removed = False
+        for key in ("group_remaining", "group_last", "global_drawn"):
+            if key in section:
+                section.pop(key, None)
+                removed = True
+        if removed:
+            settings["RollCallTimer"] = section
+            self.save_settings(settings)
 
 
 # ---------- 自绘置顶 ToolTip ----------
@@ -450,7 +682,7 @@ class TitleBar(QWidget):
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(6, 0, 6, 0)
-        title = QLabel("屏幕批注")
+        title = QLabel("屏幕画笔")
         font = title.font()
         font.setBold(True)
         title.setFont(font)
@@ -533,6 +765,28 @@ class FloatingToolbar(QWidget):
                 background: rgba(138, 180, 248, 255);
                 color: #202124;
             }
+            QPushButton#eraserButton {
+                background: rgba(241, 243, 244, 235);
+                color: #3c4043;
+                border-color: rgba(138, 180, 248, 170);
+            }
+            QPushButton#eraserButton:hover,
+            QPushButton#eraserButton:checked {
+                background: rgba(202, 225, 255, 255);
+                border-color: #1a73e8;
+                color: #174ea6;
+            }
+            QPushButton#clearButton {
+                background: rgba(255, 236, 232, 240);
+                color: #a03a1e;
+                border-color: rgba(255, 173, 153, 230);
+            }
+            QPushButton#clearButton:hover,
+            QPushButton#clearButton:checked {
+                background: rgba(255, 210, 204, 255);
+                border-color: rgba(255, 138, 101, 255);
+                color: #5f2121;
+            }
             #whiteboardButtonActive {
                 background: rgba(255, 214, 102, 240);
                 border-color: rgba(251, 188, 5, 255);
@@ -563,7 +817,7 @@ class FloatingToolbar(QWidget):
             ("#000000", "黑色画笔"),
             ("#FF0000", "红色画笔"),
             ("#1E90FF", "蓝色画笔"),
-        ]
+        ]  # 预设的高频画笔颜色
         brush_buttons = []
         for color_hex, name in brush_configs:
             button = QPushButton(IconManager.get_brush_icon(color_hex), "")
@@ -573,7 +827,9 @@ class FloatingToolbar(QWidget):
         self.btn_shape = QPushButton(IconManager.get_icon("shape"), "")
         self.btn_undo = QPushButton(IconManager.get_icon("undo"), "")
         self.btn_eraser = QPushButton(IconManager.get_icon("eraser"), "")
+        self.btn_eraser.setObjectName("eraserButton")
         self.btn_clear_all = QPushButton(IconManager.get_icon("clear_all"), "")
+        self.btn_clear_all.setObjectName("clearButton")
         self.btn_whiteboard = QPushButton(IconManager.get_icon("whiteboard"), "")
         self.btn_settings = QPushButton(IconManager.get_icon("settings"), "")
 
@@ -600,8 +856,8 @@ class FloatingToolbar(QWidget):
             self.btn_cursor: "光标",
             self.btn_shape: "图形",
             self.btn_undo: "撤销",
-            self.btn_eraser: "橡皮",
-            self.btn_clear_all: "清除",
+            self.btn_eraser: "橡皮（再次点击恢复画笔）",
+            self.btn_clear_all: "清除（并恢复画笔）",
             self.btn_whiteboard: "白板（单击开关 / 双击换色）",
             self.btn_settings: "画笔设置",
         }
@@ -622,7 +878,7 @@ class FloatingToolbar(QWidget):
             button.clicked.connect(lambda _checked, c=color_hex: self.overlay.use_brush_color(c))
         self.btn_shape.clicked.connect(self._select_shape)
         self.btn_undo.clicked.connect(self.overlay.undo_last_action)
-        self.btn_eraser.clicked.connect(lambda: self.overlay.set_mode("eraser"))
+        self.btn_eraser.clicked.connect(self.overlay.toggle_eraser_mode)
         self.btn_clear_all.clicked.connect(self.overlay.clear_all)
         self.btn_settings.clicked.connect(self.overlay.open_pen_settings)
         self.btn_whiteboard.clicked.connect(self._handle_whiteboard_click)
@@ -718,6 +974,12 @@ class OverlayWindow(QWidget):
         self.drawing = False
         self.last_point = QPointF(); self.prev_point = QPointF()
         self.last_width = float(self.pen_size); self.last_time = time.time()
+        self._last_brush_color = QColor(self.pen_color)
+        self._last_brush_size = max(1, self.pen_size)
+        self._last_draw_mode = "brush"
+        self._last_shape_type: Optional[str] = None
+        self._restoring_tool = False
+        self._eraser_last_point: Optional[QPoint] = None
         self.whiteboard_active = False
         self.whiteboard_color = QColor(0, 0, 0, 0); self.last_board_color = QColor("#ffffff")
         self.cursor_pixmap = QPixmap()
@@ -783,11 +1045,16 @@ class OverlayWindow(QWidget):
         self.update()
 
     def set_mode(self, mode: str, shape_type: Optional[str] = None, *, initial: bool = False) -> None:
+        prev_mode = getattr(self, "mode", None)
         self.mode = mode
         if shape_type is not None or mode != "shape":
             self.current_shape = shape_type
         if mode != "shape":
             self.shape_start_point = None
+        if self.mode != "eraser":
+            self._eraser_last_point = None
+        if self.mode in {"brush", "shape"} and not self._restoring_tool:
+            self._update_last_tool_snapshot()
         self._update_visibility_for_mode(initial=initial)
         if not initial:
             self.raise_toolbar()
@@ -798,6 +1065,38 @@ class OverlayWindow(QWidget):
         if not getattr(self, 'toolbar', None):
             return
         self.toolbar.update_tool_states(self.mode, self.pen_color)
+
+    def _update_last_tool_snapshot(self) -> None:
+        if self.pen_color.isValid():
+            self._last_brush_color = QColor(self.pen_color)
+        if self.pen_size > 0:
+            self._last_brush_size = max(1, int(self.pen_size))
+        if self.mode in {"brush", "shape"}:
+            self._last_draw_mode = self.mode
+            if self.mode == "shape":
+                self._last_shape_type = self.current_shape
+
+    def _restore_last_tool(self) -> None:
+        if isinstance(self._last_brush_color, QColor) and self._last_brush_color.isValid():
+            self.pen_color = QColor(self._last_brush_color)
+        if isinstance(self._last_brush_size, int) and self._last_brush_size > 0:
+            self.pen_size = max(1, int(self._last_brush_size))
+        target_mode = self._last_draw_mode if self._last_draw_mode in {"brush", "shape"} else "brush"
+        target_shape = self._last_shape_type if target_mode == "shape" else None
+        self._restoring_tool = True
+        try:
+            self.set_mode(target_mode, shape_type=target_shape)
+        finally:
+            self._restoring_tool = False
+        self._update_last_tool_snapshot()
+
+    def toggle_eraser_mode(self) -> None:
+        """切换橡皮模式；再次点击会恢复上一次的画笔配置。"""
+        if self.mode == "eraser":
+            self._restore_last_tool()
+        else:
+            self._update_last_tool_snapshot()
+            self.set_mode("eraser")
 
     def update_cursor(self) -> None:
         if self.mode == "cursor":
@@ -847,14 +1146,23 @@ class OverlayWindow(QWidget):
             self.toolbar.update_undo_state(bool(self.history))
 
     def clear_all(self) -> None:
+        """清除整块画布，同时根据需要恢复画笔模式。"""
+        restore_needed = self.mode not in {"brush", "shape"}
         self._push_history()
         self.canvas.fill(Qt.GlobalColor.transparent)
         self.temp_canvas.fill(Qt.GlobalColor.transparent)
         self.update()
-        self.raise_toolbar()
+        self._eraser_last_point = None
+        if restore_needed:
+            self._restore_last_tool()
+        else:
+            if self.mode in {"brush", "shape"}:
+                self._update_last_tool_snapshot()
+            self.raise_toolbar()
         self._update_undo_button()
 
     def use_brush_color(self, color_hex: str) -> None:
+        """根据传入的十六进制颜色值启用画笔模式。"""
         color = QColor(color_hex)
         if not color.isValid():
             return
@@ -900,6 +1208,7 @@ class OverlayWindow(QWidget):
             pointf = e.position(); self.last_point = pointf; self.prev_point = pointf
             self.last_width = self.pen_size * 0.4
             self.shape_start_point = e.pos() if self.mode == "shape" else None
+            self._eraser_last_point = e.pos() if self.mode == "eraser" else None
             self.raise_toolbar()
             e.accept()
         super().mousePressEvent(e)
@@ -918,6 +1227,8 @@ class OverlayWindow(QWidget):
         if e.button() == Qt.MouseButton.LeftButton and self.drawing:
             if self.mode == "shape" and self.current_shape: self._draw_shape_final(e.pos())
             self.drawing = False; self.shape_start_point = None; self.update()
+            if self.mode == "eraser":
+                self._eraser_last_point = None
             self.raise_toolbar()
         super().mouseReleaseEvent(e)
 
@@ -950,12 +1261,22 @@ class OverlayWindow(QWidget):
         self.prev_point = self.last_point; self.last_point = cur; self.last_width = cur_w
 
     def _erase_at(self, pos) -> None:
-        if isinstance(pos, QPointF): pos = pos.toPoint()
-        p = QPainter(self.canvas); p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
-        radius = max(6, int(self.pen_size * 3.2))
-        p.setPen(QPen(QColor(255, 255, 255, 0), radius, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-        p.drawPoint(pos); p.end()
+        current = QPointF(pos) if isinstance(pos, QPointF) else QPointF(QPoint(pos))
+        start_point = QPointF(self._eraser_last_point) if isinstance(self._eraser_last_point, QPoint) else current
+        path = QPainterPath(start_point)
+        path.lineTo(current)
+
+        painter = QPainter(self.canvas)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+        radius = max(8.0, float(self.pen_size) * 1.6)
+        stroke_width = max(12, int(radius * 2.0))
+        pen = QPen(QColor(255, 255, 255, 0), stroke_width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.drawPath(path)
+        painter.end()
+
+        self._eraser_last_point = current.toPoint()
 
     def _draw_shape_preview(self, end_point) -> None:
         if not self.shape_start_point: return
@@ -1015,7 +1336,8 @@ class TTSManager(QObject):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._pump)
         try:
-            self.engine = pyttsx3.init()
+            init_kwargs = {"driverName": "sapi5"} if sys.platform == "win32" else {}
+            self.engine = pyttsx3.init(**init_kwargs)
             voices = self.engine.getProperty("voices") or []
             self.voice_ids = [v.id for v in voices]
             if self.voice_ids: self.default_voice_id = self.voice_ids[0]
@@ -1132,15 +1454,23 @@ class RollCallTimerWindow(QWidget):
         self.student_data = student_data
 
         s = self.settings_manager.load_settings().get("RollCallTimer", {})
+        def _get_int(key: str, default: int) -> int:
+            try:
+                return int(s.get(key, str(default)))
+            except (TypeError, ValueError):
+                return default
         apply_geometry_from_text(self, s.get("geometry", "420x240+180+180"))
         self.setMinimumSize(260, 160)
+        # 记录初始最小宽高，供后续还原窗口尺寸时使用
+        self._base_minimum_width = self.minimumWidth()
+        self._base_minimum_height = self.minimumHeight()
 
         self.mode = s.get("mode", "roll_call") if s.get("mode", "roll_call") in {"roll_call", "timer"} else "roll_call"
         self.timer_modes = ["countdown", "stopwatch", "clock"]
         self.timer_mode_index = self.timer_modes.index(s.get("timer_mode", "countdown")) if s.get("timer_mode", "countdown") in self.timer_modes else 0
 
-        self.timer_countdown_minutes = int(s.get("timer_countdown_minutes", "5"))
-        self.timer_countdown_seconds = int(s.get("timer_countdown_seconds", "0"))
+        self.timer_countdown_minutes = _get_int("timer_countdown_minutes", 5)
+        self.timer_countdown_seconds = _get_int("timer_countdown_seconds", 0)
         self.timer_sound_enabled = str_to_bool(s.get("timer_sound_enabled", "True"), True)
 
         self.show_id = str_to_bool(s.get("show_id", "True"), True)
@@ -1154,9 +1484,27 @@ class RollCallTimerWindow(QWidget):
             self.groups.extend(gs)
         if self.current_group_name not in self.groups: self.current_group_name = "全部"
 
-        self._shuffled_indices: List[int] = []; self.current_student_index: Optional[int] = None
-        self.timer_seconds_left = max(0, self.timer_countdown_minutes * 60 + self.timer_countdown_seconds)
-        self.timer_stopwatch_seconds = 0; self.timer_running = False
+        self.current_student_index: Optional[int] = None
+        self._placeholder_on_show = True
+        self._group_all_indices: Dict[str, List[int]] = {}
+        self._group_remaining_indices: Dict[str, List[int]] = {}
+        self._group_last_student: Dict[str, Optional[int]] = {}
+        # 记录各分组初始的随机顺序，便于在界面切换时保持未点名名单不被重新洗牌
+        self._group_initial_sequences: Dict[str, List[int]] = {}
+        # 记录每个分组已点过名的学生索引，便于核对剩余名单
+        self._group_drawn_history: Dict[str, set[int]] = {}
+        # 统一维护一个全局已点名集合，确保“全部”分组与子分组状态一致
+        self._global_drawn_students: set[int] = set()
+        self._student_groups: Dict[int, set[str]] = {}
+        self._rebuild_group_indices()
+        self._restore_group_state(s)
+        self.timer_seconds_left = max(0, _get_int("timer_seconds_left", self.timer_countdown_minutes * 60 + self.timer_countdown_seconds))
+        self.timer_stopwatch_seconds = max(0, _get_int("timer_stopwatch_seconds", 0))
+        self.timer_running = str_to_bool(s.get("timer_running", "False"), False)
+
+        self.last_id_font_size = max(self.MIN_FONT_SIZE, _get_int("id_font_size", 48))
+        self.last_name_font_size = max(self.MIN_FONT_SIZE, _get_int("name_font_size", 60))
+        self.last_timer_font_size = max(self.MIN_FONT_SIZE, _get_int("timer_font_size", 56))
 
         self.count_timer = QTimer(self); self.count_timer.setInterval(1000); self.count_timer.timeout.connect(self._on_count_timer)
         self.clock_timer = QTimer(self); self.clock_timer.setInterval(1000); self.clock_timer.timeout.connect(self._update_clock)
@@ -1170,7 +1518,23 @@ class RollCallTimerWindow(QWidget):
         else:
             self.speech_enabled = False
 
+        # QFontDatabase 在 Qt 6 中以静态方法为主，这里直接调用类方法避免实例化失败
+        families_list = []
+        get_families = getattr(QFontDatabase, "families", None)
+        if callable(get_families):
+            try:
+                families_list = list(get_families())
+            except TypeError:
+                # 个别绑定版本可能要求显式写入枚举参数
+                try:
+                    families_list = list(get_families(QFontDatabase.WritingSystem.Any))  # type: ignore[arg-type]
+                except Exception:
+                    families_list = []
+        families = set(families_list)
+        self.name_font_family = "楷体" if "楷体" in families else ("KaiTi" if "KaiTi" in families else "Microsoft YaHei UI")
+
         self._build_ui()
+        self._apply_saved_fonts()
         self._update_menu_state()
         self.update_mode_ui()
         self.on_group_change(initial=True)
@@ -1182,17 +1546,65 @@ class RollCallTimerWindow(QWidget):
 
         top = QHBoxLayout(); top.setSpacing(4)
         self.title_label = QLabel("点名"); f = QFont("Microsoft YaHei UI", 10, QFont.Weight.Bold)
-        self.title_label.setFont(f); self.title_label.setStyleSheet("color: #202124;"); top.addWidget(self.title_label)
+        self.title_label.setFont(f); self.title_label.setStyleSheet("color: #202124;")
+        self.title_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        top.addWidget(self.title_label, 0, Qt.AlignmentFlag.AlignLeft)
 
         self.mode_button = QPushButton("切换到计时"); self.mode_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.mode_button.clicked.connect(self.toggle_mode); self.mode_button.setFixedHeight(26); top.addWidget(self.mode_button)
+        self.mode_button.clicked.connect(self.toggle_mode); self.mode_button.setFixedHeight(28)
+        mode_font = QFont("Microsoft YaHei UI", 9, QFont.Weight.Medium)
+        self.mode_button.setFont(mode_font)
+        fm = self.mode_button.fontMetrics()
+        max_text = max(("切换到计时", "切换到点名"), key=lambda t: fm.horizontalAdvance(t))
+        target_width = fm.horizontalAdvance(max_text) + 24
+        self.mode_button.setFixedWidth(target_width)  # 固定宽度，避免文本切换导致按钮位置跳动
+        self.mode_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        top.addWidget(self.mode_button, 0, Qt.AlignmentFlag.AlignLeft)
+
+        self.group_label = QLabel("分组")
+        self.group_label.setFont(QFont("Microsoft YaHei UI", 9, QFont.Weight.Medium))
+        self.group_label.setStyleSheet("color: #3c4043;")
+        self.group_label.setFixedHeight(28)
+        self.group_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        self.group_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        top.addWidget(self.group_label, 0, Qt.AlignmentFlag.AlignLeft)
 
         self.group_combo = QComboBox(); self.group_combo.addItems(self.groups); self.group_combo.setCurrentText(self.current_group_name)
-        self.group_combo.currentTextChanged.connect(self.on_group_change); self.group_combo.setFixedHeight(26); top.addWidget(self.group_combo, 1)
+        self.group_combo.setFixedHeight(28)
+        self.group_combo.setMinimumContentsLength(4)
+        self.group_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.group_combo.currentTextChanged.connect(self.on_group_change)
+
+        self.group_placeholder = QWidget()
+        self.group_placeholder.setFixedHeight(28)
+
+        self.group_stack = QStackedWidget()
+        self.group_stack.setFixedHeight(28)
+        self.group_stack.addWidget(self.group_combo)
+        self.group_stack.addWidget(self.group_placeholder)
+        combo_hint = max(120, min(170, self.group_combo.sizeHint().width()))
+        self.group_combo.setFixedWidth(combo_hint)
+        self.group_placeholder.setFixedWidth(combo_hint)
+        self.group_stack.setFixedWidth(combo_hint)
+        self.group_combo.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.group_placeholder.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.group_stack.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        top.addWidget(self.group_stack, 0, Qt.AlignmentFlag.AlignLeft)
+        popup_width = max(combo_hint + 24, 188)
+        self.group_combo.view().setMinimumWidth(popup_width)
+
+        self.reset_button = QPushButton("重置")
+        self.reset_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.reset_button.setFixedHeight(28)
+        self.reset_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.reset_button.clicked.connect(self.reset_roll_call_pools)
+        top.addWidget(self.reset_button, 0, Qt.AlignmentFlag.AlignLeft)
 
         self.menu_button = QToolButton(); self.menu_button.setText("..."); self.menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.menu_button.setFixedSize(28, 28); self.menu_button.setStyleSheet("font-size: 18px; padding-bottom: 6px;")
-        self.main_menu = self._build_menu(); self.menu_button.setMenu(self.main_menu); top.addWidget(self.menu_button)
+        self.main_menu = self._build_menu(); self.menu_button.setMenu(self.main_menu)
+        top.addStretch(1)
+        top.addWidget(self.menu_button, 0, Qt.AlignmentFlag.AlignRight)
         layout.addLayout(top)
 
         self.stack = QStackedWidget(); layout.addWidget(self.stack, 1)
@@ -1223,6 +1635,15 @@ class RollCallTimerWindow(QWidget):
 
         self.roll_call_frame.clicked.connect(self.roll_student)
         self.id_label.installEventFilter(self); self.name_label.installEventFilter(self)
+
+    def _apply_saved_fonts(self) -> None:
+        id_font = QFont("Microsoft YaHei UI", self.last_id_font_size, QFont.Weight.Bold)
+        name_weight = QFont.Weight.Normal if self.name_font_family in {"楷体", "KaiTi"} else QFont.Weight.Bold
+        name_font = QFont(self.name_font_family, self.last_name_font_size, name_weight)
+        timer_font = QFont("Consolas", self.last_timer_font_size, QFont.Weight.Bold)
+        self.id_label.setFont(id_font)
+        self.name_label.setFont(name_font)
+        self.time_display_label.setFont(timer_font)
 
     def _build_menu(self) -> QMenu:
         menu = QMenu(self)
@@ -1274,7 +1695,9 @@ class RollCallTimerWindow(QWidget):
 
     def _toggle_speech(self, enabled: bool) -> None:
         if not self.tts_manager or not self.tts_manager.available:
-            QMessageBox.information(self, "提示", "未检测到语音引擎，无法开启语音播报。"); self.speech_enabled_action.setChecked(False); return
+            show_quiet_information(self, "未检测到语音引擎，无法开启语音播报。")
+            self.speech_enabled_action.setChecked(False)
+            return
         self.speech_enabled = enabled
 
     def _set_voice(self, voice_id: str) -> None:
@@ -1287,20 +1710,27 @@ class RollCallTimerWindow(QWidget):
 
     def toggle_mode(self) -> None:
         self.mode = "timer" if self.mode == "roll_call" else "roll_call"
+        if self.mode == "roll_call":
+            self._placeholder_on_show = True
         self.update_mode_ui()
 
     def update_mode_ui(self) -> None:
         is_roll = self.mode == "roll_call"
         self.title_label.setText("点名" if is_roll else "计时")
         self.mode_button.setText("切换到计时" if is_roll else "切换到点名")
+        self.group_label.setVisible(is_roll)
         if is_roll:
-            self.stack.setCurrentWidget(self.roll_call_frame); self.group_combo.show()
+            if self._placeholder_on_show:
+                self.current_student_index = None
+            self.stack.setCurrentWidget(self.roll_call_frame); self.group_stack.setCurrentWidget(self.group_combo)
             self.count_timer.stop(); self.clock_timer.stop(); self.timer_running = False; self.timer_start_pause_button.setText("开始")
             self.update_display_layout(); self.display_current_student()
-            QTimer.singleShot(0, self.update_dynamic_fonts)
+            self.schedule_font_update()
+            self._placeholder_on_show = False
         else:
-            self.stack.setCurrentWidget(self.timer_frame); self.group_combo.hide(); self.update_timer_mode_ui()
-            QTimer.singleShot(0, self.update_dynamic_fonts)
+            self.stack.setCurrentWidget(self.timer_frame); self.group_stack.setCurrentWidget(self.group_placeholder); self.update_timer_mode_ui()
+            self.schedule_font_update()
+        self.reset_button.setVisible(is_roll)
         self.updateGeometry()
 
     def update_timer_mode_ui(self) -> None:
@@ -1309,18 +1739,21 @@ class RollCallTimerWindow(QWidget):
         if mode == "countdown":
             self.timer_mode_button.setText("倒计时")
             self.timer_start_pause_button.setEnabled(True); self.timer_reset_button.setEnabled(True); self.timer_set_button.setEnabled(True)
+            self.timer_start_pause_button.setText("暂停" if self.timer_running else "开始")
             if self.timer_running and not self.count_timer.isActive(): self.count_timer.start()
             self.update_timer_display()
         elif mode == "stopwatch":
             self.timer_mode_button.setText("秒表")
             self.timer_start_pause_button.setEnabled(True); self.timer_reset_button.setEnabled(True); self.timer_set_button.setEnabled(False)
+            self.timer_start_pause_button.setText("暂停" if self.timer_running else "开始")
             if self.timer_running and not self.count_timer.isActive(): self.count_timer.start()
             self.update_timer_display()
         else:
             self.timer_mode_button.setText("时钟")
             self.timer_start_pause_button.setEnabled(False); self.timer_reset_button.setEnabled(False); self.timer_set_button.setEnabled(False)
             self.timer_running = False; self.count_timer.stop(); self._update_clock(); self.clock_timer.start()
-        QTimer.singleShot(0, self.update_dynamic_fonts)
+            self.timer_start_pause_button.setText("开始")
+        self.schedule_font_update()
 
     def toggle_timer_mode(self) -> None:
         if self.timer_running: return
@@ -1371,11 +1804,11 @@ class RollCallTimerWindow(QWidget):
             mi, se = divmod(seconds, 60); self.time_display_label.setText(f"{int(mi):02d}:{int(se):02d}")
         else:
             self.time_display_label.setText(time.strftime("%H:%M:%S"))
-        self.update_dynamic_fonts()
+        self.schedule_font_update()
 
     def _update_clock(self) -> None:
         self.time_display_label.setText(time.strftime("%H:%M:%S"))
-        self.update_dynamic_fonts()
+        self.schedule_font_update()
 
     def play_timer_sound(self) -> None:
         if SOUNDDEVICE_AVAILABLE:
@@ -1386,35 +1819,458 @@ class RollCallTimerWindow(QWidget):
                     data = 0.4 * np.sin(2 * np.pi * frequency * t)
                     sd.play(data.astype(np.float32), fs); sd.wait()
                 except Exception:
-                    QApplication.beep()
+                    pass
             threading.Thread(target=_play, daemon=True).start()
-        else:
-            QApplication.beep()
 
     def on_group_change(self, group_name: Optional[str] = None, initial: bool = False) -> None:
-        if group_name is None: group_name = self.group_combo.currentText()
+        if group_name is None:
+            group_name = self.group_combo.currentText()
+        if group_name not in self.groups:
+            group_name = "全部"
+            if self.group_combo.currentText() != group_name:
+                self.group_combo.setCurrentText(group_name)
         self.current_group_name = group_name
-        if self.student_data.empty: self._shuffled_indices = []; return
-        if group_name == "全部": idx = list(self.student_data.index)
-        else: idx = list(self.student_data[self.student_data["分组"].astype(str).str.upper() == group_name].index)
-        random.shuffle(idx); self._shuffled_indices = idx; self.current_student_index = None
+        if self.student_data.empty:
+            self.current_student_index = None
+            self.display_current_student()
+            return
+        self._ensure_group_pool(group_name)
+        self.current_student_index = None
         self.display_current_student()
-        if not initial: self.roll_student(speak=False)
 
     def roll_student(self, speak: bool = True) -> None:
         if self.mode != "roll_call": return
-        if not self._shuffled_indices:
-            QMessageBox.information(self, "提示", f"'{self.current_group_name}' 的同学已经全部点到，重新开始一次抽取。")
-            self.on_group_change(); return
-        self.current_student_index = self._shuffled_indices.pop(); self.display_current_student()
+        group_name = self.current_group_name
+        pool = self._group_remaining_indices.get(group_name)
+        if pool is None:
+            self._ensure_group_pool(group_name)
+            pool = self._group_remaining_indices.get(group_name, [])
+        if not pool:
+            base_total = self._group_all_indices.get(group_name, [])
+            if not base_total:
+                show_quiet_information(self, f"'{group_name}' 分组当前没有可点名的学生。")
+                self.current_student_index = None
+                self.display_current_student()
+                return
+            if self._all_groups_completed():
+                show_quiet_information(self, "所有学生都已完成点名，请点击“重置”按钮重新开始。")
+            else:
+                show_quiet_information(self, f"'{group_name}' 的同学已经全部点到，请切换其他分组或点击“重置”按钮。")
+            return
+        self.current_student_index = pool.pop()
+        self._group_last_student[group_name] = self.current_student_index
+        self._mark_student_drawn(self.current_student_index)
+        self.display_current_student()
         if speak and self.speech_enabled and self.tts_manager and self.tts_manager.available:
             stu = self.student_data.loc[self.current_student_index]
             name = str(stu["姓名"]) if "姓名" in stu and pd.notna(stu["姓名"]) else ""
             if name: self.tts_manager.speak(name)
+        # 即时同步保存配置，防止异常退出导致未点名名单丢失。
+        self.save_settings()
+
+    def _all_groups_completed(self) -> bool:
+        """判断是否所有分组的学生都已点名完毕。"""
+
+        total_students = len(self._group_all_indices.get("全部", []))
+        if total_students == 0:
+            return True
+        if len(self._global_drawn_students) < total_students:
+            return False
+        for group, base in self._group_all_indices.items():
+            if not base:
+                continue
+            remaining = self._group_remaining_indices.get(group, [])
+            if remaining:
+                return False
+        return True
+
+    def _reset_roll_call_state(self) -> None:
+        """清空全部点名历史并重新洗牌。"""
+
+        self._rebuild_group_indices()
+        self._ensure_group_pool(self.current_group_name)
+
+    def reset_roll_call_pools(self) -> None:
+        """根据当前分组执行重置：子分组独立重置，“全部”重置所有。"""
+
+        group_name = self.current_group_name
+        if group_name == "全部":
+            self._reset_roll_call_state()
+        else:
+            self._reset_single_group(group_name)
+        self.current_student_index = None
+        self.display_current_student()
+        self.save_settings()
+
+    def _reset_single_group(self, group_name: str) -> None:
+        """仅重置指定分组，同时保持其它分组及全局状态不变。"""
+
+        if group_name == "全部":
+            return
+        base_indices_raw = self._group_all_indices.get(group_name)
+        if base_indices_raw is None:
+            return
+        base_indices: List[int] = []
+        for value in base_indices_raw:
+            try:
+                base_indices.append(int(value))
+            except (TypeError, ValueError):
+                continue
+        shuffled = list(base_indices)
+        random.shuffle(shuffled)
+        self._group_remaining_indices[group_name] = shuffled
+        self._group_initial_sequences[group_name] = list(shuffled)
+        self._group_last_student[group_name] = None
+
+        history = self._group_drawn_history.setdefault(group_name, set())
+        if history:
+            for idx in list(history):
+                self._remove_from_global_history(idx, ignore_group=group_name)
+            history.clear()
+
+        last_all = self._group_last_student.get("全部")
+        if last_all is not None:
+            try:
+                last_all_key = int(last_all)
+            except (TypeError, ValueError):
+                last_all_key = None
+            if last_all_key is not None and last_all_key not in self._global_drawn_students:
+                self._group_last_student["全部"] = None
+
+        self._refresh_all_group_pool()
+
+    def _rebuild_group_indices(self) -> None:
+        """重新构建各分组的学生索引池。"""
+
+        all_indices: Dict[str, List[int]] = {}
+        remaining: Dict[str, List[int]] = {}
+        last_student: Dict[str, Optional[int]] = {}
+        student_groups: Dict[int, set[str]] = {}
+        initial_sequences: Dict[str, List[int]] = {}
+
+        if self.student_data.empty:
+            all_indices["全部"] = []
+        else:
+            all_indices["全部"] = list(self.student_data.index)
+            for idx in all_indices["全部"]:
+                student_groups.setdefault(int(idx), set()).add("全部")
+            group_series = self.student_data["分组"].astype(str).str.strip().str.upper()
+            for group_name in self.groups:
+                if group_name == "全部":
+                    continue
+                mask = group_series == group_name
+                all_indices[group_name] = list(self.student_data[mask].index)
+                for idx in all_indices[group_name]:
+                    student_groups.setdefault(int(idx), set()).add(group_name)
+
+        for group_name, indices in all_indices.items():
+            pool = list(indices)
+            random.shuffle(pool)
+            remaining[group_name] = pool
+            initial_sequences[group_name] = list(pool)
+            last_student[group_name] = None
+
+        self._group_all_indices = all_indices
+        self._group_remaining_indices = remaining
+        self._group_last_student = last_student
+        self._group_initial_sequences = initial_sequences
+        self._student_groups = student_groups
+        self._group_drawn_history = {group: set() for group in all_indices}
+        # “全部”分组直接引用全局集合，避免重复维护两份数据造成不一致
+        if "全部" in self._group_drawn_history:
+            self._global_drawn_students.clear()
+            self._group_drawn_history["全部"] = self._global_drawn_students
+        else:
+            self._group_drawn_history["全部"] = self._global_drawn_students
+
+        self._refresh_all_group_pool()
+
+    def _remove_from_global_history(self, student_index: int, ignore_group: Optional[str] = None) -> None:
+        """若学生未在其它分组被点名，则从全局记录中移除。"""
+
+        try:
+            student_key = int(student_index)
+        except (TypeError, ValueError):
+            return
+        for group, history in self._group_drawn_history.items():
+            if group == "全部" or group == ignore_group:
+                continue
+            if student_key in history:
+                return
+        self._global_drawn_students.discard(student_key)
+
+    def _restore_group_state(self, section: Mapping[str, str]) -> None:
+        """从配置中恢复各分组剩余学生池，保持未抽学生不重复。"""
+
+        def _load_dict(key: str) -> Dict[str, object]:
+            raw = section.get(key, "")
+            if not raw:
+                return {}
+            try:
+                data = json.loads(raw)
+            except Exception:
+                return {}
+            return data if isinstance(data, dict) else {}
+
+        remaining_data = _load_dict("group_remaining")
+        last_data = _load_dict("group_last")
+
+        # 读取保存的全局已点名名单，保证窗口被关闭后重新打开时仍能继承上一轮的状态
+        global_drawn_raw = section.get("global_drawn", "")
+        restored_global: set[int] = set()
+        if global_drawn_raw:
+            try:
+                payload = json.loads(global_drawn_raw)
+            except Exception:
+                payload = []
+            if isinstance(payload, list):
+                for value in payload:
+                    try:
+                        restored_global.add(int(value))
+                    except (TypeError, ValueError):
+                        continue
+
+        self._global_drawn_students.clear()
+        self._global_drawn_students.update(restored_global)
+        self._group_drawn_history["全部"] = self._global_drawn_students
+
+        # 先记录一份备份，稍后重新计算所有集合时需要与持久化信息交叉验证
+        existing_global = set(self._global_drawn_students)
+
+        # 从头构建全局集合，避免旧对象上的引用导致状态被意外清空
+        self._global_drawn_students = set()
+        self._group_drawn_history["全部"] = self._global_drawn_students
+
+        for group, indices in remaining_data.items():
+            if group not in self._group_all_indices:
+                continue
+            base_list = self._group_all_indices[group]
+            base_set = set(base_list)
+            restored: List[int] = []
+            if isinstance(indices, list):
+                seen: set[int] = set()
+                for value in indices:
+                    try:
+                        idx = int(value)
+                    except (TypeError, ValueError):
+                        continue
+                    if idx not in base_set or idx in seen:
+                        continue
+                    restored.append(idx)
+                    seen.add(idx)
+            self._group_remaining_indices[group] = restored
+
+        for group, value in last_data.items():
+            if group not in self._group_all_indices:
+                continue
+            if value is None:
+                self._group_last_student[group] = None
+                continue
+            try:
+                idx = int(value)
+            except (TypeError, ValueError):
+                continue
+            if idx in self._group_all_indices[group]:
+                self._group_last_student[group] = idx
+
+        # 根据恢复后的剩余名单推导出每个分组已点名的学生集合
+        # 重新整理所有分组的已点名学生，并同步更新全局集合
+        for group, base_indices in self._group_all_indices.items():
+            normalized_base: List[int] = []
+            for value in base_indices:
+                try:
+                    normalized_base.append(int(value))
+                except (TypeError, ValueError):
+                    continue
+            remaining_set: set[int] = set()
+            for value in self._group_remaining_indices.get(group, []):
+                try:
+                    remaining_set.add(int(value))
+                except (TypeError, ValueError):
+                    continue
+            drawn = {idx for idx in normalized_base if idx not in remaining_set}
+            if group != "全部" and existing_global:
+                # 在恢复时合并先前记录的全局名单，防止由于意外写入丢失导致遗漏
+                drawn.update(idx for idx in existing_global if idx in normalized_base)
+            seq = list(self._group_remaining_indices.get(group, []))
+            seq.extend(idx for idx in normalized_base if idx not in seq)
+            self._group_initial_sequences[group] = seq
+            if group == "全部":
+                # “全部”分组的已点名集合以全局集合为准
+                self._global_drawn_students.update(drawn)
+            else:
+                self._group_drawn_history[group] = drawn
+                self._global_drawn_students.update(drawn)
+
+        # 合并持久化阶段记录的全局集合，防止遗漏尚未恢复的记录
+        if existing_global:
+            self._global_drawn_students.update(existing_global)
+
+        # 最后重新指定“全部”分组引用当前全局集合，保持一致性
+        self._group_drawn_history["全部"] = self._global_drawn_students
+        self._refresh_all_group_pool()
+
+    def _ensure_group_pool(self, group_name: str, force_reset: bool = False) -> None:
+        """确保指定分组仍有待抽取的学生，必要时重新洗牌。"""
+
+        if group_name not in self._group_all_indices:
+            if self.student_data.empty:
+                base_list: List[int] = []
+            elif group_name == "全部":
+                base_list = list(self.student_data.index)
+            else:
+                group_series = self.student_data["分组"].astype(str).str.strip().str.upper()
+                base_list = list(self.student_data[group_series == group_name].index)
+            self._group_all_indices[group_name] = base_list
+            self._group_remaining_indices[group_name] = []
+            self._group_last_student.setdefault(group_name, None)
+            if group_name == "全部":
+                self._group_drawn_history[group_name] = self._global_drawn_students
+            else:
+                self._group_drawn_history.setdefault(group_name, set())
+            for idx in base_list:
+                entry = self._student_groups.setdefault(int(idx), set())
+                entry.add(group_name)
+                entry.add("全部")
+            # 新增分组时同步生成初始顺序
+            shuffled = list(base_list)
+            random.shuffle(shuffled)
+            self._group_initial_sequences[group_name] = shuffled
+
+        base_indices: List[int] = []
+        for value in self._group_all_indices.get(group_name, []):
+            try:
+                base_indices.append(int(value))
+            except (TypeError, ValueError):
+                continue
+        if group_name == "全部":
+            drawn_history = self._group_drawn_history.setdefault("全部", self._global_drawn_students)
+            reference_drawn = self._global_drawn_students
+        else:
+            drawn_history = self._group_drawn_history.setdefault(group_name, set())
+            reference_drawn = drawn_history
+
+        if group_name == "全部":
+            # “全部”分组直接依据全局集合生成剩余名单，避免与各子分组脱节
+            if group_name not in self._group_initial_sequences:
+                shuffled = list(base_indices)
+                random.shuffle(shuffled)
+                self._group_initial_sequences[group_name] = shuffled
+            self._refresh_all_group_pool()
+            self._group_last_student.setdefault(group_name, None)
+            return
+
+        if force_reset or group_name not in self._group_remaining_indices:
+            drawn_history.clear()
+            pool = list(base_indices)
+            random.shuffle(pool)
+            self._group_remaining_indices[group_name] = pool
+            self._group_last_student.setdefault(group_name, None)
+            self._group_initial_sequences[group_name] = list(pool)
+            self._refresh_all_group_pool()
+            return
+
+        raw_pool = self._group_remaining_indices.get(group_name, [])
+        normalized_pool: List[int] = []
+        seen: set[int] = set()
+        for value in raw_pool:
+            try:
+                idx = int(value)
+            except (TypeError, ValueError):
+                continue
+            if idx in base_indices and idx not in seen and idx not in reference_drawn:
+                normalized_pool.append(idx)
+                seen.add(idx)
+
+        source_order = self._group_initial_sequences.get(group_name)
+        if source_order is None:
+            # 如果未记录初始顺序，则退回数据原有顺序
+            source_order = list(base_indices)
+            self._group_initial_sequences[group_name] = list(source_order)
+
+        for idx in source_order:
+            if idx in reference_drawn or idx in seen or idx not in base_indices:
+                continue
+            normalized_pool.append(idx)
+            seen.add(idx)
+
+        self._group_remaining_indices[group_name] = normalized_pool
+        self._group_last_student.setdefault(group_name, None)
+        self._refresh_all_group_pool()
+
+    def _mark_student_drawn(self, student_index: int) -> None:
+        """抽中学生后，从所有关联分组的候选列表中移除该学生。"""
+
+        student_key = None
+        try:
+            student_key = int(student_index)
+        except (TypeError, ValueError):
+            return
+
+        groups = self._student_groups.get(student_key)
+        if not groups:
+            return
+        self._global_drawn_students.add(student_key)
+        for group in groups:
+            if group == "全部":
+                history = self._group_drawn_history.setdefault("全部", self._global_drawn_students)
+            else:
+                history = self._group_drawn_history.setdefault(group, set())
+            history.add(student_key)
+            pool = self._group_remaining_indices.get(group)
+            if not pool:
+                continue
+            cleaned: List[int] = []
+            for value in pool:
+                try:
+                    idx = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if idx != student_key:
+                    cleaned.append(idx)
+            self._group_remaining_indices[group] = cleaned
+
+        self._refresh_all_group_pool()
+
+    def _refresh_all_group_pool(self) -> None:
+        """同步“全部”分组的剩余名单，使其与各子分组保持一致。"""
+
+        base_all = self._group_all_indices.get("全部", [])
+        if "全部" not in self._group_initial_sequences:
+            shuffled = list(base_all)
+            random.shuffle(shuffled)
+            self._group_initial_sequences["全部"] = shuffled
+        order = list(self._group_initial_sequences.get("全部", []))
+        normalized: List[int] = []
+        seen: set[int] = set()
+        for value in order:
+            try:
+                idx = int(value)
+            except (TypeError, ValueError):
+                continue
+            if idx in seen:
+                continue
+            seen.add(idx)
+            if idx in self._global_drawn_students:
+                continue
+            normalized.append(idx)
+        for value in base_all:
+            try:
+                idx = int(value)
+            except (TypeError, ValueError):
+                continue
+            if idx in seen:
+                continue
+            seen.add(idx)
+            if idx in self._global_drawn_students:
+                continue
+            normalized.append(idx)
+        self._group_remaining_indices["全部"] = normalized
 
     def display_current_student(self) -> None:
         if self.current_student_index is None:
-            self.id_label.setText("点击抽取"); self.name_label.setText("学生")
+            self.id_label.setText("学号" if self.show_id else "")
+            self.name_label.setText("学生" if self.show_name else "")
         else:
             stu = self.student_data.loc[self.current_student_index]
             sid = str(stu["学号"]) if pd.notna(stu["学号"]) else ""; name = str(stu["姓名"]) if pd.notna(stu["姓名"]) else ""
@@ -1422,6 +2278,7 @@ class RollCallTimerWindow(QWidget):
             if not self.show_id: self.id_label.setText("")
             if not self.show_name: self.name_label.setText("")
         self.update_display_layout()
+        self.schedule_font_update()
 
     def update_display_layout(self) -> None:
         self.id_label.setVisible(self.show_id); self.name_label.setVisible(self.show_name)
@@ -1429,6 +2286,9 @@ class RollCallTimerWindow(QWidget):
         layout.setColumnStretch(0, 1); layout.setColumnStretch(1, 1)
         if not self.show_id: layout.setColumnStretch(0, 0)
         if not self.show_name: layout.setColumnStretch(1, 0)
+        self.schedule_font_update()
+
+    def schedule_font_update(self) -> None:
         QTimer.singleShot(0, self.update_dynamic_fonts)
 
     def update_dynamic_fonts(self) -> None:
@@ -1436,13 +2296,20 @@ class RollCallTimerWindow(QWidget):
             if not lab.isVisible(): continue
             w = max(40, lab.width()); h = max(40, lab.height()); text = lab.text()
             size = self._calc_font_size(w, h, text)
-            lab.setFont(QFont("Microsoft YaHei UI", size, QFont.Weight.Bold))
+            if lab is self.name_label:
+                weight = QFont.Weight.Normal if self.name_font_family in {"楷体", "KaiTi"} else QFont.Weight.Bold
+                lab.setFont(QFont(self.name_font_family, size, weight))
+                self.last_name_font_size = size
+            else:
+                lab.setFont(QFont("Microsoft YaHei UI", size, QFont.Weight.Bold))
+                self.last_id_font_size = size
         if self.timer_frame.isVisible():
             text = self.time_display_label.text()
             w = max(60, self.time_display_label.width())
             h = max(60, self.time_display_label.height())
             size = self._calc_font_size(w, h, text, monospace=True)
             self.time_display_label.setFont(QFont("Consolas", size, QFont.Weight.Bold))
+            self.last_timer_font_size = size
 
     def _calc_font_size(self, w: int, h: int, text: str, monospace: bool = False) -> int:
         if not text or w < 20 or h < 20:
@@ -1459,15 +2326,21 @@ class RollCallTimerWindow(QWidget):
 
     def showEvent(self, e) -> None:
         super().showEvent(e)
+        if self.mode == "roll_call" and self._placeholder_on_show:
+            self.current_student_index = None
+            self.display_current_student()
+            self._placeholder_on_show = False
         self.visibility_changed.emit(True)
-        QTimer.singleShot(0, self.update_dynamic_fonts)
+        self.schedule_font_update()
+        ensure_widget_within_screen(self)
 
     def resizeEvent(self, e: QResizeEvent) -> None:
         super().resizeEvent(e)
-        QTimer.singleShot(0, self.update_dynamic_fonts)
+        self.schedule_font_update()
 
     def hideEvent(self, e) -> None:
         super().hideEvent(e)
+        self._placeholder_on_show = True
         self.save_settings()
         self.visibility_changed.emit(False)
 
@@ -1493,6 +2366,45 @@ class RollCallTimerWindow(QWidget):
         sec["timer_sound_enabled"] = bool_to_str(self.timer_sound_enabled)
         sec["mode"] = self.mode
         sec["timer_mode"] = self.timer_modes[self.timer_mode_index]
+        sec["timer_seconds_left"] = str(self.timer_seconds_left)
+        sec["timer_stopwatch_seconds"] = str(self.timer_stopwatch_seconds)
+        sec["timer_running"] = bool_to_str(self.timer_running)
+        sec["id_font_size"] = str(self.last_id_font_size)
+        sec["name_font_size"] = str(self.last_name_font_size)
+        sec["timer_font_size"] = str(self.last_timer_font_size)
+        remaining_payload: Dict[str, List[int]] = {}
+        for group, indices in self._group_remaining_indices.items():
+            cleaned: List[int] = []
+            for idx in indices:
+                try:
+                    cleaned.append(int(idx))
+                except (TypeError, ValueError):
+                    continue
+            remaining_payload[group] = cleaned
+        last_payload: Dict[str, Optional[int]] = {}
+        all_groups = set(self._group_all_indices.keys()) | set(self._group_last_student.keys())
+        for group in all_groups:
+            value = self._group_last_student.get(group)
+            if value is None:
+                last_payload[group] = None
+            else:
+                try:
+                    last_payload[group] = int(value)
+                except (TypeError, ValueError):
+                    last_payload[group] = None
+        try:
+            sec["group_remaining"] = json.dumps(remaining_payload, ensure_ascii=False)
+        except TypeError:
+            sec["group_remaining"] = json.dumps({}, ensure_ascii=False)
+        try:
+            sec["group_last"] = json.dumps(last_payload, ensure_ascii=False)
+        except TypeError:
+            sec["group_last"] = json.dumps({}, ensure_ascii=False)
+        try:
+            global_drawn_payload = sorted(int(idx) for idx in self._global_drawn_students)
+            sec["global_drawn"] = json.dumps(global_drawn_payload, ensure_ascii=False)
+        except TypeError:
+            sec["global_drawn"] = json.dumps([], ensure_ascii=False)
         settings["RollCallTimer"] = sec
         self.settings_manager.save_settings(settings)
 
@@ -1534,7 +2446,7 @@ def load_student_data(parent: Optional[QWidget]) -> Optional[pd.DataFrame]:
         try:
             df = pd.DataFrame({"学号": [101, 102, 103], "姓名": ["张三", "李四", "王五"], "分组": ["A", "B", "A"]})
             df.to_excel(file_path, index=False)
-            QMessageBox.information(parent, "提示", f"未找到学生名单，已为您创建模板文件：{file_path}")
+            show_quiet_information(parent, f"未找到学生名单，已为您创建模板文件：{file_path}")
         except Exception as exc:
             QMessageBox.critical(parent, "错误", f"创建模板文件失败：{exc}")
             return None
@@ -1551,6 +2463,113 @@ def load_student_data(parent: Optional[QWidget]) -> Optional[pd.DataFrame]:
 
 
 # ---------- 启动器 ----------
+class LauncherBubble(QWidget):
+    """启动器缩小时显示的悬浮圆球，负责发出恢复指令。"""
+
+    restore_requested = pyqtSignal()
+    position_changed = pyqtSignal(QPoint)
+
+    def __init__(self, diameter: int = 42) -> None:
+        super().__init__(
+            None,
+            Qt.WindowType.Tool
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint,
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setWindowTitle("ClassroomTools Bubble")
+        self._diameter = max(32, diameter)
+        self.setFixedSize(self._diameter, self._diameter)
+        self.setWindowOpacity(0.74)
+        self._dragging = False
+        self._drag_offset = QPoint()
+        self._moved = False
+
+    def place_near(self, target: QPoint, screen: Optional[QScreen]) -> None:
+        """将气泡吸附到距离 target 最近的屏幕边缘。"""
+
+        if screen is None:
+            screen = QApplication.screenAt(target) or QApplication.primaryScreen()
+        if screen is None:
+            return
+        available = screen.availableGeometry()
+        margin = 6
+        bubble_size = self.size()
+        center = QPoint(int(target.x()), int(target.y()))
+        center.setX(max(available.left(), min(center.x(), available.right())))
+        center.setY(max(available.top(), min(center.y(), available.bottom())))
+
+        distances = {
+            "left": abs(center.x() - available.left()),
+            "right": abs(available.right() - center.x()),
+            "top": abs(center.y() - available.top()),
+            "bottom": abs(available.bottom() - center.y()),
+        }
+        nearest_edge = min(distances, key=distances.get)
+        if nearest_edge == "left":
+            x = available.left() + margin
+            y = center.y() - bubble_size.height() // 2
+        elif nearest_edge == "right":
+            x = available.right() - bubble_size.width() - margin
+            y = center.y() - bubble_size.height() // 2
+        elif nearest_edge == "top":
+            y = available.top() + margin
+            x = center.x() - bubble_size.width() // 2
+        else:
+            y = available.bottom() - bubble_size.height() - margin
+            x = center.x() - bubble_size.width() // 2
+
+        x = max(available.left() + margin, min(x, available.right() - bubble_size.width() - margin))
+        y = max(available.top() + margin, min(y, available.bottom() - bubble_size.height() - margin))
+        self.move(int(x), int(y))
+        self.position_changed.emit(self.pos())
+
+    def snap_to_edge(self) -> None:
+        screen = self.screen() or QApplication.screenAt(self.frameGeometry().center()) or QApplication.primaryScreen()
+        if screen is None:
+            return
+        self.place_near(self.frameGeometry().center(), screen)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = self.rect()
+        color = QColor(32, 33, 36, 150)
+        highlight = QColor(138, 180, 248, 160)
+        painter.setBrush(QBrush(color))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(rect)
+        painter.setBrush(QBrush(highlight))
+        painter.drawEllipse(rect.adjusted(rect.width() // 3, rect.height() // 3, -rect.width() // 6, -rect.height() // 6))
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._dragging = True
+            self._drag_offset = event.position().toPoint()
+            self._moved = False
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._dragging and event.buttons() & Qt.MouseButton.LeftButton:
+            new_pos = event.globalPosition().toPoint() - self._drag_offset
+            self.move(new_pos)
+            self._moved = True
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            if not self._moved:
+                self.restore_requested.emit()
+            else:
+                self.snap_to_edge()
+                self.position_changed.emit(self.pos())
+            self._dragging = False
+        super().mouseReleaseEvent(event)
+
+
 class LauncherWindow(QWidget):
     def __init__(self, settings_manager: SettingsManager, student_data: Optional[pd.DataFrame]) -> None:
         super().__init__(None, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
@@ -1559,6 +2578,11 @@ class LauncherWindow(QWidget):
         self.overlay: Optional[OverlayWindow] = None
         self.roll_call_window: Optional[RollCallTimerWindow] = None
         self._dragging = False; self._drag_offset = QPoint()
+        self.bubble: Optional[LauncherBubble] = None
+        self._last_position = QPoint()
+        self._bubble_position = QPoint()
+        self._minimized = False
+        self._minimized_on_start = False
 
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet(
@@ -1602,23 +2626,65 @@ class LauncherWindow(QWidget):
         layout = QVBoxLayout(self); layout.setContentsMargins(0, 0, 0, 0); layout.addWidget(container)
         v = QVBoxLayout(container); v.setContentsMargins(8, 8, 8, 8); v.setSpacing(5)
 
-        row = QHBoxLayout(); row.setSpacing(3)
-        self.paint_button = QPushButton("画笔"); self.paint_button.clicked.connect(self.toggle_paint); row.addWidget(self.paint_button)
-        self.roll_call_button = QPushButton("点名/计时"); self.roll_call_button.clicked.connect(self.toggle_roll_call); row.addWidget(self.roll_call_button)
+        # 通过三段可伸缩空白保证“画笔”“点名/计时”两侧及中间留白一致
+        row = QGridLayout(); row.setContentsMargins(0, 0, 0, 0); row.setHorizontalSpacing(0)
+        for col in (0, 2, 4):
+            row.setColumnMinimumWidth(col, 12)
+            row.setColumnStretch(col, 1)
+        self.paint_button = QPushButton("画笔")
+        self.paint_button.clicked.connect(self.toggle_paint)
+        row.addItem(QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum), 0, 0)
+        row.addWidget(self.paint_button, 0, 1)
+        row.addItem(QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum), 0, 2)
+        self.roll_call_button = QPushButton("点名/计时")
+        self.roll_call_button.clicked.connect(self.toggle_roll_call)
+        row.addWidget(self.roll_call_button, 0, 3)
+        row.addItem(QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum), 0, 4)
+        unified_width = self._action_button_width()
+        self.paint_button.setFixedWidth(unified_width)
+        self.roll_call_button.setFixedWidth(unified_width)
         v.addLayout(row)
 
         bottom = QHBoxLayout(); bottom.setSpacing(3)
-        self.autostart_check = QCheckBox("开机启动"); self.autostart_check.stateChanged.connect(self.toggle_autostart); bottom.addWidget(self.autostart_check)
+        self.minimize_button = QPushButton("缩小"); self.minimize_button.clicked.connect(self.minimize_launcher)
+        bottom.addWidget(self.minimize_button)
 
-        right = QHBoxLayout(); right.setSpacing(3)
-        self.about_button = QPushButton("关于"); self.about_button.setFixedWidth(42); self.about_button.clicked.connect(self.show_about); right.addWidget(self.about_button)
-        self.exit_button = QPushButton("退出"); self.exit_button.setFixedWidth(42)
+        self.autostart_check = QCheckBox("开机启动"); self.autostart_check.stateChanged.connect(self.toggle_autostart); bottom.addWidget(self.autostart_check)
+        bottom.addStretch(1)
+
+        self.about_button = QPushButton("关于"); self.about_button.clicked.connect(self.show_about); bottom.addWidget(self.about_button)
+        self.exit_button = QPushButton("退出")
         self.exit_button.clicked.connect(QApplication.instance().quit)
-        right.addWidget(self.exit_button)
-        bottom.addLayout(right); v.addLayout(bottom)
+        bottom.addWidget(self.exit_button)
+        v.addLayout(bottom)
+
+        aux_width = max(self.minimize_button.sizeHint().width(), 52)
+        self.minimize_button.setFixedWidth(aux_width)
+        about_width = max(self.about_button.sizeHint().width(), 52)
+        exit_width = max(self.exit_button.sizeHint().width(), 52)
+        self.about_button.setFixedWidth(about_width)
+        self.exit_button.setFixedWidth(exit_width)
+
+        button_height = max(
+            self.paint_button.sizeHint().height(),
+            self.roll_call_button.sizeHint().height(),
+            self.minimize_button.sizeHint().height(),
+            self.about_button.sizeHint().height(),
+            self.exit_button.sizeHint().height(),
+        )
+        for btn in (self.paint_button, self.roll_call_button, self.minimize_button, self.about_button, self.exit_button):
+            btn.setFixedHeight(button_height)
 
         s = self.settings_manager.load_settings().get("Launcher", {})
-        self.move(int(s.get("x", "120")), int(s.get("y", "120")))
+        x = int(s.get("x", "120")); y = int(s.get("y", "120"))
+        self.move(x, y)
+        self._last_position = QPoint(x, y)
+        bubble_x = int(s.get("bubble_x", str(x)))
+        bubble_y = int(s.get("bubble_y", str(y)))
+        self._bubble_position = QPoint(bubble_x, bubble_y)
+        minimized = str_to_bool(s.get("minimized", "False"), False)
+        self._minimized = minimized
+        self._minimized_on_start = minimized
 
         startup = self.settings_manager.load_settings().get("Startup", {})
         autostart_enabled = str_to_bool(startup.get("autostart_enabled", "False"), False)
@@ -1628,12 +2694,34 @@ class LauncherWindow(QWidget):
         if not PANDAS_AVAILABLE or not OPENPYXL_AVAILABLE or self.student_data is None:
             self.roll_call_button.setEnabled(False)
 
-        for w in (self, container, self.paint_button, self.roll_call_button, self.autostart_check):
+        for w in (self, container, self.paint_button, self.roll_call_button, self.minimize_button, self.autostart_check):
             w.installEventFilter(self)
 
         # 锁定启动器的推荐尺寸，避免误拖拽造成遮挡
         self.adjustSize()
         self.setFixedSize(self.sizeHint())
+        self._base_minimum_width = self.minimumWidth()
+        self._base_minimum_height = self.minimumHeight()
+
+    def _action_button_width(self) -> int:
+        """计算“画笔”与“点名/计时”按钮的统一宽度，保证观感一致。"""
+
+        paint_metrics = QFontMetrics(self.paint_button.font())
+        roll_metrics = QFontMetrics(self.roll_call_button.font())
+        paint_texts = ["画笔", "隐藏画笔"]
+        roll_texts = ["点名/计时", "显示点名", "隐藏点名"]
+        max_width = max(
+            max(paint_metrics.horizontalAdvance(text) for text in paint_texts),
+            max(roll_metrics.horizontalAdvance(text) for text in roll_texts),
+        )
+        return max_width + 28
+
+    def showEvent(self, e) -> None:
+        super().showEvent(e)
+        ensure_widget_within_screen(self)
+        self._last_position = self.pos()
+        if self._minimized_on_start:
+            QTimer.singleShot(0, self._restore_minimized_state)
 
     def eventFilter(self, obj, e) -> bool:
         if e.type() == QEvent.Type.MouseButtonPress and e.button() == Qt.MouseButton.LeftButton:
@@ -1641,16 +2729,27 @@ class LauncherWindow(QWidget):
         elif e.type() == QEvent.Type.MouseMove and self._dragging and e.buttons() & Qt.MouseButton.LeftButton:
             self.move(e.globalPosition().toPoint() - self._drag_offset)
         elif e.type() == QEvent.Type.MouseButtonRelease and e.button() == Qt.MouseButton.LeftButton:
-            self._dragging = False; self.save_position()
+            self._dragging = False
+            self._last_position = self.pos()
+            self.save_position()
         return super().eventFilter(obj, e)
 
     def save_position(self) -> None:
         settings = self.settings_manager.load_settings()
-        launcher = settings.get("Launcher", {}); launcher["x"] = str(self.x()); launcher["y"] = str(self.y()); settings["Launcher"] = launcher
+        pos = self._last_position if (self._minimized and not self._last_position.isNull()) else self.pos()
+        launcher = settings.get("Launcher", {})
+        launcher["x"] = str(pos.x())
+        launcher["y"] = str(pos.y())
+        bubble_pos = self._bubble_position if not self._bubble_position.isNull() else pos
+        launcher["bubble_x"] = str(bubble_pos.x())
+        launcher["bubble_y"] = str(bubble_pos.y())
+        launcher["minimized"] = bool_to_str(self._minimized)
+        settings["Launcher"] = launcher
         startup = settings.get("Startup", {}); startup["autostart_enabled"] = bool_to_str(self.autostart_check.isChecked()); settings["Startup"] = startup
         self.settings_manager.save_settings(settings)
 
     def toggle_paint(self) -> None:
+        """打开或隐藏屏幕画笔覆盖层。"""
         if self.overlay is None: self.overlay = OverlayWindow(self.settings_manager)
         if self.overlay.isVisible():
             self.overlay.hide_overlay(); self.paint_button.setText("画笔")
@@ -1658,6 +2757,7 @@ class LauncherWindow(QWidget):
             self.overlay.show_overlay(); self.paint_button.setText("隐藏画笔")
 
     def toggle_roll_call(self) -> None:
+        """切换点名/计时窗口的显示状态，必要时先创建窗口。"""
         if self.student_data is None:
             QMessageBox.warning(self, "提示", "学生数据加载失败，无法打开点名器。"); return
         if self.roll_call_window is None:
@@ -1685,6 +2785,91 @@ class LauncherWindow(QWidget):
         if not WINREG_AVAILABLE: return
         enabled = self.autostart_check.isChecked()
         self.set_autostart(enabled); self.save_position()
+
+    def minimize_launcher(self, from_settings: bool = False) -> None:
+        """将启动器收纳为悬浮圆球。"""
+
+        if self._minimized and not from_settings:
+            return
+        if self.bubble is None:
+            self.bubble = LauncherBubble()
+            self.bubble.restore_requested.connect(self.restore_from_bubble)
+            self.bubble.position_changed.connect(self._on_bubble_position_changed)
+        target_center = self.frameGeometry().center()
+        screen = self.screen() or QApplication.screenAt(target_center) or QApplication.primaryScreen()
+        if not from_settings:
+            self._last_position = self.pos()
+        self.hide()
+        if from_settings and not self._bubble_position.isNull():
+            self.bubble.place_near(self._bubble_position, screen)
+        else:
+            self.bubble.place_near(target_center, screen)
+        self.bubble.setWindowOpacity(0.74)
+        self.bubble.show()
+        self.bubble.raise_()
+        self._minimized = True
+        self.save_position()
+
+    def _restore_minimized_state(self) -> None:
+        if not self._minimized_on_start:
+            return
+        self._minimized_on_start = False
+        self.minimize_launcher(from_settings=True)
+
+    def restore_from_bubble(self) -> None:
+        """从悬浮球恢复主启动器窗口。"""
+
+        self._minimized = False
+        target_pos: Optional[QPoint] = None
+        screen = None
+        if self.bubble:
+            self._bubble_position = self.bubble.pos()
+            bubble_geom = self.bubble.frameGeometry()
+            bubble_center = bubble_geom.center()
+            screen = self.bubble.screen() or QApplication.screenAt(bubble_center) or QApplication.primaryScreen()
+            margin = 12
+            width = self.width() or self.sizeHint().width()
+            height = self.height() or self.sizeHint().height()
+            if screen is not None:
+                available = screen.availableGeometry()
+                distances = {
+                    "left": abs(bubble_center.x() - available.left()),
+                    "right": abs(available.right() - bubble_center.x()),
+                    "top": abs(bubble_center.y() - available.top()),
+                    "bottom": abs(available.bottom() - bubble_center.y()),
+                }
+                nearest_edge = min(distances, key=distances.get)
+                if nearest_edge == "left":
+                    x = bubble_geom.right() + margin
+                    y = bubble_center.y() - height // 2
+                elif nearest_edge == "right":
+                    x = bubble_geom.left() - width - margin
+                    y = bubble_center.y() - height // 2
+                elif nearest_edge == "top":
+                    y = bubble_geom.bottom() + margin
+                    x = bubble_center.x() - width // 2
+                else:
+                    y = bubble_geom.top() - height - margin
+                    x = bubble_center.x() - width // 2
+                x = max(available.left(), min(int(x), available.right() - width))
+                y = max(available.top(), min(int(y), available.bottom() - height))
+                target_pos = QPoint(x, y)
+            self.bubble.hide()
+        if target_pos is None and not self._last_position.isNull():
+            target_pos = QPoint(self._last_position)
+        if target_pos is not None:
+            self.move(target_pos)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        ensure_widget_within_screen(self)
+        self._last_position = self.pos()
+        self.save_position()
+
+    def _on_bubble_position_changed(self, pos: QPoint) -> None:
+        self._bubble_position = QPoint(pos.x(), pos.y())
+        if self._minimized:
+            self.save_position()
 
     def set_autostart(self, enabled: bool) -> None:
         if not WINREG_AVAILABLE: return
@@ -1717,6 +2902,8 @@ class LauncherWindow(QWidget):
 
     def closeEvent(self, e) -> None:
         self.save_position()
+        if self.bubble is not None:
+            self.bubble.close()
         if self.roll_call_window is not None: self.roll_call_window.close()
         if self.overlay is not None: self.overlay.close()
         super().closeEvent(e)
@@ -1724,6 +2911,7 @@ class LauncherWindow(QWidget):
 
 # ---------- 入口 ----------
 def main() -> None:
+    """应用程序入口：初始化 DPI、加载设置并启动启动器窗口。"""
     ensure_high_dpi_awareness()
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)

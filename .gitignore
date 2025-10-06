@@ -6,6 +6,7 @@
 !students.xlsx
 !settings.ini
 !icon.ico
+!PACKAGING.md
 
 # 不要忽略 .gitignore 文件本身
 !.gitignore
