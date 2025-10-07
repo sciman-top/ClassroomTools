@@ -5222,6 +5222,14 @@ class RollCallTimerWindow(QWidget):
         sec["timer_font_size"] = str(self.last_timer_font_size)
         sec["scoreboard_order"] = self.scoreboard_order
         sec["students_encrypted"] = bool_to_str(self._student_file_encrypted)
+        if self._student_data_pending_load:
+            # 在尚未加载真实名单数据时，保留磁盘上已有的未点名状态，避免误把占位空列表写回
+            # 此时直接返回，保持上一轮保存的名单信息不被覆盖。
+            settings["RollCallTimer"] = sec
+            self.settings_manager.save_settings(settings)
+            return
+
+        # 名单已经加载完成，正常序列化各分组的剩余名单及历史记录
         remaining_payload: Dict[str, List[int]] = {}
         for group, indices in self._group_remaining_indices.items():
             cleaned: List[int] = []
