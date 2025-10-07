@@ -63,7 +63,6 @@ from PyQt6.QtWidgets import (
     QFrame,
     QGridLayout,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QLineEdit,
     QMenu,
@@ -540,12 +539,75 @@ class QuietQuestionDialog(QDialog):
         ok.clicked.connect(self.accept)
         buttons.addWidget(ok)
 
+        target_width = max(cancel.sizeHint().width(), ok.sizeHint().width())
+        cancel.setFixedWidth(target_width)
+        ok.setFixedWidth(target_width)
+
         layout.addLayout(buttons)
         self._ok_button = ok
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
         self._ok_button.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
+
+
+class PasswordPromptDialog(QDialog):
+    """统一样式的密码输入窗口，确保按钮始终可见且尺寸一致。"""
+
+    def __init__(self, parent: Optional[QWidget], title: str, prompt: str) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 18, 24, 18)
+        layout.setSpacing(12)
+
+        label = QLabel(prompt, self)
+        label.setWordWrap(True)
+        label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(label)
+
+        self.line_edit = QLineEdit(self)
+        self.line_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.line_edit.setMinimumWidth(220)
+        layout.addWidget(self.line_edit)
+
+        button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            Qt.Orientation.Horizontal,
+            self,
+        )
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        style_dialog_buttons(
+            button_box,
+            {
+                QDialogButtonBox.StandardButton.Ok: ButtonStyles.PRIMARY,
+                QDialogButtonBox.StandardButton.Cancel: ButtonStyles.TOOLBAR,
+            },
+            extra_padding=12,
+            minimum_height=34,
+            uniform_width=True,
+        )
+        layout.addWidget(button_box)
+
+        self.line_edit.returnPressed.connect(self.accept)
+
+    @classmethod
+    def get_password(
+        cls, parent: Optional[QWidget], title: str, prompt: str
+    ) -> tuple[str, bool]:
+        dialog = cls(parent, title, prompt)
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        value = dialog.line_edit.text() if accepted else ""
+        return value, accepted
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        self.line_edit.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
 
 
 def ask_quiet_confirmation(parent: Optional[QWidget], text: str, title: str = "确认") -> bool:
@@ -669,9 +731,11 @@ def style_dialog_buttons(
     *,
     extra_padding: int = 10,
     minimum_height: int = 34,
+    uniform_width: bool = False,
 ) -> None:
     """Apply shared styling to all buttons contained in a QDialogButtonBox."""
 
+    styled_buttons: list[QPushButton] = []
     for standard_button, style in styles.items():
         button = button_box.button(standard_button)
         if button is None:
@@ -680,6 +744,11 @@ def style_dialog_buttons(
             button.font(), extra=extra_padding, minimum=minimum_height
         )
         apply_button_style(button, style, height=control_height)
+        styled_buttons.append(button)
+    if uniform_width and styled_buttons:
+        target_width = max(button.sizeHint().width() for button in styled_buttons)
+        for button in styled_buttons:
+            button.setFixedWidth(target_width)
 
 
 # ---------- 配置 ----------
@@ -3267,9 +3336,18 @@ class RollCallTimerWindow(QWidget):
         self.group_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         group_row.addWidget(self.group_label, 0, Qt.AlignmentFlag.AlignLeft)
 
-        self.group_bar = QWidget()
+        group_container = QWidget()
+        group_container.setFixedHeight(toolbar_height)
+        group_container.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        group_container_layout = QHBoxLayout(group_container)
+        group_container_layout.setContentsMargins(0, 0, 0, 0)
+        group_container_layout.setSpacing(0)
+
+        self.group_container = group_container
+
+        self.group_bar = QWidget(group_container)
         self.group_bar.setFixedHeight(toolbar_height)
-        self.group_bar.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        self.group_bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.group_bar_layout = QHBoxLayout(self.group_bar)
         self.group_bar_layout.setContentsMargins(0, 0, 0, 0)
         self.group_bar_layout.setSpacing(1)
@@ -3277,12 +3355,14 @@ class RollCallTimerWindow(QWidget):
         self.group_button_group.setExclusive(True)
         self.group_buttons: Dict[str, QPushButton] = {}
         self._rebuild_group_buttons_ui()
-        group_row.addWidget(self.group_bar, 1, Qt.AlignmentFlag.AlignLeft)
+        group_container_layout.addWidget(self.group_bar, 1, Qt.AlignmentFlag.AlignLeft)
 
         self.add_score_button = QPushButton("加分"); _setup_secondary_button(self.add_score_button)
         self.add_score_button.setEnabled(False)
         self.add_score_button.clicked.connect(self.increment_current_score)
-        group_row.addWidget(self.add_score_button, 0, Qt.AlignmentFlag.AlignLeft)
+        group_container_layout.addWidget(self.add_score_button, 0, Qt.AlignmentFlag.AlignLeft)
+
+        group_row.addWidget(group_container, 1, Qt.AlignmentFlag.AlignLeft)
         group_row.addStretch(1)
         toolbar_layout.addLayout(group_row)
         layout.addLayout(toolbar_layout)
@@ -3358,11 +3438,10 @@ class RollCallTimerWindow(QWidget):
     def _prompt_new_encryption_password(self) -> Optional[str]:
         attempts = 0
         while attempts < 3:
-            password, ok = QInputDialog.getText(
+            password, ok = PasswordPromptDialog.get_password(
                 self,
                 "设置加密密码",
                 "请输入新的加密密码：",
-                QLineEdit.EchoMode.Password,
             )
             if not ok:
                 return None
@@ -3371,11 +3450,10 @@ class RollCallTimerWindow(QWidget):
                 show_quiet_information(self, "密码不能为空，请重新输入。")
                 attempts += 1
                 continue
-            confirm, ok = QInputDialog.getText(
+            confirm, ok = PasswordPromptDialog.get_password(
                 self,
                 "确认加密密码",
                 "请再次输入密码以确认：",
-                QLineEdit.EchoMode.Password,
             )
             if not ok:
                 return None
@@ -3391,11 +3469,10 @@ class RollCallTimerWindow(QWidget):
     def _prompt_existing_encryption_password(self, title: str) -> Optional[str]:
         attempts = 0
         while attempts < 3:
-            password, ok = QInputDialog.getText(
+            password, ok = PasswordPromptDialog.get_password(
                 self,
                 title,
                 "请输入当前的加密密码：",
-                QLineEdit.EchoMode.Password,
             )
             if not ok:
                 return None
@@ -3934,8 +4011,12 @@ class RollCallTimerWindow(QWidget):
         self.title_label.setText("点名" if is_roll else "计时")
         self.mode_button.setText("切换到计时" if is_roll else "切换到点名")
         self.group_label.setVisible(is_roll)
+        if hasattr(self, "group_container"):
+            self.group_container.setVisible(is_roll)
         if hasattr(self, "group_bar"):
             self.group_bar.setVisible(is_roll)
+        if hasattr(self, "add_score_button"):
+            self.add_score_button.setVisible(is_roll)
         self._update_roll_call_controls()
         if is_roll:
             if self._placeholder_on_show:
@@ -5044,11 +5125,10 @@ def load_student_data(parent: Optional[QWidget]) -> Optional[pd.DataFrame]:
     if not os.path.exists(file_path) and os.path.exists(encrypted_path):
         attempts = 0
         while attempts < 3:
-            password, ok = QInputDialog.getText(
+            password, ok = PasswordPromptDialog.get_password(
                 parent,
                 "解密学生数据",
                 "检测到已加密的学生名单，请输入密码：",
-                QLineEdit.EchoMode.Password,
             )
             if not ok:
                 QMessageBox.information(parent, "提示", "已取消加载加密的学生名单。")
@@ -5332,7 +5412,7 @@ class LauncherWindow(QWidget):
         self.autostart_check.setChecked(autostart_enabled and WINREG_AVAILABLE)
         self.autostart_check.setEnabled(WINREG_AVAILABLE)
 
-        if not PANDAS_AVAILABLE or not OPENPYXL_AVAILABLE or self.student_data is None:
+        if not (PANDAS_AVAILABLE and OPENPYXL_AVAILABLE):
             self.roll_call_button.setEnabled(False)
 
         for w in (self, container, self.paint_button, self.roll_call_button, self.minimize_button, self.autostart_check):
@@ -5604,7 +5684,9 @@ def main() -> None:
     QToolTip.setFont(QFont("Microsoft YaHei UI", 9))
 
     settings_manager = SettingsManager()
-    student_data = load_student_data(None) if PANDAS_AVAILABLE else None
+    student_data = load_student_data(None) if PANDAS_AVAILABLE and not os.path.exists(
+        RollCallTimerWindow.ENCRYPTED_STUDENT_FILE
+    ) else None
 
     window = LauncherWindow(settings_manager, student_data)
     app.aboutToQuit.connect(window.handle_about_to_quit)
