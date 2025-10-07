@@ -2197,6 +2197,78 @@ class ScoreboardDialog(QDialog):
             score_candidates,
             key=lambda text: metrics.tightBoundingRect(text).width(),
         )
+        name_label.setFont(QFont(calligraphy_font, font_size, QFont.Weight.Bold))
+        name_label.setStyleSheet("margin: 0px; padding: 0px;")
+        layout.addWidget(name_label)
+
+        score_label = QLabel(score_text)
+        score_label.setProperty("class", "scoreboardScore")
+        score_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        score_label.setFont(QFont(calligraphy_font, font_size, QFont.Weight.Bold))
+        score_label.setStyleSheet(f"margin-top: {max(6, inner_spacing // 2)}px;")
+        layout.addWidget(score_label)
+
+        layout.addStretch(1)
+        return wrapper
+
+    def _format_display_text(self, index: int, sid: str, name: str) -> str:
+        return self._format_display_text_for_order(self._order, index, sid, name)
+
+    def _format_display_text_for_order(
+        self, order: str, index: int, sid: str, name: str
+    ) -> str:
+        clean_name = (name or "").strip() or "未命名"
+        if order == self.ORDER_ID:
+            sid_display = str(sid).strip() or "—"
+            return f"{sid_display}.{clean_name}"
+        return f"{index + 1}.{clean_name}"
+
+    @staticmethod
+    def _format_score_text(score: int | float | str) -> str:
+        text = "—"
+        try:
+            value = float(score)
+        except (TypeError, ValueError):
+            score_str = str(score).strip()
+            if score_str and score_str.lower() != "none":
+                text = score_str
+        else:
+            if math.isfinite(value):
+                if abs(value - int(value)) < 1e-6:
+                    text = str(int(round(value)))
+                else:
+                    text = f"{value:.2f}".rstrip("0").rstrip(".")
+        return f"{text} 分"
+
+    @staticmethod
+    def _fit_font_size(
+        text: str,
+        family: str,
+        weight: QFont.Weight,
+        max_width: int,
+        max_height: int,
+        minimum: int,
+        maximum: int,
+    ) -> int:
+        if not text:
+            return max(6, min(minimum, maximum))
+        if max_width <= 0 or max_height <= 0:
+            return max(6, min(minimum, maximum))
+        lower = max(6, min(minimum, maximum))
+        upper = max(6, max(minimum, maximum))
+        for size in range(upper, lower - 1, -1):
+            font = QFont(family, size, weight)
+            metrics = QFontMetrics(font)
+            rect = metrics.tightBoundingRect(text)
+            if rect.width() <= max_width and rect.height() <= max_height:
+                return size
+        return lower
+
+    def _populate_grid(self) -> None:
+        self._clear_grid()
+        count = len(self.students)
+        layout = self.grid_layout
+        calligraphy_font = self._calligraphy_font
 
         usable_name_width = max(60, card_width - 2 * padding_h)
         content_height = max(80, card_height - 2 * padding_v - inner_spacing)
