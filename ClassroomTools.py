@@ -21,15 +21,17 @@ import time
 import traceback
 import hashlib
 import hmac
+from collections import deque
 from queue import Empty, Queue
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Mapping
+from typing import Callable, Dict, List, Optional, Mapping, Union
 
 from PyQt6.QtCore import (
     QByteArray,
     QPoint,
     QPointF,
     QRect,
+    QRectF,
     QSize,
     Qt,
     QTimer,
@@ -63,7 +65,6 @@ from PyQt6.QtWidgets import (
     QFrame,
     QGridLayout,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QLineEdit,
     QMenu,
@@ -214,6 +215,10 @@ def _set_session_student_encryption(encrypted: bool, password: Optional[str]) ->
 
 def _get_session_student_encryption() -> tuple[bool, Optional[str]]:
     return _SESSION_STUDENT_FILE_ENCRYPTED, _SESSION_STUDENT_PASSWORD
+
+
+# ---------- 缓存 ----------
+_SPEECH_ENV_CACHE: tuple[float, str, List[str]] = (0.0, "", [])
 
 
 # ---------- DPI ----------
@@ -392,7 +397,16 @@ def _count_windows_voice_tokens() -> tuple[int, Optional[str]]:
     return len(token_names), None
 
 
-def detect_speech_environment_issues() -> tuple[str, List[str]]:
+def detect_speech_environment_issues(
+    force_refresh: bool = False,
+    cache_seconds: float = 30.0,
+) -> tuple[str, List[str]]:
+    global _SPEECH_ENV_CACHE
+    now = time.time()
+    cached_at, cached_reason, cached_suggestions = _SPEECH_ENV_CACHE
+    if not force_refresh and cached_at and now - cached_at < cache_seconds:
+        return cached_reason, list(cached_suggestions)
+
     issues: List[str] = []
     suggestions: List[str] = []
     if sys.platform == "win32":
@@ -407,7 +421,8 @@ def detect_speech_environment_issues() -> tuple[str, List[str]]:
                 base_name = module_name.split(".")[0]
                 if base_name not in missing:
                     missing.append(base_name)
-                suggestions.append(hint)
+                if hint not in suggestions:
+                    suggestions.append(hint)
         if missing:
             issues.append(f"缺少语音依赖：{'、'.join(sorted(missing))}")
         token_count, token_error = _count_windows_voice_tokens()
@@ -421,11 +436,17 @@ def detect_speech_environment_issues() -> tuple[str, List[str]]:
             issues.append("未检测到 PowerShell，可用的语音播报方式受限")
             suggestions.append("请确认系统已安装 PowerShell 5+ 或 PowerShell 7，并在环境变量中可用。")
         if getattr(sys, "frozen", False):
-            suggestions.append("若为打包版本，请在打包配置中包含 pyttsx3、comtypes、pywin32 等语音依赖或在目标电脑上单独安装它们。")
+            suggestions.append(
+                "若为打包版本，请在打包配置中包含 pyttsx3、comtypes、pywin32 等语音依赖或在目标电脑上单独安装它们。"
+            )
         suggestions.append("如已安装语音组件，请尝试以管理员权限首次运行程序以初始化语音服务。")
     else:
         suggestions.append("请确保系统已配置可用的语音引擎后重新启动程序。")
-    return "；".join(issues), dedupe_strings(suggestions)
+
+    reason = "；".join(issues)
+    deduped = dedupe_strings(suggestions)
+    _SPEECH_ENV_CACHE = (now, reason, list(deduped))
+    return reason, list(deduped)
 
 
 class QuietInfoPopup(QWidget):
@@ -462,7 +483,7 @@ class QuietInfoPopup(QWidget):
         apply_button_style(
             self.ok_button,
             ButtonStyles.PRIMARY,
-            height=recommended_control_height(self.ok_button.font(), extra=12, minimum=34),
+            height=recommended_control_height(self.ok_button.font(), extra=14, minimum=36),
         )
         self.ok_button.clicked.connect(self.close)
         button_row.addWidget(self.ok_button)
@@ -529,7 +550,7 @@ class QuietQuestionDialog(QDialog):
         buttons.addStretch(1)
 
         cancel = QPushButton("取消", self)
-        control_height = recommended_control_height(cancel.font(), extra=12, minimum=34)
+        control_height = recommended_control_height(cancel.font(), extra=14, minimum=36)
         apply_button_style(cancel, ButtonStyles.TOOLBAR, height=control_height)
         cancel.clicked.connect(self.reject)
         buttons.addWidget(cancel)
@@ -540,12 +561,84 @@ class QuietQuestionDialog(QDialog):
         ok.clicked.connect(self.accept)
         buttons.addWidget(ok)
 
+        target_width = max(cancel.sizeHint().width(), ok.sizeHint().width())
+        cancel.setFixedWidth(target_width)
+        ok.setFixedWidth(target_width)
+
         layout.addLayout(buttons)
         self._ok_button = ok
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
         self._ok_button.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
+
+
+class PasswordPromptDialog(QDialog):
+    """统一样式的密码输入窗口，确保按钮始终可见且尺寸一致。"""
+
+    def __init__(self, parent: Optional[QWidget], title: str, prompt: str) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        self._captured_text: str = ""
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 18, 24, 18)
+        layout.setSpacing(12)
+
+        label = QLabel(prompt, self)
+        label.setWordWrap(True)
+        label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(label)
+
+        self.line_edit = QLineEdit(self)
+        self.line_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.line_edit.setMinimumWidth(220)
+        layout.addWidget(self.line_edit)
+
+        button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            Qt.Orientation.Horizontal,
+            self,
+        )
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        style_dialog_buttons(
+            button_box,
+            {
+                QDialogButtonBox.StandardButton.Ok: ButtonStyles.PRIMARY,
+                QDialogButtonBox.StandardButton.Cancel: ButtonStyles.TOOLBAR,
+            },
+            extra_padding=12,
+            minimum_height=34,
+            uniform_width=True,
+        )
+        layout.addWidget(button_box)
+
+        self.line_edit.returnPressed.connect(self.accept)
+
+    @classmethod
+    def get_password(
+        cls, parent: Optional[QWidget], title: str, prompt: str
+    ) -> tuple[str, bool]:
+        dialog = cls(parent, title, prompt)
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        value = dialog._captured_text if accepted else ""
+        return value, accepted
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        self.line_edit.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
+
+    def accept(self) -> None:  # type: ignore[override]
+        self._captured_text = self.line_edit.text()
+        super().accept()
+
+    def reject(self) -> None:  # type: ignore[override]
+        self._captured_text = ""
+        super().reject()
 
 
 def ask_quiet_confirmation(parent: Optional[QWidget], text: str, title: str = "确认") -> bool:
@@ -557,7 +650,10 @@ def recommended_control_height(font: QFont, *, extra: int = 12, minimum: int = 3
     """Return a DPI-aware button height based on the supplied font metrics."""
 
     metrics = QFontMetrics(font)
-    return max(minimum, metrics.height() + extra)
+    text_height = metrics.boundingRect("Ag").height()
+    line_height = metrics.height()
+    base_height = max(text_height, line_height)
+    return max(minimum, int(math.ceil(base_height + extra)))
 
 
 class ButtonStyles:
@@ -565,7 +661,7 @@ class ButtonStyles:
 
     TOOLBAR = (
         "QPushButton {\n"
-        "    padding: 4px 14px;\n"
+        "    padding: 4px 12px;\n"
         "    border-radius: 12px;\n"
         "    border: 1px solid #c4c8d0;\n"
         "    background-color: #ffffff;\n"
@@ -592,7 +688,7 @@ class ButtonStyles:
 
     GRID = (
         "QPushButton {\n"
-        "    padding: 6px 14px;\n"
+        "    padding: 6px 12px;\n"
         "    border-radius: 10px;\n"
         "    border: 1px solid #c4c8d0;\n"
         "    background-color: #ffffff;\n"
@@ -609,7 +705,7 @@ class ButtonStyles:
 
     PRIMARY = (
         "QPushButton {\n"
-        "    padding: 6px 22px;\n"
+        "    padding: 6px 20px;\n"
         "    border-radius: 20px;\n"
         "    background-color: #1a73e8;\n"
         "    color: #ffffff;\n"
@@ -656,7 +752,34 @@ def apply_button_style(button: QPushButton, style: str, *, height: Optional[int]
     if height is not None:
         button.setMinimumHeight(height)
         button.setMaximumHeight(height)
+        button.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
     button.setStyleSheet(style)
+
+
+def style_dialog_buttons(
+    button_box: QDialogButtonBox,
+    styles: Mapping[QDialogButtonBox.StandardButton, str],
+    *,
+    extra_padding: int = 10,
+    minimum_height: int = 34,
+    uniform_width: bool = False,
+) -> None:
+    """Apply shared styling to all buttons contained in a QDialogButtonBox."""
+
+    styled_buttons: list[QPushButton] = []
+    for standard_button, style in styles.items():
+        button = button_box.button(standard_button)
+        if button is None:
+            continue
+        control_height = recommended_control_height(
+            button.font(), extra=extra_padding, minimum=minimum_height
+        )
+        apply_button_style(button, style, height=control_height)
+        styled_buttons.append(button)
+    if uniform_width and styled_buttons:
+        target_width = max(button.sizeHint().width() for button in styled_buttons)
+        for button in styled_buttons:
+            button.setFixedWidth(target_width)
 
 
 # ---------- 配置 ----------
@@ -920,17 +1043,15 @@ class PenSettingsDialog(QDialog):
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
-        for standard, style in (
-            (QDialogButtonBox.StandardButton.Ok, ButtonStyles.PRIMARY),
-            (QDialogButtonBox.StandardButton.Cancel, ButtonStyles.TOOLBAR),
-        ):
-            button = buttons.button(standard)
-            if button is not None:
-                apply_button_style(
-                    button,
-                    style,
-                    height=recommended_control_height(button.font(), extra=10, minimum=32),
-                )
+        style_dialog_buttons(
+            buttons,
+            {
+                QDialogButtonBox.StandardButton.Ok: ButtonStyles.PRIMARY,
+                QDialogButtonBox.StandardButton.Cancel: ButtonStyles.TOOLBAR,
+            },
+            extra_padding=10,
+            minimum_height=32,
+        )
         layout.addWidget(buttons)
 
         self.setFixedSize(self.sizeHint())
@@ -1346,13 +1467,18 @@ class OverlayWindow(QWidget):
         self._last_shape_type: Optional[str] = None
         self._restoring_tool = False
         self._eraser_last_point: Optional[QPoint] = None
-        self._stroke_points: List[QPointF] = []
-        self._stroke_timestamps: List[float] = []
+        self._stroke_points: deque[QPointF] = deque(maxlen=6)
+        self._stroke_timestamps: deque[float] = deque(maxlen=6)
         self._stroke_speed: float = 0.0
         self._stroke_last_midpoint: Optional[QPointF] = None
+        self._last_preview_bounds: Optional[QRect] = None
         self.whiteboard_active = False
         self.whiteboard_color = QColor(0, 0, 0, 0); self.last_board_color = QColor("#ffffff")
         self.cursor_pixmap = QPixmap()
+        self._eraser_stroker = QPainterPathStroker()
+        self._eraser_stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
+        self._eraser_stroker.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        self._eraser_stroker_width = 0.0
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)
 
@@ -1421,6 +1547,7 @@ class OverlayWindow(QWidget):
             self.current_shape = shape_type
         if mode != "shape":
             self.shape_start_point = None
+            self._last_preview_bounds = None
         if self.mode != "eraser":
             self._eraser_last_point = None
         if self.mode in {"brush", "shape"} and not self._restoring_tool:
@@ -1491,6 +1618,40 @@ class OverlayWindow(QWidget):
         p.drawEllipse(1, 1, d - 2, d - 2); p.end()
         self.setCursor(QCursor(self.cursor_pixmap, d // 2, d // 2))
 
+    def _apply_dirty_region(self, region: Optional[Union[QRect, QRectF]]) -> None:
+        if not region:
+            return
+        if isinstance(region, QRectF):
+            rect = region.toAlignedRect()
+        else:
+            rect = QRect(region)
+        if rect.isNull() or rect.width() <= 0 or rect.height() <= 0:
+            return
+        inflated = rect.adjusted(-4, -4, 4, 4)
+        target = inflated.intersected(self.rect())
+        if target.isValid() and not target.isNull():
+            self.update(target)
+        else:
+            self.update()
+
+    def _shape_dirty_bounds(
+        self,
+        start_point: Optional[QPoint],
+        end_point: Optional[Union[QPoint, QPointF]],
+        pen_width: int,
+    ) -> Optional[QRect]:
+        if start_point is None or end_point is None:
+            return None
+        if isinstance(end_point, QPointF):
+            end = end_point.toPoint()
+        else:
+            end = end_point
+        rect = QRect(start_point, end).normalized()
+        if rect.isNull():
+            rect = QRect(end, end)
+        margin = max(4, int(max(1, pen_width) * 2))
+        return rect.adjusted(-margin, -margin, margin, margin)
+
     # ---- 系统级穿透 ----
     def _apply_input_passthrough(self, enabled: bool) -> None:
         # 开启后可让鼠标穿透画布，方便回到课件操作
@@ -1529,6 +1690,7 @@ class OverlayWindow(QWidget):
         self._push_history()
         self.canvas.fill(Qt.GlobalColor.transparent)
         self.temp_canvas.fill(Qt.GlobalColor.transparent)
+        self._last_preview_bounds = None
         self.update()
         self._eraser_last_point = None
         if restore_needed:
@@ -1558,6 +1720,7 @@ class OverlayWindow(QWidget):
             return
         self.temp_canvas.fill(Qt.GlobalColor.transparent)
         self.drawing = False
+        self._last_preview_bounds = None
         self.update()
         self.raise_toolbar()
         self._update_undo_button()
@@ -1586,12 +1749,16 @@ class OverlayWindow(QWidget):
             pointf = e.position(); self.last_point = pointf; self.prev_point = pointf
             now = time.time()
             self.last_time = now
-            self._stroke_points = [QPointF(pointf)]
-            self._stroke_timestamps = [now]
+            self._stroke_points.clear()
+            self._stroke_timestamps.clear()
+            self._stroke_points.append(QPointF(pointf))
+            self._stroke_timestamps.append(now)
             self._stroke_speed = 0.0
             self._stroke_last_midpoint = QPointF(pointf)
             self.last_width = max(1.0, float(self.pen_size) * 0.4)
             self.shape_start_point = e.pos() if self.mode == "shape" else None
+            if self.mode == "shape":
+                self._last_preview_bounds = None
             self._eraser_last_point = e.pos() if self.mode == "eraser" else None
             self.raise_toolbar()
             e.accept()
@@ -1600,22 +1767,31 @@ class OverlayWindow(QWidget):
     def mouseMoveEvent(self, e) -> None:
         if self.drawing and self.mode != "cursor":
             p = e.pos(); pf = e.position()
-            if self.mode == "brush": self._draw_brush_line(pf)
-            elif self.mode == "eraser": self._erase_at(p)
-            elif self.mode == "shape" and self.current_shape: self._draw_shape_preview(p)
-            self.update()
+            dirty_region = None
+            if self.mode == "brush":
+                dirty_region = self._draw_brush_line(pf)
+            elif self.mode == "eraser":
+                dirty_region = self._erase_at(p)
+            elif self.mode == "shape" and self.current_shape:
+                dirty_region = self._draw_shape_preview(p)
+            self._apply_dirty_region(dirty_region)
             self.raise_toolbar()
         super().mouseMoveEvent(e)
 
     def mouseReleaseEvent(self, e) -> None:
         if e.button() == Qt.MouseButton.LeftButton and self.drawing:
-            if self.mode == "shape" and self.current_shape: self._draw_shape_final(e.pos())
-            self.drawing = False; self.shape_start_point = None; self.update()
+            dirty_region = None
+            if self.mode == "shape" and self.current_shape:
+                dirty_region = self._draw_shape_final(e.pos())
+            self.drawing = False
+            self.shape_start_point = None
             if self.mode == "eraser":
                 self._eraser_last_point = None
             if self.mode == "brush":
                 self._stroke_points.clear(); self._stroke_timestamps.clear()
                 self._stroke_last_midpoint = None; self._stroke_speed = 0.0
+            if dirty_region is not None:
+                self._apply_dirty_region(dirty_region)
             self.raise_toolbar()
         super().mouseReleaseEvent(e)
 
@@ -1624,29 +1800,31 @@ class OverlayWindow(QWidget):
             self.set_mode("cursor"); return
         super().keyPressEvent(e)
 
-    def _draw_brush_line(self, cur: QPointF) -> None:
+    def _draw_brush_line(self, cur: QPointF) -> Optional[QRectF]:
         now = time.time()
         cur_point = QPointF(cur)
         if not self._stroke_points:
-            self._stroke_points = [QPointF(cur_point)]
-            self._stroke_timestamps = [now]
+            self._stroke_points.clear()
+            self._stroke_timestamps.clear()
+            self._stroke_points.append(QPointF(cur_point))
+            self._stroke_timestamps.append(now)
             self.prev_point = QPointF(cur_point)
             self.last_point = QPointF(cur_point)
             self._stroke_last_midpoint = QPointF(cur_point)
             self.last_time = now
-            return
+            return None
 
         last_point = QPointF(self._stroke_points[-1])
         self._stroke_points.append(cur_point)
         self._stroke_timestamps.append(now)
-        if len(self._stroke_points) > 5:
-            self._stroke_points.pop(0)
-            self._stroke_timestamps.pop(0)
 
         elapsed = max(1e-4, now - self._stroke_timestamps[-2])
         distance = math.hypot(cur_point.x() - last_point.x(), cur_point.y() - last_point.y())
         speed = distance / elapsed
         self._stroke_speed = self._stroke_speed * 0.65 + speed * 0.35
+
+        if distance < 0.05 and elapsed < 0.01:
+            return None
 
         curvature = 0.0
         if len(self._stroke_points) >= 3:
@@ -1690,21 +1868,35 @@ class OverlayWindow(QWidget):
         self._stroke_last_midpoint = QPointF(current_mid)
         self.last_width = cur_w
 
-    def _erase_at(self, pos) -> None:
+        dirty = path.boundingRect()
+        margin = cur_w * 0.8 + 4.0
+        return dirty.adjusted(-margin, -margin, margin, margin)
+
+    def _erase_at(self, pos) -> Optional[QRectF]:
         current = QPointF(pos) if isinstance(pos, QPointF) else QPointF(QPoint(pos))
-        if not isinstance(self._eraser_last_point, QPoint):
-            self._eraser_last_point = current.toPoint()
-        start_point = QPointF(self._eraser_last_point)
-        path = QPainterPath(start_point)
-        path.lineTo(current)
+        if isinstance(self._eraser_last_point, QPoint):
+            start_point = QPointF(self._eraser_last_point)
+            distance = math.hypot(current.x() - start_point.x(), current.y() - start_point.y())
+        else:
+            start_point = QPointF(current)
+            distance = 0.0
 
         radius = max(8.0, float(self.pen_size) * 1.6)
-        stroker = QPainterPathStroker()
-        stroker.setWidth(max(12.0, radius * 2.0))
-        stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
-        stroker.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        erase_path = stroker.createStroke(path)
+        target_width = max(12.0, radius * 2.0)
+        if abs(target_width - self._eraser_stroker_width) > 0.5:
+            self._eraser_stroker.setWidth(target_width)
+            self._eraser_stroker_width = target_width
+
+        path = QPainterPath(start_point)
+        if distance >= 0.35:
+            path.lineTo(current)
+
+        erase_path = QPainterPath()
+        if distance >= 0.35:
+            erase_path = self._eraser_stroker.createStroke(path)
         erase_path.addEllipse(current, radius, radius)
+        if distance >= 0.35:
+            erase_path.addEllipse(start_point, radius, radius)
 
         painter = QPainter(self.canvas)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -1714,23 +1906,42 @@ class OverlayWindow(QWidget):
 
         self._eraser_last_point = current.toPoint()
 
-    def _draw_shape_preview(self, end_point) -> None:
-        if not self.shape_start_point: return
+        dirty = erase_path.boundingRect()
+        if dirty.isNull():
+            return None
+        margin = max(radius * 0.5, 6.0)
+        return dirty.adjusted(-margin, -margin, margin, margin)
+
+    def _draw_shape_preview(self, end_point) -> Optional[QRect]:
+        if not self.shape_start_point:
+            return None
         self.temp_canvas.fill(Qt.GlobalColor.transparent)
         p = QPainter(self.temp_canvas); p.setRenderHint(QPainter.RenderHint.Antialiasing)
         pen = QPen(self.pen_color, self.pen_size)
         if self.current_shape and "dashed" in self.current_shape: pen.setStyle(Qt.PenStyle.DashLine)
         p.setPen(pen); self._draw_shape(p, self.shape_start_point, end_point); p.end()
         self.raise_toolbar()
+        bounds = self._shape_dirty_bounds(self.shape_start_point, end_point, self.pen_size)
+        if bounds is not None and self._last_preview_bounds is not None:
+            bounds = bounds.united(self._last_preview_bounds)
+        self._last_preview_bounds = bounds
+        return bounds
 
-    def _draw_shape_final(self, end_point) -> None:
-        if not self.shape_start_point: return
+    def _draw_shape_final(self, end_point) -> Optional[QRect]:
+        if not self.shape_start_point:
+            return None
+        bounds = self._shape_dirty_bounds(self.shape_start_point, end_point, self.pen_size)
         p = QPainter(self.canvas); p.setRenderHint(QPainter.RenderHint.Antialiasing)
         pen = QPen(self.pen_color, self.pen_size)
         if self.current_shape and "dashed" in self.current_shape: pen.setStyle(Qt.PenStyle.DashLine)
         p.setPen(pen); self._draw_shape(p, self.shape_start_point, end_point); p.end()
         self.temp_canvas.fill(Qt.GlobalColor.transparent)
         self.raise_toolbar()
+        last_bounds = self._last_preview_bounds
+        self._last_preview_bounds = None
+        if bounds is not None and last_bounds is not None:
+            bounds = bounds.united(last_bounds)
+        return bounds
 
     def _draw_shape(self, painter: QPainter, start_point, end_point) -> None:
         rect = QRect(start_point, end_point)
@@ -1777,6 +1988,7 @@ class TTSManager(QObject):
         self._queue: Queue[str] = Queue()
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._pump)
+        missing_reason = ""
         if pyttsx3 is not None:
             try:
                 init_kwargs = {"driverName": "sapi5"} if sys.platform == "win32" else {}
@@ -1806,14 +2018,44 @@ class TTSManager(QObject):
             except Exception as exc:
                 self._record_failure("初始化语音引擎失败", exc)
                 self.engine = None
+        else:
+            missing_reason = "未检测到 pyttsx3 模块"
         self._init_powershell_fallback()
+        if self.available:
+            return
+        if missing_reason:
+            if self.failure_reason:
+                if missing_reason not in self.failure_reason:
+                    self.failure_reason = f"{self.failure_reason}；{missing_reason}"
+            else:
+                self.failure_reason = missing_reason
+        if not self.failure_reason:
+            self.failure_reason = "未检测到可用的语音播报方式"
+        env_reason, env_suggestions = detect_speech_environment_issues(force_refresh=True)
+        if env_reason:
+            if env_reason not in self.failure_reason:
+                self.failure_reason = f"{self.failure_reason}；{env_reason}" if self.failure_reason else env_reason
+        if env_suggestions:
+            combined = list(self.failure_suggestions)
+            combined.extend(env_suggestions)
+            self.failure_suggestions = dedupe_strings(combined)
 
     @property
     def available(self) -> bool:
         return self._mode in {"pyttsx3", "powershell"}
 
     def diagnostics(self) -> tuple[str, List[str]]:
-        return self.failure_reason, list(self.failure_suggestions)
+        reason = self.failure_reason
+        suggestions = list(self.failure_suggestions)
+        env_reason, env_suggestions = detect_speech_environment_issues()
+        if env_reason:
+            if reason:
+                if env_reason not in reason:
+                    reason = f"{reason}；{env_reason}"
+            else:
+                reason = env_reason
+        suggestions.extend(env_suggestions)
+        return reason, dedupe_strings(suggestions)
 
     def _init_powershell_fallback(self) -> None:
         if sys.platform != "win32":
@@ -2008,17 +2250,15 @@ class CountdownSettingsDialog(QDialog):
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self._accept); buttons.rejected.connect(self.reject)
-        for standard, style in (
-            (QDialogButtonBox.StandardButton.Ok, ButtonStyles.PRIMARY),
-            (QDialogButtonBox.StandardButton.Cancel, ButtonStyles.TOOLBAR),
-        ):
-            button = buttons.button(standard)
-            if button is not None:
-                apply_button_style(
-                    button,
-                    style,
-                    height=recommended_control_height(button.font(), extra=12, minimum=34),
-                )
+        style_dialog_buttons(
+            buttons,
+            {
+                QDialogButtonBox.StandardButton.Ok: ButtonStyles.PRIMARY,
+                QDialogButtonBox.StandardButton.Cancel: ButtonStyles.TOOLBAR,
+            },
+            extra_padding=12,
+            minimum_height=34,
+        )
         layout.addWidget(buttons)
         self.setFixedSize(self.sizeHint())
 
@@ -2110,7 +2350,7 @@ class StudentListDialog(QDialog):
             apply_button_style(
                 close_button,
                 ButtonStyles.PRIMARY,
-                height=recommended_control_height(close_button.font(), extra=12, minimum=36),
+                height=recommended_control_height(close_button.font(), extra=14, minimum=36),
             )
         layout.addWidget(box)
 
@@ -3188,27 +3428,27 @@ class RollCallTimerWindow(QWidget):
         self.mode_button.setFont(mode_font)
         fm = self.mode_button.fontMetrics()
         max_text = max(("切换到计时", "切换到点名"), key=lambda t: fm.horizontalAdvance(t))
-        target_width = fm.horizontalAdvance(max_text) + 24
-        self.mode_button.setFixedWidth(target_width)  # 固定宽度，避免文本切换导致按钮位置跳动
-        self.mode_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        control_height = recommended_control_height(mode_font, extra=12, minimum=34)
+        target_width = fm.horizontalAdvance(max_text) + 28
+        self.mode_button.setMinimumWidth(target_width)
+        self.mode_button.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+        control_height = recommended_control_height(mode_font, extra=14, minimum=36)
         apply_button_style(self.mode_button, ButtonStyles.TOOLBAR, height=control_height)
         self.mode_button.clicked.connect(self.toggle_mode)
         top.addWidget(self.mode_button, 0, Qt.AlignmentFlag.AlignLeft)
 
         compact_font = QFont("Microsoft YaHei UI", 9, QFont.Weight.Medium)
-        toolbar_height = recommended_control_height(compact_font, extra=12, minimum=34)
+        toolbar_height = recommended_control_height(compact_font, extra=14, minimum=36)
 
         def _setup_secondary_button(button: QPushButton) -> None:
             apply_button_style(button, ButtonStyles.TOOLBAR, height=toolbar_height)
-            button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            button.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
             button.setFont(compact_font)
 
         control_bar = QWidget()
-        control_bar.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        control_bar.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         control_layout = QHBoxLayout(control_bar)
         control_layout.setContentsMargins(0, 0, 0, 0)
-        control_layout.setSpacing(4)
+        control_layout.setSpacing(2)
 
         self.list_button = QPushButton("名单"); _setup_secondary_button(self.list_button)
         self.list_button.clicked.connect(self.show_student_selector)
@@ -3238,7 +3478,7 @@ class RollCallTimerWindow(QWidget):
 
         group_row = QHBoxLayout()
         group_row.setContentsMargins(0, 0, 0, 0)
-        group_row.setSpacing(4)
+        group_row.setSpacing(2)
 
         self.group_label = QLabel("分组")
         self.group_label.setFont(QFont("Microsoft YaHei UI", 9, QFont.Weight.Medium))
@@ -3248,22 +3488,33 @@ class RollCallTimerWindow(QWidget):
         self.group_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         group_row.addWidget(self.group_label, 0, Qt.AlignmentFlag.AlignLeft)
 
-        self.group_bar = QWidget()
+        group_container = QWidget()
+        group_container.setFixedHeight(toolbar_height)
+        group_container.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        group_container_layout = QHBoxLayout(group_container)
+        group_container_layout.setContentsMargins(0, 0, 0, 0)
+        group_container_layout.setSpacing(0)
+
+        self.group_container = group_container
+
+        self.group_bar = QWidget(group_container)
         self.group_bar.setFixedHeight(toolbar_height)
-        self.group_bar.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        self.group_bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.group_bar_layout = QHBoxLayout(self.group_bar)
         self.group_bar_layout.setContentsMargins(0, 0, 0, 0)
-        self.group_bar_layout.setSpacing(2)
+        self.group_bar_layout.setSpacing(1)
         self.group_button_group = QButtonGroup(self)
         self.group_button_group.setExclusive(True)
         self.group_buttons: Dict[str, QPushButton] = {}
         self._rebuild_group_buttons_ui()
-        group_row.addWidget(self.group_bar, 1, Qt.AlignmentFlag.AlignLeft)
+        group_container_layout.addWidget(self.group_bar, 1, Qt.AlignmentFlag.AlignLeft)
 
         self.add_score_button = QPushButton("加分"); _setup_secondary_button(self.add_score_button)
         self.add_score_button.setEnabled(False)
         self.add_score_button.clicked.connect(self.increment_current_score)
-        group_row.addWidget(self.add_score_button, 0, Qt.AlignmentFlag.AlignLeft)
+        group_container_layout.addWidget(self.add_score_button, 0, Qt.AlignmentFlag.AlignLeft)
+
+        group_row.addWidget(group_container, 1, Qt.AlignmentFlag.AlignLeft)
         group_row.addStretch(1)
         toolbar_layout.addLayout(group_row)
         layout.addLayout(toolbar_layout)
@@ -3298,14 +3549,14 @@ class RollCallTimerWindow(QWidget):
         self.time_display_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         tl.addWidget(self.time_display_label, 1)
 
-        ctrl = QHBoxLayout(); ctrl.setSpacing(6)
+        ctrl = QHBoxLayout(); ctrl.setSpacing(4)
         self.timer_mode_button = QPushButton("倒计时"); self.timer_mode_button.clicked.connect(self.toggle_timer_mode)
         self.timer_start_pause_button = QPushButton("开始"); self.timer_start_pause_button.clicked.connect(self.start_pause_timer)
         self.timer_reset_button = QPushButton("重置"); self.timer_reset_button.clicked.connect(self.reset_timer)
         self.timer_set_button = QPushButton("设定"); self.timer_set_button.clicked.connect(self.set_countdown_time)
         for b in (self.timer_mode_button, self.timer_start_pause_button, self.timer_reset_button, self.timer_set_button):
             b.setFont(compact_font)
-        timer_height = recommended_control_height(compact_font, extra=12, minimum=34)
+        timer_height = recommended_control_height(compact_font, extra=14, minimum=36)
         for b in (self.timer_mode_button, self.timer_start_pause_button, self.timer_reset_button, self.timer_set_button):
             apply_button_style(b, ButtonStyles.TOOLBAR, height=timer_height)
             b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -3339,11 +3590,10 @@ class RollCallTimerWindow(QWidget):
     def _prompt_new_encryption_password(self) -> Optional[str]:
         attempts = 0
         while attempts < 3:
-            password, ok = QInputDialog.getText(
+            password, ok = PasswordPromptDialog.get_password(
                 self,
                 "设置加密密码",
                 "请输入新的加密密码：",
-                QLineEdit.EchoMode.Password,
             )
             if not ok:
                 return None
@@ -3352,11 +3602,10 @@ class RollCallTimerWindow(QWidget):
                 show_quiet_information(self, "密码不能为空，请重新输入。")
                 attempts += 1
                 continue
-            confirm, ok = QInputDialog.getText(
+            confirm, ok = PasswordPromptDialog.get_password(
                 self,
                 "确认加密密码",
                 "请再次输入密码以确认：",
-                QLineEdit.EchoMode.Password,
             )
             if not ok:
                 return None
@@ -3372,11 +3621,10 @@ class RollCallTimerWindow(QWidget):
     def _prompt_existing_encryption_password(self, title: str) -> Optional[str]:
         attempts = 0
         while attempts < 3:
-            password, ok = QInputDialog.getText(
+            password, ok = PasswordPromptDialog.get_password(
                 self,
                 title,
                 "请输入当前的加密密码：",
-                QLineEdit.EchoMode.Password,
             )
             if not ok:
                 return None
@@ -3643,7 +3891,7 @@ class RollCallTimerWindow(QWidget):
             suggestions = self._default_speech_suggestions()
             suggestions.append("请在操作系统语音设置中添加语音包后重新启动程序。")
 
-        env_reason, env_suggestions = detect_speech_environment_issues()
+        env_reason, env_suggestions = detect_speech_environment_issues(force_refresh=True)
         if env_reason:
             if not reason:
                 reason = env_reason
@@ -3915,8 +4163,12 @@ class RollCallTimerWindow(QWidget):
         self.title_label.setText("点名" if is_roll else "计时")
         self.mode_button.setText("切换到计时" if is_roll else "切换到点名")
         self.group_label.setVisible(is_roll)
+        if hasattr(self, "group_container"):
+            self.group_container.setVisible(is_roll)
         if hasattr(self, "group_bar"):
             self.group_bar.setVisible(is_roll)
+        if hasattr(self, "add_score_button"):
+            self.add_score_button.setVisible(is_roll)
         self._update_roll_call_controls()
         if is_roll:
             if self._placeholder_on_show:
@@ -4455,13 +4707,25 @@ class RollCallTimerWindow(QWidget):
             source_order = list(base_indices)
             self._group_initial_sequences[group_name] = list(source_order)
 
+        additional: List[int] = []
         for idx in source_order:
             if idx in reference_drawn or idx in seen or idx not in base_indices:
                 continue
             normalized_pool.append(idx)
             seen.add(idx)
+        for idx in base_indices:
+            if idx in reference_drawn or idx in seen:
+                continue
+            additional.append(idx)
+            seen.add(idx)
+        if additional:
+            self._shuffle(additional)
+            for value in additional:
+                insert_at = self._rng.randrange(len(normalized_pool) + 1) if normalized_pool else 0
+                normalized_pool.insert(insert_at, value)
 
         self._group_remaining_indices[group_name] = normalized_pool
+        self._group_initial_sequences[group_name] = list(normalized_pool)
         self._group_last_student.setdefault(group_name, None)
         self._refresh_all_group_pool()
 
@@ -4574,7 +4838,7 @@ class RollCallTimerWindow(QWidget):
         if not self.groups:
             return
         button_font = QFont("Microsoft YaHei UI", 9, QFont.Weight.Medium)
-        button_height = recommended_control_height(button_font, extra=12, minimum=34)
+        button_height = recommended_control_height(button_font, extra=14, minimum=36)
         for group in self.groups:
             button = QPushButton(group)
             button.setCheckable(True)
@@ -5025,11 +5289,10 @@ def load_student_data(parent: Optional[QWidget]) -> Optional[pd.DataFrame]:
     if not os.path.exists(file_path) and os.path.exists(encrypted_path):
         attempts = 0
         while attempts < 3:
-            password, ok = QInputDialog.getText(
+            password, ok = PasswordPromptDialog.get_password(
                 parent,
                 "解密学生数据",
                 "检测到已加密的学生名单，请输入密码：",
-                QLineEdit.EchoMode.Password,
             )
             if not ok:
                 QMessageBox.information(parent, "提示", "已取消加载加密的学生名单。")
@@ -5313,7 +5576,7 @@ class LauncherWindow(QWidget):
         self.autostart_check.setChecked(autostart_enabled and WINREG_AVAILABLE)
         self.autostart_check.setEnabled(WINREG_AVAILABLE)
 
-        if not PANDAS_AVAILABLE or not OPENPYXL_AVAILABLE or self.student_data is None:
+        if not (PANDAS_AVAILABLE and OPENPYXL_AVAILABLE):
             self.roll_call_button.setEnabled(False)
 
         for w in (self, container, self.paint_button, self.roll_call_button, self.minimize_button, self.autostart_check):
@@ -5585,7 +5848,9 @@ def main() -> None:
     QToolTip.setFont(QFont("Microsoft YaHei UI", 9))
 
     settings_manager = SettingsManager()
-    student_data = load_student_data(None) if PANDAS_AVAILABLE else None
+    student_data = load_student_data(None) if PANDAS_AVAILABLE and not os.path.exists(
+        RollCallTimerWindow.ENCRYPTED_STUDENT_FILE
+    ) else None
 
     window = LauncherWindow(settings_manager, student_data)
     app.aboutToQuit.connect(window.handle_about_to_quit)
