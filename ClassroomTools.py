@@ -21,6 +21,7 @@ import time
 import traceback
 import hashlib
 import hmac
+from collections import deque
 from queue import Empty, Queue
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Mapping
@@ -1445,13 +1446,17 @@ class OverlayWindow(QWidget):
         self._last_shape_type: Optional[str] = None
         self._restoring_tool = False
         self._eraser_last_point: Optional[QPoint] = None
-        self._stroke_points: List[QPointF] = []
-        self._stroke_timestamps: List[float] = []
+        self._stroke_points: deque[QPointF] = deque(maxlen=6)
+        self._stroke_timestamps: deque[float] = deque(maxlen=6)
         self._stroke_speed: float = 0.0
         self._stroke_last_midpoint: Optional[QPointF] = None
         self.whiteboard_active = False
         self.whiteboard_color = QColor(0, 0, 0, 0); self.last_board_color = QColor("#ffffff")
         self.cursor_pixmap = QPixmap()
+        self._eraser_stroker = QPainterPathStroker()
+        self._eraser_stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
+        self._eraser_stroker.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        self._eraser_stroker_width = 0.0
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)
 
@@ -1685,8 +1690,10 @@ class OverlayWindow(QWidget):
             pointf = e.position(); self.last_point = pointf; self.prev_point = pointf
             now = time.time()
             self.last_time = now
-            self._stroke_points = [QPointF(pointf)]
-            self._stroke_timestamps = [now]
+            self._stroke_points.clear()
+            self._stroke_timestamps.clear()
+            self._stroke_points.append(QPointF(pointf))
+            self._stroke_timestamps.append(now)
             self._stroke_speed = 0.0
             self._stroke_last_midpoint = QPointF(pointf)
             self.last_width = max(1.0, float(self.pen_size) * 0.4)
@@ -1727,8 +1734,10 @@ class OverlayWindow(QWidget):
         now = time.time()
         cur_point = QPointF(cur)
         if not self._stroke_points:
-            self._stroke_points = [QPointF(cur_point)]
-            self._stroke_timestamps = [now]
+            self._stroke_points.clear()
+            self._stroke_timestamps.clear()
+            self._stroke_points.append(QPointF(cur_point))
+            self._stroke_timestamps.append(now)
             self.prev_point = QPointF(cur_point)
             self.last_point = QPointF(cur_point)
             self._stroke_last_midpoint = QPointF(cur_point)
@@ -1738,9 +1747,6 @@ class OverlayWindow(QWidget):
         last_point = QPointF(self._stroke_points[-1])
         self._stroke_points.append(cur_point)
         self._stroke_timestamps.append(now)
-        if len(self._stroke_points) > 5:
-            self._stroke_points.pop(0)
-            self._stroke_timestamps.pop(0)
 
         elapsed = max(1e-4, now - self._stroke_timestamps[-2])
         distance = math.hypot(cur_point.x() - last_point.x(), cur_point.y() - last_point.y())
@@ -1791,19 +1797,29 @@ class OverlayWindow(QWidget):
 
     def _erase_at(self, pos) -> None:
         current = QPointF(pos) if isinstance(pos, QPointF) else QPointF(QPoint(pos))
-        if not isinstance(self._eraser_last_point, QPoint):
-            self._eraser_last_point = current.toPoint()
-        start_point = QPointF(self._eraser_last_point)
-        path = QPainterPath(start_point)
-        path.lineTo(current)
+        if isinstance(self._eraser_last_point, QPoint):
+            start_point = QPointF(self._eraser_last_point)
+            distance = math.hypot(current.x() - start_point.x(), current.y() - start_point.y())
+        else:
+            start_point = QPointF(current)
+            distance = 0.0
 
         radius = max(8.0, float(self.pen_size) * 1.6)
-        stroker = QPainterPathStroker()
-        stroker.setWidth(max(12.0, radius * 2.0))
-        stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
-        stroker.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        erase_path = stroker.createStroke(path)
+        target_width = max(12.0, radius * 2.0)
+        if abs(target_width - self._eraser_stroker_width) > 0.5:
+            self._eraser_stroker.setWidth(target_width)
+            self._eraser_stroker_width = target_width
+
+        path = QPainterPath(start_point)
+        if distance >= 0.35:
+            path.lineTo(current)
+
+        erase_path = QPainterPath()
+        if distance >= 0.35:
+            erase_path = self._eraser_stroker.createStroke(path)
         erase_path.addEllipse(current, radius, radius)
+        if distance >= 0.35:
+            erase_path.addEllipse(start_point, radius, radius)
 
         painter = QPainter(self.canvas)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -1876,6 +1892,7 @@ class TTSManager(QObject):
         self._queue: Queue[str] = Queue()
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._pump)
+        missing_reason = ""
         if pyttsx3 is not None:
             try:
                 init_kwargs = {"driverName": "sapi5"} if sys.platform == "win32" else {}
@@ -1905,14 +1922,44 @@ class TTSManager(QObject):
             except Exception as exc:
                 self._record_failure("初始化语音引擎失败", exc)
                 self.engine = None
+        else:
+            missing_reason = "未检测到 pyttsx3 模块"
         self._init_powershell_fallback()
+        if self.available:
+            return
+        if missing_reason:
+            if self.failure_reason:
+                if missing_reason not in self.failure_reason:
+                    self.failure_reason = f"{self.failure_reason}；{missing_reason}"
+            else:
+                self.failure_reason = missing_reason
+        if not self.failure_reason:
+            self.failure_reason = "未检测到可用的语音播报方式"
+        env_reason, env_suggestions = detect_speech_environment_issues()
+        if env_reason:
+            if env_reason not in self.failure_reason:
+                self.failure_reason = f"{self.failure_reason}；{env_reason}" if self.failure_reason else env_reason
+        if env_suggestions:
+            combined = list(self.failure_suggestions)
+            combined.extend(env_suggestions)
+            self.failure_suggestions = dedupe_strings(combined)
 
     @property
     def available(self) -> bool:
         return self._mode in {"pyttsx3", "powershell"}
 
     def diagnostics(self) -> tuple[str, List[str]]:
-        return self.failure_reason, list(self.failure_suggestions)
+        reason = self.failure_reason
+        suggestions = list(self.failure_suggestions)
+        env_reason, env_suggestions = detect_speech_environment_issues()
+        if env_reason:
+            if reason:
+                if env_reason not in reason:
+                    reason = f"{reason}；{env_reason}"
+            else:
+                reason = env_reason
+        suggestions.extend(env_suggestions)
+        return reason, dedupe_strings(suggestions)
 
     def _init_powershell_fallback(self) -> None:
         if sys.platform != "win32":
@@ -4564,13 +4611,25 @@ class RollCallTimerWindow(QWidget):
             source_order = list(base_indices)
             self._group_initial_sequences[group_name] = list(source_order)
 
+        additional: List[int] = []
         for idx in source_order:
             if idx in reference_drawn or idx in seen or idx not in base_indices:
                 continue
             normalized_pool.append(idx)
             seen.add(idx)
+        for idx in base_indices:
+            if idx in reference_drawn or idx in seen:
+                continue
+            additional.append(idx)
+            seen.add(idx)
+        if additional:
+            self._shuffle(additional)
+            for value in additional:
+                insert_at = self._rng.randrange(len(normalized_pool) + 1) if normalized_pool else 0
+                normalized_pool.insert(insert_at, value)
 
         self._group_remaining_indices[group_name] = normalized_pool
+        self._group_initial_sequences[group_name] = list(normalized_pool)
         self._group_last_student.setdefault(group_name, None)
         self._refresh_all_group_pool()
 
