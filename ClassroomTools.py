@@ -19,6 +19,7 @@ import tempfile
 import threading
 import time
 from queue import Empty, Queue
+from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Mapping
 
 from PyQt6.QtCore import (
@@ -1926,6 +1927,20 @@ class ScoreboardDialog(QDialog):
     ORDER_RANK = "rank"
     ORDER_ID = "id"
 
+    @dataclass
+    class _CardMetrics:
+        count: int
+        columns: int
+        rows: int
+        card_width: int
+        card_height: int
+        padding_h: int
+        padding_v: int
+        inner_spacing: int
+        font_size: int
+        horizontal_spacing: int
+        vertical_spacing: int
+
     def __init__(
         self,
         parent: Optional[QWidget],
@@ -1944,6 +1959,8 @@ class ScoreboardDialog(QDialog):
         self._order = order if order in {self.ORDER_RANK, self.ORDER_ID} else self.ORDER_RANK
         self._grid_row_count = 0
         self._grid_column_count = 0
+        self._card_metrics: Optional[ScoreboardDialog._CardMetrics] = None
+        self._card_metrics_key: Optional[tuple[int, int, int]] = None
 
         calligraphy_font = preferred_calligraphy_font()
         self._calligraphy_font = calligraphy_font
@@ -1985,6 +2002,7 @@ class ScoreboardDialog(QDialog):
 
         grid_container = QWidget()
         grid_container.setObjectName("ScoreboardGridContainer")
+        grid_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.grid_layout = QGridLayout(grid_container)
         self.grid_layout.setContentsMargins(18, 18, 18, 18)
         self.grid_layout.setHorizontalSpacing(20)
@@ -2089,6 +2107,223 @@ class ScoreboardDialog(QDialog):
         self._grid_row_count = 0
         self._grid_column_count = 0
 
+    def _collect_display_candidates(self) -> tuple[List[tuple[int, str, str]], List[str], List[str]]:
+        sorted_students = self._sort_students()
+        alternate_order = (
+            self.ORDER_ID if self._order == self.ORDER_RANK else self.ORDER_RANK
+        )
+        alternate_students = self._sort_students(alternate_order)
+
+        display_entries: List[tuple[int, str, str]] = []
+        display_candidates: List[str] = []
+        score_candidates: List[str] = []
+
+        for idx, (sid, name, score) in enumerate(sorted_students):
+            display_text = self._format_display_text(idx, sid, name)
+            score_text = self._format_score_text(score)
+            display_entries.append((idx, display_text, score_text))
+            display_candidates.append(display_text)
+            score_candidates.append(score_text)
+
+        for idx, (sid, name, score) in enumerate(alternate_students):
+            display_candidates.append(
+                self._format_display_text_for_order(
+                    alternate_order, idx, sid, name
+                )
+            )
+            score_candidates.append(self._format_score_text(score))
+
+        return display_entries, display_candidates, score_candidates
+
+    def _compute_card_metrics(self) -> Optional[_CardMetrics]:
+        count = len(self.students)
+        if count == 0:
+            return None
+
+        available = self._available_geometry
+        key = (count, available.width(), available.height())
+        if self._card_metrics is not None and self._card_metrics_key == key:
+            return self._card_metrics
+
+        columns = 10
+        rows = max(1, math.ceil(count / columns))
+
+        usable_width = max(available.width() - 160, 640)
+        usable_height = max(available.height() - 240, 520)
+
+        margins = self.grid_layout.contentsMargins()
+        horizontal_spacing = max(14, int(usable_width * 0.01))
+        vertical_spacing = max(18, int(usable_height * 0.035 / rows))
+
+        spacing_total_x = horizontal_spacing * max(0, columns - 1)
+        spacing_total_y = vertical_spacing * max(0, rows - 1)
+
+        available_width_for_cards = (
+            usable_width - margins.left() - margins.right() - spacing_total_x
+        )
+        available_height_for_cards = (
+            usable_height - margins.top() - margins.bottom() - spacing_total_y
+        )
+
+        per_card_width = max(1.0, available_width_for_cards / columns)
+        per_card_height = max(1.0, available_height_for_cards / rows)
+
+        card_width = int(math.floor(per_card_width))
+        card_height = int(math.floor(per_card_height))
+
+        if per_card_width >= 120:
+            card_width = max(card_width, 120)
+        if per_card_height >= 180:
+            card_height = max(card_height, 180)
+
+        padding_h = max(12, int(card_width * 0.08))
+        padding_v = max(14, int(card_height * 0.1))
+        inner_spacing = max(6, int(card_height * 0.045))
+
+        display_entries, display_candidates, score_candidates = self._collect_display_candidates()
+
+        if not display_candidates:
+            return None
+
+        calligraphy_font = self._calligraphy_font
+        probe_font = QFont(calligraphy_font, 64, QFont.Weight.Bold)
+        metrics = QFontMetrics(probe_font)
+
+        widest_display = max(
+            display_candidates,
+            key=lambda text: metrics.tightBoundingRect(text).width(),
+        )
+        widest_score = max(
+            score_candidates,
+            key=lambda text: metrics.tightBoundingRect(text).width(),
+        )
+        name_label.setFont(QFont(calligraphy_font, font_size, QFont.Weight.Bold))
+        name_label.setStyleSheet("margin: 0px; padding: 0px;")
+        layout.addWidget(name_label)
+
+        score_label = QLabel(score_text)
+        score_label.setProperty("class", "scoreboardScore")
+        score_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        score_label.setFont(QFont(calligraphy_font, font_size, QFont.Weight.Bold))
+        score_label.setStyleSheet(f"margin-top: {max(6, inner_spacing // 2)}px;")
+        layout.addWidget(score_label)
+
+        layout.addStretch(1)
+        return wrapper
+
+    def _format_display_text(self, index: int, sid: str, name: str) -> str:
+        return self._format_display_text_for_order(self._order, index, sid, name)
+
+    def _format_display_text_for_order(
+        self, order: str, index: int, sid: str, name: str
+    ) -> str:
+        clean_name = (name or "").strip() or "未命名"
+        if order == self.ORDER_ID:
+            sid_display = str(sid).strip() or "—"
+            return f"{sid_display}.{clean_name}"
+        return f"{index + 1}.{clean_name}"
+
+    @staticmethod
+    def _format_score_text(score: int | float | str) -> str:
+        text = "—"
+        try:
+            value = float(score)
+        except (TypeError, ValueError):
+            score_str = str(score).strip()
+            if score_str and score_str.lower() != "none":
+                text = score_str
+        else:
+            if math.isfinite(value):
+                if abs(value - int(value)) < 1e-6:
+                    text = str(int(round(value)))
+                else:
+                    text = f"{value:.2f}".rstrip("0").rstrip(".")
+        return f"{text} 分"
+
+    @staticmethod
+    def _fit_font_size(
+        text: str,
+        family: str,
+        weight: QFont.Weight,
+        max_width: int,
+        max_height: int,
+        minimum: int,
+        maximum: int,
+    ) -> int:
+        if not text:
+            return max(6, min(minimum, maximum))
+        if max_width <= 0 or max_height <= 0:
+            return max(6, min(minimum, maximum))
+        lower = max(6, min(minimum, maximum))
+        upper = max(6, max(minimum, maximum))
+        for size in range(upper, lower - 1, -1):
+            font = QFont(family, size, weight)
+            metrics = QFontMetrics(font)
+            rect = metrics.tightBoundingRect(text)
+            if rect.width() <= max_width and rect.height() <= max_height:
+                return size
+        return lower
+
+    def _populate_grid(self) -> None:
+        self._clear_grid()
+        count = len(self.students)
+        layout = self.grid_layout
+        calligraphy_font = self._calligraphy_font
+
+        usable_name_width = max(60, card_width - 2 * padding_h)
+        content_height = max(80, card_height - 2 * padding_v - inner_spacing)
+        name_height = int(content_height * 0.58)
+        score_height = max(32, content_height - name_height)
+
+        font_upper_bound = int(min(card_width * 0.28, card_height * 0.36))
+        font_upper_bound = max(20, font_upper_bound)
+        fit_minimum = 14
+
+        name_fit = self._fit_font_size(
+            widest_display,
+            calligraphy_font,
+            QFont.Weight.Bold,
+            usable_name_width,
+            name_height,
+            fit_minimum,
+            font_upper_bound,
+        )
+        score_fit = self._fit_font_size(
+            widest_score,
+            calligraphy_font,
+            QFont.Weight.Bold,
+            usable_name_width,
+            score_height,
+            fit_minimum,
+            font_upper_bound,
+        )
+
+        final_font_size = max(fit_minimum, min(name_fit, score_fit, font_upper_bound))
+
+        self._card_metrics = ScoreboardDialog._CardMetrics(
+            count=count,
+            columns=columns,
+            rows=rows,
+            card_width=card_width,
+            card_height=card_height,
+            padding_h=padding_h,
+            padding_v=padding_v,
+            inner_spacing=inner_spacing,
+            font_size=final_font_size,
+            horizontal_spacing=horizontal_spacing,
+            vertical_spacing=vertical_spacing,
+        )
+        self._card_metrics_key = key
+        return self._card_metrics
+
+    def _ensure_metrics(self) -> Optional[_CardMetrics]:
+        metrics = self._compute_card_metrics()
+        if metrics is not None:
+            return metrics
+        self._card_metrics = None
+        self._card_metrics_key = None
+        return None
+
     def _sort_students(self, order: Optional[str] = None) -> List[tuple[str, str, int]]:
         data = list(self.students)
         current_order = self._order if order is None else order
@@ -2149,6 +2384,10 @@ class ScoreboardDialog(QDialog):
         score_label = QLabel(score_text)
         score_label.setProperty("class", "scoreboardScore")
         score_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        score_label.setWordWrap(False)
+        score_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
         score_label.setFont(QFont(calligraphy_font, font_size, QFont.Weight.Bold))
         score_label.setStyleSheet(f"margin-top: {max(6, inner_spacing // 2)}px;")
         layout.addWidget(score_label)
@@ -2227,106 +2466,54 @@ class ScoreboardDialog(QDialog):
             self._grid_column_count = 1
             return
 
-        available = self._available_geometry
-        usable_width = max(available.width() - 160, 640)
-        usable_height = max(available.height() - 240, 520)
-        columns = 10
-        rows = max(1, math.ceil(count / columns))
+        metrics = self._ensure_metrics()
+        if metrics is None:
+            return
 
-        horizontal_spacing = max(6, int(usable_width * 0.012))
-        vertical_spacing = max(10, int(usable_height * 0.042 / rows))
-        layout.setHorizontalSpacing(horizontal_spacing)
-        layout.setVerticalSpacing(vertical_spacing)
+        layout.setHorizontalSpacing(metrics.horizontal_spacing)
+        layout.setVerticalSpacing(metrics.vertical_spacing)
 
-        margins = layout.contentsMargins()
-        total_spacing_x = horizontal_spacing * max(0, columns - 1)
-        total_spacing_y = vertical_spacing * max(0, rows - 1)
-        available_width_for_cards = usable_width - margins.left() - margins.right() - total_spacing_x
-        available_height_for_cards = usable_height - margins.top() - margins.bottom() - total_spacing_y
-        cell_width = max(160.0, available_width_for_cards / columns)
-        cell_height = max(172.0, available_height_for_cards / rows)
-        card_width = int(cell_width)
-        card_height = int(cell_height)
-
-        for column in range(columns):
+        for column in range(metrics.columns):
             layout.setColumnStretch(column, 1)
-            layout.setColumnMinimumWidth(column, card_width)
-        for row in range(rows):
+            layout.setColumnMinimumWidth(column, metrics.card_width)
+        for row in range(metrics.rows):
             layout.setRowStretch(row, 1)
-            layout.setRowMinimumHeight(row, card_height)
-        self._grid_row_count = rows
-        self._grid_column_count = columns
+            layout.setRowMinimumHeight(row, metrics.card_height)
 
-        padding_v = max(14, int(card_height * 0.11))
-        padding_h = max(14, int(card_width * 0.09))
-        inner_spacing = max(6, int(card_height * 0.05))
+        self._grid_row_count = metrics.rows
+        self._grid_column_count = metrics.columns
 
-        sorted_students = self._sort_students()
-        alternate_order = (
-            self.ORDER_ID if self._order == self.ORDER_RANK else self.ORDER_RANK
-        )
-        alternate_students = self._sort_students(alternate_order)
-        display_entries: List[tuple[int, str, str]] = []
-        display_candidates: List[str] = []
-        longest_display = ""
-        longest_score = ""
-        for idx, (sid, name, score) in enumerate(sorted_students):
-            display_text = self._format_display_text(idx, sid, name)
-            score_text = self._format_score_text(score)
-            display_entries.append((idx, display_text, score_text))
-            display_candidates.append(display_text)
-            if len(score_text) > len(longest_score):
-                longest_score = score_text
-
-        for idx, (sid, name, _score) in enumerate(alternate_students):
-            display_candidates.append(
-                self._format_display_text_for_order(alternate_order, idx, sid, name)
+        container = layout.parentWidget()
+        if container is not None:
+            margins = layout.contentsMargins()
+            total_width = (
+                metrics.columns * metrics.card_width
+                + metrics.horizontal_spacing * max(0, metrics.columns - 1)
+                + margins.left()
+                + margins.right()
             )
+            total_height = (
+                metrics.rows * metrics.card_height
+                + metrics.vertical_spacing * max(0, metrics.rows - 1)
+                + margins.top()
+                + margins.bottom()
+            )
+            container.setMinimumSize(total_width, total_height)
 
-        if display_candidates:
-            longest_display = max(display_candidates, key=len)
-
-        content_height = card_height - 2 * padding_v - inner_spacing
-        content_height = max(60, content_height)
-        name_height = int(content_height * 0.58)
-        score_height = max(32, content_height - name_height)
-        usable_width = max(60, card_width - 2 * padding_h)
-        base_font_upper = int(min(card_width * 0.32, card_height * 0.4))
-        fit_minimum = 12
-        name_fit = self._fit_font_size(
-            longest_display,
-            calligraphy_font,
-            QFont.Weight.Bold,
-            usable_width,
-            name_height,
-            fit_minimum,
-            base_font_upper,
-        )
-        score_fit = self._fit_font_size(
-            longest_score,
-            calligraphy_font,
-            QFont.Weight.Bold,
-            usable_width,
-            score_height,
-            fit_minimum,
-            base_font_upper,
-        )
-        final_font_size = min(name_fit, score_fit, base_font_upper)
-        if final_font_size <= 0:
-            final_font_size = max(fit_minimum, base_font_upper)
+        display_entries, _, _ = self._collect_display_candidates()
 
         for idx, display_text, score_text in display_entries:
-            row = idx // columns
-            column = idx % columns
+            row = idx // metrics.columns
+            column = idx % metrics.columns
             card = self._create_card(
                 display_text,
                 score_text,
-                card_width,
-                card_height,
-                final_font_size,
-                padding_h,
-                padding_v,
-                inner_spacing,
+                metrics.card_width,
+                metrics.card_height,
+                metrics.font_size,
+                metrics.padding_h,
+                metrics.padding_v,
+                metrics.inner_spacing,
             )
             layout.addWidget(card, row, column, Qt.AlignmentFlag.AlignCenter)
 
@@ -2597,7 +2784,8 @@ class RollCallTimerWindow(QWidget):
             "color: #0b57d0;"
             " background-color: #e8f0fe;"
             " border-radius: 12px;"
-            " padding: 4px 16px;"
+            " padding: 2px 16px;"
+            " margin: 0px;"
         )
 
         rl.addWidget(self.id_label, 0, 0); rl.addWidget(self.name_label, 0, 1)
