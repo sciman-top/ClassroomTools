@@ -24,13 +24,14 @@ import hmac
 from collections import deque
 from queue import Empty, Queue
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Mapping
+from typing import Callable, Dict, List, Optional, Mapping, Union
 
 from PyQt6.QtCore import (
     QByteArray,
     QPoint,
     QPointF,
     QRect,
+    QRectF,
     QSize,
     Qt,
     QTimer,
@@ -216,6 +217,10 @@ def _get_session_student_encryption() -> tuple[bool, Optional[str]]:
     return _SESSION_STUDENT_FILE_ENCRYPTED, _SESSION_STUDENT_PASSWORD
 
 
+# ---------- 缓存 ----------
+_SPEECH_ENV_CACHE: tuple[float, str, List[str]] = (0.0, "", [])
+
+
 # ---------- DPI ----------
 def ensure_high_dpi_awareness() -> None:
     if sys.platform != "win32":
@@ -392,7 +397,16 @@ def _count_windows_voice_tokens() -> tuple[int, Optional[str]]:
     return len(token_names), None
 
 
-def detect_speech_environment_issues() -> tuple[str, List[str]]:
+def detect_speech_environment_issues(
+    force_refresh: bool = False,
+    cache_seconds: float = 30.0,
+) -> tuple[str, List[str]]:
+    global _SPEECH_ENV_CACHE
+    now = time.time()
+    cached_at, cached_reason, cached_suggestions = _SPEECH_ENV_CACHE
+    if not force_refresh and cached_at and now - cached_at < cache_seconds:
+        return cached_reason, list(cached_suggestions)
+
     issues: List[str] = []
     suggestions: List[str] = []
     if sys.platform == "win32":
@@ -407,7 +421,8 @@ def detect_speech_environment_issues() -> tuple[str, List[str]]:
                 base_name = module_name.split(".")[0]
                 if base_name not in missing:
                     missing.append(base_name)
-                suggestions.append(hint)
+                if hint not in suggestions:
+                    suggestions.append(hint)
         if missing:
             issues.append(f"缺少语音依赖：{'、'.join(sorted(missing))}")
         token_count, token_error = _count_windows_voice_tokens()
@@ -421,11 +436,17 @@ def detect_speech_environment_issues() -> tuple[str, List[str]]:
             issues.append("未检测到 PowerShell，可用的语音播报方式受限")
             suggestions.append("请确认系统已安装 PowerShell 5+ 或 PowerShell 7，并在环境变量中可用。")
         if getattr(sys, "frozen", False):
-            suggestions.append("若为打包版本，请在打包配置中包含 pyttsx3、comtypes、pywin32 等语音依赖或在目标电脑上单独安装它们。")
+            suggestions.append(
+                "若为打包版本，请在打包配置中包含 pyttsx3、comtypes、pywin32 等语音依赖或在目标电脑上单独安装它们。"
+            )
         suggestions.append("如已安装语音组件，请尝试以管理员权限首次运行程序以初始化语音服务。")
     else:
         suggestions.append("请确保系统已配置可用的语音引擎后重新启动程序。")
-    return "；".join(issues), dedupe_strings(suggestions)
+
+    reason = "；".join(issues)
+    deduped = dedupe_strings(suggestions)
+    _SPEECH_ENV_CACHE = (now, reason, list(deduped))
+    return reason, list(deduped)
 
 
 class QuietInfoPopup(QWidget):
@@ -1450,6 +1471,7 @@ class OverlayWindow(QWidget):
         self._stroke_timestamps: deque[float] = deque(maxlen=6)
         self._stroke_speed: float = 0.0
         self._stroke_last_midpoint: Optional[QPointF] = None
+        self._last_preview_bounds: Optional[QRect] = None
         self.whiteboard_active = False
         self.whiteboard_color = QColor(0, 0, 0, 0); self.last_board_color = QColor("#ffffff")
         self.cursor_pixmap = QPixmap()
@@ -1525,6 +1547,7 @@ class OverlayWindow(QWidget):
             self.current_shape = shape_type
         if mode != "shape":
             self.shape_start_point = None
+            self._last_preview_bounds = None
         if self.mode != "eraser":
             self._eraser_last_point = None
         if self.mode in {"brush", "shape"} and not self._restoring_tool:
@@ -1595,6 +1618,40 @@ class OverlayWindow(QWidget):
         p.drawEllipse(1, 1, d - 2, d - 2); p.end()
         self.setCursor(QCursor(self.cursor_pixmap, d // 2, d // 2))
 
+    def _apply_dirty_region(self, region: Optional[Union[QRect, QRectF]]) -> None:
+        if not region:
+            return
+        if isinstance(region, QRectF):
+            rect = region.toAlignedRect()
+        else:
+            rect = QRect(region)
+        if rect.isNull() or rect.width() <= 0 or rect.height() <= 0:
+            return
+        inflated = rect.adjusted(-4, -4, 4, 4)
+        target = inflated.intersected(self.rect())
+        if target.isValid() and not target.isNull():
+            self.update(target)
+        else:
+            self.update()
+
+    def _shape_dirty_bounds(
+        self,
+        start_point: Optional[QPoint],
+        end_point: Optional[Union[QPoint, QPointF]],
+        pen_width: int,
+    ) -> Optional[QRect]:
+        if start_point is None or end_point is None:
+            return None
+        if isinstance(end_point, QPointF):
+            end = end_point.toPoint()
+        else:
+            end = end_point
+        rect = QRect(start_point, end).normalized()
+        if rect.isNull():
+            rect = QRect(end, end)
+        margin = max(4, int(max(1, pen_width) * 2))
+        return rect.adjusted(-margin, -margin, margin, margin)
+
     # ---- 系统级穿透 ----
     def _apply_input_passthrough(self, enabled: bool) -> None:
         # 开启后可让鼠标穿透画布，方便回到课件操作
@@ -1633,6 +1690,7 @@ class OverlayWindow(QWidget):
         self._push_history()
         self.canvas.fill(Qt.GlobalColor.transparent)
         self.temp_canvas.fill(Qt.GlobalColor.transparent)
+        self._last_preview_bounds = None
         self.update()
         self._eraser_last_point = None
         if restore_needed:
@@ -1662,6 +1720,7 @@ class OverlayWindow(QWidget):
             return
         self.temp_canvas.fill(Qt.GlobalColor.transparent)
         self.drawing = False
+        self._last_preview_bounds = None
         self.update()
         self.raise_toolbar()
         self._update_undo_button()
@@ -1698,6 +1757,8 @@ class OverlayWindow(QWidget):
             self._stroke_last_midpoint = QPointF(pointf)
             self.last_width = max(1.0, float(self.pen_size) * 0.4)
             self.shape_start_point = e.pos() if self.mode == "shape" else None
+            if self.mode == "shape":
+                self._last_preview_bounds = None
             self._eraser_last_point = e.pos() if self.mode == "eraser" else None
             self.raise_toolbar()
             e.accept()
@@ -1706,22 +1767,31 @@ class OverlayWindow(QWidget):
     def mouseMoveEvent(self, e) -> None:
         if self.drawing and self.mode != "cursor":
             p = e.pos(); pf = e.position()
-            if self.mode == "brush": self._draw_brush_line(pf)
-            elif self.mode == "eraser": self._erase_at(p)
-            elif self.mode == "shape" and self.current_shape: self._draw_shape_preview(p)
-            self.update()
+            dirty_region = None
+            if self.mode == "brush":
+                dirty_region = self._draw_brush_line(pf)
+            elif self.mode == "eraser":
+                dirty_region = self._erase_at(p)
+            elif self.mode == "shape" and self.current_shape:
+                dirty_region = self._draw_shape_preview(p)
+            self._apply_dirty_region(dirty_region)
             self.raise_toolbar()
         super().mouseMoveEvent(e)
 
     def mouseReleaseEvent(self, e) -> None:
         if e.button() == Qt.MouseButton.LeftButton and self.drawing:
-            if self.mode == "shape" and self.current_shape: self._draw_shape_final(e.pos())
-            self.drawing = False; self.shape_start_point = None; self.update()
+            dirty_region = None
+            if self.mode == "shape" and self.current_shape:
+                dirty_region = self._draw_shape_final(e.pos())
+            self.drawing = False
+            self.shape_start_point = None
             if self.mode == "eraser":
                 self._eraser_last_point = None
             if self.mode == "brush":
                 self._stroke_points.clear(); self._stroke_timestamps.clear()
                 self._stroke_last_midpoint = None; self._stroke_speed = 0.0
+            if dirty_region is not None:
+                self._apply_dirty_region(dirty_region)
             self.raise_toolbar()
         super().mouseReleaseEvent(e)
 
@@ -1730,7 +1800,7 @@ class OverlayWindow(QWidget):
             self.set_mode("cursor"); return
         super().keyPressEvent(e)
 
-    def _draw_brush_line(self, cur: QPointF) -> None:
+    def _draw_brush_line(self, cur: QPointF) -> Optional[QRectF]:
         now = time.time()
         cur_point = QPointF(cur)
         if not self._stroke_points:
@@ -1742,7 +1812,7 @@ class OverlayWindow(QWidget):
             self.last_point = QPointF(cur_point)
             self._stroke_last_midpoint = QPointF(cur_point)
             self.last_time = now
-            return
+            return None
 
         last_point = QPointF(self._stroke_points[-1])
         self._stroke_points.append(cur_point)
@@ -1752,6 +1822,9 @@ class OverlayWindow(QWidget):
         distance = math.hypot(cur_point.x() - last_point.x(), cur_point.y() - last_point.y())
         speed = distance / elapsed
         self._stroke_speed = self._stroke_speed * 0.65 + speed * 0.35
+
+        if distance < 0.05 and elapsed < 0.01:
+            return None
 
         curvature = 0.0
         if len(self._stroke_points) >= 3:
@@ -1795,7 +1868,11 @@ class OverlayWindow(QWidget):
         self._stroke_last_midpoint = QPointF(current_mid)
         self.last_width = cur_w
 
-    def _erase_at(self, pos) -> None:
+        dirty = path.boundingRect()
+        margin = cur_w * 0.8 + 4.0
+        return dirty.adjusted(-margin, -margin, margin, margin)
+
+    def _erase_at(self, pos) -> Optional[QRectF]:
         current = QPointF(pos) if isinstance(pos, QPointF) else QPointF(QPoint(pos))
         if isinstance(self._eraser_last_point, QPoint):
             start_point = QPointF(self._eraser_last_point)
@@ -1829,23 +1906,42 @@ class OverlayWindow(QWidget):
 
         self._eraser_last_point = current.toPoint()
 
-    def _draw_shape_preview(self, end_point) -> None:
-        if not self.shape_start_point: return
+        dirty = erase_path.boundingRect()
+        if dirty.isNull():
+            return None
+        margin = max(radius * 0.5, 6.0)
+        return dirty.adjusted(-margin, -margin, margin, margin)
+
+    def _draw_shape_preview(self, end_point) -> Optional[QRect]:
+        if not self.shape_start_point:
+            return None
         self.temp_canvas.fill(Qt.GlobalColor.transparent)
         p = QPainter(self.temp_canvas); p.setRenderHint(QPainter.RenderHint.Antialiasing)
         pen = QPen(self.pen_color, self.pen_size)
         if self.current_shape and "dashed" in self.current_shape: pen.setStyle(Qt.PenStyle.DashLine)
         p.setPen(pen); self._draw_shape(p, self.shape_start_point, end_point); p.end()
         self.raise_toolbar()
+        bounds = self._shape_dirty_bounds(self.shape_start_point, end_point, self.pen_size)
+        if bounds is not None and self._last_preview_bounds is not None:
+            bounds = bounds.united(self._last_preview_bounds)
+        self._last_preview_bounds = bounds
+        return bounds
 
-    def _draw_shape_final(self, end_point) -> None:
-        if not self.shape_start_point: return
+    def _draw_shape_final(self, end_point) -> Optional[QRect]:
+        if not self.shape_start_point:
+            return None
+        bounds = self._shape_dirty_bounds(self.shape_start_point, end_point, self.pen_size)
         p = QPainter(self.canvas); p.setRenderHint(QPainter.RenderHint.Antialiasing)
         pen = QPen(self.pen_color, self.pen_size)
         if self.current_shape and "dashed" in self.current_shape: pen.setStyle(Qt.PenStyle.DashLine)
         p.setPen(pen); self._draw_shape(p, self.shape_start_point, end_point); p.end()
         self.temp_canvas.fill(Qt.GlobalColor.transparent)
         self.raise_toolbar()
+        last_bounds = self._last_preview_bounds
+        self._last_preview_bounds = None
+        if bounds is not None and last_bounds is not None:
+            bounds = bounds.united(last_bounds)
+        return bounds
 
     def _draw_shape(self, painter: QPainter, start_point, end_point) -> None:
         rect = QRect(start_point, end_point)
@@ -1935,7 +2031,7 @@ class TTSManager(QObject):
                 self.failure_reason = missing_reason
         if not self.failure_reason:
             self.failure_reason = "未检测到可用的语音播报方式"
-        env_reason, env_suggestions = detect_speech_environment_issues()
+        env_reason, env_suggestions = detect_speech_environment_issues(force_refresh=True)
         if env_reason:
             if env_reason not in self.failure_reason:
                 self.failure_reason = f"{self.failure_reason}；{env_reason}" if self.failure_reason else env_reason
@@ -3795,7 +3891,7 @@ class RollCallTimerWindow(QWidget):
             suggestions = self._default_speech_suggestions()
             suggestions.append("请在操作系统语音设置中添加语音包后重新启动程序。")
 
-        env_reason, env_suggestions = detect_speech_environment_issues()
+        env_reason, env_suggestions = detect_speech_environment_issues(force_refresh=True)
         if env_reason:
             if not reason:
                 reason = env_reason
