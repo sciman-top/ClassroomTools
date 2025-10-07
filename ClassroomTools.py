@@ -458,8 +458,12 @@ class QuietInfoPopup(QWidget):
         button_row = QHBoxLayout()
         button_row.addStretch(1)
         self.ok_button = QPushButton("确定", self)
-        self.ok_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.ok_button.setDefault(True)
+        apply_button_style(
+            self.ok_button,
+            ButtonStyles.PRIMARY,
+            height=recommended_control_height(self.ok_button.font(), extra=12, minimum=34),
+        )
         self.ok_button.clicked.connect(self.close)
         button_row.addWidget(self.ok_button)
         layout.addLayout(button_row)
@@ -525,13 +529,14 @@ class QuietQuestionDialog(QDialog):
         buttons.addStretch(1)
 
         cancel = QPushButton("取消", self)
-        cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        control_height = recommended_control_height(cancel.font(), extra=12, minimum=34)
+        apply_button_style(cancel, ButtonStyles.TOOLBAR, height=control_height)
         cancel.clicked.connect(self.reject)
         buttons.addWidget(cancel)
 
         ok = QPushButton("确定", self)
-        ok.setCursor(Qt.CursorShape.PointingHandCursor)
         ok.setDefault(True)
+        apply_button_style(ok, ButtonStyles.PRIMARY, height=control_height)
         ok.clicked.connect(self.accept)
         buttons.addWidget(ok)
 
@@ -546,6 +551,112 @@ class QuietQuestionDialog(QDialog):
 def ask_quiet_confirmation(parent: Optional[QWidget], text: str, title: str = "确认") -> bool:
     dialog = QuietQuestionDialog(parent, text, title)
     return dialog.exec() == QDialog.DialogCode.Accepted
+
+
+def recommended_control_height(font: QFont, *, extra: int = 12, minimum: int = 32) -> int:
+    """Return a DPI-aware button height based on the supplied font metrics."""
+
+    metrics = QFontMetrics(font)
+    return max(minimum, metrics.height() + extra)
+
+
+class ButtonStyles:
+    """Centralised QPushButton样式，避免各窗口重复定义造成视觉不一致。"""
+
+    TOOLBAR = (
+        "QPushButton {\n"
+        "    padding: 4px 14px;\n"
+        "    border-radius: 12px;\n"
+        "    border: 1px solid #c4c8d0;\n"
+        "    background-color: #ffffff;\n"
+        "    color: #202124;\n"
+        "}\n"
+        "QPushButton:disabled {\n"
+        "    color: rgba(32, 33, 36, 0.45);\n"
+        "    background-color: #f3f5f9;\n"
+        "    border-color: #d9dde3;\n"
+        "}\n"
+        "QPushButton:hover {\n"
+        "    border-color: #1a73e8;\n"
+        "    background-color: #eaf2ff;\n"
+        "}\n"
+        "QPushButton:pressed {\n"
+        "    background-color: #d7e7ff;\n"
+        "}\n"
+        "QPushButton:checked {\n"
+        "    background-color: #1a73e8;\n"
+        "    border-color: #1a73e8;\n"
+        "    color: #ffffff;\n"
+        "}\n"
+    )
+
+    GRID = (
+        "QPushButton {\n"
+        "    padding: 6px 14px;\n"
+        "    border-radius: 10px;\n"
+        "    border: 1px solid #c4c8d0;\n"
+        "    background-color: #ffffff;\n"
+        "    color: #202124;\n"
+        "}\n"
+        "QPushButton:hover {\n"
+        "    border-color: #1a73e8;\n"
+        "    background-color: #eaf2ff;\n"
+        "}\n"
+        "QPushButton:pressed {\n"
+        "    background-color: #d7e7ff;\n"
+        "}\n"
+    )
+
+    PRIMARY = (
+        "QPushButton {\n"
+        "    padding: 6px 22px;\n"
+        "    border-radius: 20px;\n"
+        "    background-color: #1a73e8;\n"
+        "    color: #ffffff;\n"
+        "    border: 1px solid #1a73e8;\n"
+        "}\n"
+        "QPushButton:hover {\n"
+        "    background-color: #185abc;\n"
+        "    border-color: #185abc;\n"
+        "}\n"
+        "QPushButton:pressed {\n"
+        "    background-color: #174ea6;\n"
+        "}\n"
+        "QPushButton:disabled {\n"
+        "    background-color: #aac6ff;\n"
+        "    border-color: #aac6ff;\n"
+        "    color: rgba(255, 255, 255, 0.8);\n"
+        "}\n"
+    )
+
+    ORDER_TOGGLE = (
+        "QPushButton {\n"
+        "    padding: 4px 18px;\n"
+        "    border-radius: 22px;\n"
+        "    border: 1px solid rgba(16, 61, 115, 0.28);\n"
+        "    background-color: rgba(255, 255, 255, 0.96);\n"
+        "    color: #0b3d91;\n"
+        "}\n"
+        "QPushButton:hover {\n"
+        "    border-color: #1a73e8;\n"
+        "    background-color: rgba(26, 115, 232, 0.16);\n"
+        "}\n"
+        "QPushButton:checked {\n"
+        "    background-color: #1a73e8;\n"
+        "    border-color: #1a73e8;\n"
+        "    color: #ffffff;\n"
+        "}\n"
+    )
+
+
+def apply_button_style(button: QPushButton, style: str, *, height: Optional[int] = None) -> None:
+    """Apply a reusable QPushButton stylesheet and pointer cursor."""
+
+    button.setCursor(Qt.CursorShape.PointingHandCursor)
+    if height is not None:
+        button.setMinimumHeight(height)
+        button.setMaximumHeight(height)
+    button.setStyleSheet(style)
 
 
 # ---------- 配置 ----------
@@ -809,6 +920,17 @@ class PenSettingsDialog(QDialog):
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
+        for standard, style in (
+            (QDialogButtonBox.StandardButton.Ok, ButtonStyles.PRIMARY),
+            (QDialogButtonBox.StandardButton.Cancel, ButtonStyles.TOOLBAR),
+        ):
+            button = buttons.button(standard)
+            if button is not None:
+                apply_button_style(
+                    button,
+                    style,
+                    height=recommended_control_height(button.font(), extra=10, minimum=32),
+                )
         layout.addWidget(buttons)
 
         self.setFixedSize(self.sizeHint())
@@ -841,8 +963,12 @@ class ShapeSettingsDialog(QDialog):
 
         for index, (shape_key, name) in enumerate(self.SHAPES.items()):
             button = QPushButton(name)
-            button.setCursor(Qt.CursorShape.PointingHandCursor)
-            button.setFixedWidth(68)
+            button.setMinimumWidth(68)
+            apply_button_style(
+                button,
+                ButtonStyles.TOOLBAR,
+                height=recommended_control_height(button.font(), extra=10, minimum=32),
+            )
             button.clicked.connect(lambda _checked, key=shape_key: self._select_shape(key))
             layout.addWidget(button, index // 2, index % 2)
 
@@ -1881,7 +2007,19 @@ class CountdownSettingsDialog(QDialog):
         sl.addWidget(self.seconds_spin); layout.addLayout(sl); layout.addWidget(second_slider)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(self._accept); buttons.rejected.connect(self.reject); layout.addWidget(buttons)
+        buttons.accepted.connect(self._accept); buttons.rejected.connect(self.reject)
+        for standard, style in (
+            (QDialogButtonBox.StandardButton.Ok, ButtonStyles.PRIMARY),
+            (QDialogButtonBox.StandardButton.Cancel, ButtonStyles.TOOLBAR),
+        ):
+            button = buttons.button(standard)
+            if button is not None:
+                apply_button_style(
+                    button,
+                    style,
+                    height=recommended_control_height(button.font(), extra=12, minimum=34),
+                )
+        layout.addWidget(buttons)
         self.setFixedSize(self.sizeHint())
 
     def _accept(self) -> None:
@@ -1933,7 +2071,7 @@ class StudentListDialog(QDialog):
         metrics = QFontMetrics(button_font)
         max_text = max((metrics.horizontalAdvance(f"{sid} {name}") for sid, name, _ in students), default=120)
         min_button_width = max(120, max_text + 24)
-        button_height = max(36, metrics.height() + 14)
+        button_height = recommended_control_height(button_font, extra=16, minimum=38)
 
         screen = QApplication.primaryScreen()
         available_width = screen.availableGeometry().width() if screen else 1280
@@ -1956,25 +2094,9 @@ class StudentListDialog(QDialog):
             column = position % 10
             button = QPushButton(f"{sid} {name}")
             button.setFont(button_font)
-            button.setCursor(Qt.CursorShape.PointingHandCursor)
             button.setFixedSize(button_size)
             button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-            button.setStyleSheet(
-                "QPushButton {"
-                "    padding: 4px 12px;"
-                "    border-radius: 10px;"
-                "    border: 1px solid #c3c7cf;"
-                "    background-color: #ffffff;"
-                "    color: #1a1c1f;"
-                "}"
-                "QPushButton:hover {"
-                "    border-color: #1a73e8;"
-                "    background-color: #eaf2ff;"
-                "}"
-                "QPushButton:pressed {"
-                "    background-color: #d7e7ff;"
-                "}"
-            )
+            apply_button_style(button, ButtonStyles.GRID, height=button_height)
             button.clicked.connect(lambda _checked=False, value=data_index: self._select_student(value))
             grid.addWidget(button, row, column, Qt.AlignmentFlag.AlignCenter)
 
@@ -1982,6 +2104,14 @@ class StudentListDialog(QDialog):
 
         box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=self)
         box.rejected.connect(self.reject)
+        close_button = box.button(QDialogButtonBox.StandardButton.Close)
+        if close_button is not None:
+            close_button.setText("关闭")
+            apply_button_style(
+                close_button,
+                ButtonStyles.PRIMARY,
+                height=recommended_control_height(close_button.font(), extra=12, minimum=36),
+            )
         layout.addWidget(box)
 
         if screen is not None:
@@ -2071,10 +2201,11 @@ class ScoreboardDialog(QDialog):
         for key, text in ((self.ORDER_RANK, "按排名"), (self.ORDER_ID, "按学号")):
             button = QPushButton(text)
             button.setCheckable(True)
-            button.setCursor(Qt.CursorShape.PointingHandCursor)
-            button.setProperty("class", "orderButton")
             button.setFont(button_font)
-            button.setFixedSize(140, 44)
+            height = recommended_control_height(button_font, extra=16, minimum=44)
+            apply_button_style(button, ButtonStyles.ORDER_TOGGLE, height=height)
+            button.setMinimumWidth(140)
+            button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             self.order_button_group.addButton(button)
             button.clicked.connect(lambda _checked=False, value=key: self._on_order_button_clicked(value))
             order_layout.addWidget(button, 0, Qt.AlignmentFlag.AlignLeft)
@@ -2096,24 +2227,12 @@ class ScoreboardDialog(QDialog):
         close_button = box.button(QDialogButtonBox.StandardButton.Close)
         if close_button is not None:
             close_button.setText("关闭")
-            close_button.setMinimumHeight(42)
-            close_button.setCursor(Qt.CursorShape.PointingHandCursor)
             close_button.setFont(QFont(calligraphy_font, 22, QFont.Weight.Bold))
-        box.setStyleSheet(
-            "QDialogButtonBox QPushButton {"
-            "    padding: 6px 24px;"
-            "    border-radius: 22px;"
-            "    border: 1px solid #1a73e8;"
-            "    background-color: #1a73e8;"
-            "    color: #ffffff;"
-            "}"
-            "QDialogButtonBox QPushButton:hover {"
-            "    background-color: #185abc;"
-            "}"
-            "QDialogButtonBox QPushButton:pressed {"
-            "    background-color: #174ea6;"
-            "}"
-        )
+            apply_button_style(
+                close_button,
+                ButtonStyles.PRIMARY,
+                height=recommended_control_height(close_button.font(), extra=18, minimum=46),
+            )
         box.rejected.connect(self.reject)
         layout.addWidget(box)
 
@@ -2157,6 +2276,334 @@ class ScoreboardDialog(QDialog):
             "    color: #ffffff;"
             "}"
         )
+
+        screen = QApplication.primaryScreen()
+        self._available_geometry = screen.availableGeometry() if screen is not None else QRect(0, 0, 1920, 1080)
+
+        self._update_order_buttons()
+        self._populate_grid()
+
+        if screen is not None:
+            self.setGeometry(self._available_geometry)
+
+    def _update_order_buttons(self) -> None:
+        for key, button in self.order_buttons.items():
+            block = button.blockSignals(True)
+            button.setChecked(key == self._order)
+            button.blockSignals(block)
+
+    def _on_order_button_clicked(self, order: str) -> None:
+        if order not in {self.ORDER_RANK, self.ORDER_ID}:
+            self._update_order_buttons()
+            return
+        if order == self._order:
+            self._update_order_buttons()
+            return
+        self._order = order
+        if callable(self._order_changed_callback):
+            try:
+                self._order_changed_callback(order)
+            except Exception:
+                pass
+        self._update_order_buttons()
+        self._populate_grid()
+
+    def _clear_grid(self) -> None:
+        while self.grid_layout.count():
+            item = self.grid_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        for row in range(self._grid_row_count):
+            self.grid_layout.setRowStretch(row, 0)
+            self.grid_layout.setRowMinimumHeight(row, 0)
+        for column in range(self._grid_column_count):
+            self.grid_layout.setColumnStretch(column, 0)
+            self.grid_layout.setColumnMinimumWidth(column, 0)
+        self._grid_row_count = 0
+        self._grid_column_count = 0
+
+    def _collect_display_candidates(self) -> tuple[List[tuple[int, str, str]], List[str], List[str]]:
+        sorted_students = self._sort_students()
+        alternate_order = (
+            self.ORDER_ID if self._order == self.ORDER_RANK else self.ORDER_RANK
+        )
+        alternate_students = self._sort_students(alternate_order)
+
+        display_entries: List[tuple[int, str, str]] = []
+        display_candidates: List[str] = []
+        score_candidates: List[str] = []
+
+        for idx, (sid, name, score) in enumerate(sorted_students):
+            display_text = self._format_display_text(idx, sid, name)
+            score_text = self._format_score_text(score)
+            display_entries.append((idx, display_text, score_text))
+            display_candidates.append(display_text)
+            score_candidates.append(score_text)
+
+        for idx, (sid, name, score) in enumerate(alternate_students):
+            display_candidates.append(
+                self._format_display_text_for_order(
+                    alternate_order, idx, sid, name
+                )
+            )
+            score_candidates.append(self._format_score_text(score))
+
+        return display_entries, display_candidates, score_candidates
+
+    def _compute_card_metrics(self) -> Optional[_CardMetrics]:
+        count = len(self.students)
+        if count == 0:
+            return None
+
+        available = self._available_geometry
+        key = (count, available.width(), available.height())
+        if self._card_metrics is not None and self._card_metrics_key == key:
+            return self._card_metrics
+
+        columns = 10
+        rows = max(1, math.ceil(count / columns))
+
+        usable_width = max(available.width() - 160, 640)
+        usable_height = max(available.height() - 240, 520)
+
+        margins = self.grid_layout.contentsMargins()
+        horizontal_spacing = max(14, int(usable_width * 0.01))
+        vertical_spacing = max(18, int(usable_height * 0.035 / rows))
+
+        spacing_total_x = horizontal_spacing * max(0, columns - 1)
+        spacing_total_y = vertical_spacing * max(0, rows - 1)
+
+        available_width_for_cards = (
+            usable_width - margins.left() - margins.right() - spacing_total_x
+        )
+        available_height_for_cards = (
+            usable_height - margins.top() - margins.bottom() - spacing_total_y
+        )
+
+        per_card_width = max(1.0, available_width_for_cards / columns)
+        per_card_height = max(1.0, available_height_for_cards / rows)
+
+        card_width = int(math.floor(per_card_width))
+        card_height = int(math.floor(per_card_height))
+
+        if per_card_width >= 120:
+            card_width = max(card_width, 120)
+        if per_card_height >= 180:
+            card_height = max(card_height, 180)
+
+        padding_h = max(12, int(card_width * 0.08))
+        padding_v = max(14, int(card_height * 0.1))
+        inner_spacing = max(6, int(card_height * 0.045))
+
+        display_entries, display_candidates, score_candidates = self._collect_display_candidates()
+
+        if not display_candidates:
+            return None
+
+        calligraphy_font = self._calligraphy_font or QApplication.font().family()
+        if not calligraphy_font:
+            calligraphy_font = QFont().family()
+
+        try:
+            probe_font = QFont(calligraphy_font, 64, QFont.Weight.Bold)
+            metrics = QFontMetrics(probe_font)
+        except Exception:
+            probe_font = QFont()
+            metrics = QFontMetrics(probe_font)
+
+        widest_display = max(
+            display_candidates,
+            key=lambda text: metrics.tightBoundingRect(text).width(),
+        )
+        widest_score = max(
+            score_candidates,
+            key=lambda text: metrics.tightBoundingRect(text).width(),
+        )
+
+        usable_name_width = max(60, card_width - 2 * padding_h)
+        content_height = max(80, card_height - 2 * padding_v - inner_spacing)
+        name_height = int(content_height * 0.58)
+        score_height = max(32, content_height - name_height)
+
+        font_upper_bound = int(min(card_width * 0.28, card_height * 0.36))
+        font_upper_bound = max(20, font_upper_bound)
+        fit_minimum = 14
+
+        name_fit = self._fit_font_size(
+            widest_display,
+            calligraphy_font,
+            QFont.Weight.Bold,
+            usable_name_width,
+            name_height,
+            fit_minimum,
+            font_upper_bound,
+        )
+        score_fit = self._fit_font_size(
+            widest_score,
+            calligraphy_font,
+            QFont.Weight.Bold,
+            usable_name_width,
+            score_height,
+            fit_minimum,
+            font_upper_bound,
+        )
+
+        final_font_size = max(fit_minimum, min(name_fit, score_fit, font_upper_bound))
+
+        self._card_metrics = ScoreboardDialog._CardMetrics(
+            count=count,
+            columns=columns,
+            rows=rows,
+            card_width=card_width,
+            card_height=card_height,
+            padding_h=padding_h,
+            padding_v=padding_v,
+            inner_spacing=inner_spacing,
+            font_size=final_font_size,
+            horizontal_spacing=horizontal_spacing,
+            vertical_spacing=vertical_spacing,
+        )
+        self._card_metrics_key = key
+        return self._card_metrics
+
+    def _ensure_metrics(self) -> Optional[_CardMetrics]:
+        metrics = self._compute_card_metrics()
+        if metrics is not None:
+            return metrics
+        self._card_metrics = None
+        self._card_metrics_key = None
+        return None
+
+    def _sort_students(self, order: Optional[str] = None) -> List[tuple[str, str, int]]:
+        data = list(self.students)
+        current_order = self._order if order is None else order
+        if current_order == self.ORDER_ID:
+            def _id_key(item: tuple[str, str, int]) -> tuple[int, str, str]:
+                sid_text = str(item[0]).strip()
+                try:
+                    sid_value = int(sid_text)
+                except (TypeError, ValueError):
+                    sid_value = sys.maxsize
+                return (sid_value, sid_text, item[1])
+
+            data.sort(key=_id_key)
+        else:
+            def _rank_key(item: tuple[str, str, int]) -> tuple[int, int, str]:
+                sid_text = str(item[0]).strip()
+                try:
+                    sid_value = int(sid_text)
+                except (TypeError, ValueError):
+                    sid_value = sys.maxsize
+                return (-item[2], sid_value, item[1])
+
+            data.sort(key=_rank_key)
+        return data
+
+    def _create_card(
+        self,
+        display_text: str,
+        score_text: str,
+        card_width: int,
+        card_height: int,
+        font_size: int,
+        padding_h: int,
+        padding_v: int,
+        inner_spacing: int,
+    ) -> QWidget:
+        calligraphy_font = self._calligraphy_font
+        wrapper = QWidget()
+        wrapper.setProperty("class", "scoreboardWrapper")
+        wrapper.setFixedSize(card_width, card_height)
+        wrapper.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(padding_h, padding_v, padding_h, padding_v)
+        layout.setSpacing(inner_spacing)
+
+        name_label = QLabel(display_text or "未命名")
+        name_label.setProperty("class", "scoreboardName")
+        name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        name_label.setWordWrap(False)
+        name_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        name_label.setFont(QFont(calligraphy_font, font_size, QFont.Weight.Bold))
+        name_label.setStyleSheet("margin: 0px; padding: 0px;")
+        layout.addWidget(name_label)
+
+        score_label = QLabel(score_text)
+        score_label.setProperty("class", "scoreboardScore")
+        score_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        score_label.setWordWrap(False)
+        score_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        score_label.setFont(QFont(calligraphy_font, font_size, QFont.Weight.Bold))
+        score_label.setStyleSheet(f"margin-top: {max(6, inner_spacing // 2)}px;")
+        layout.addWidget(score_label)
+
+        layout.addStretch(1)
+        return wrapper
+
+    def _format_display_text(self, index: int, sid: str, name: str) -> str:
+        return self._format_display_text_for_order(self._order, index, sid, name)
+
+    def _format_display_text_for_order(
+        self, order: str, index: int, sid: str, name: str
+    ) -> str:
+        clean_name = (name or "").strip() or "未命名"
+        if order == self.ORDER_ID:
+            sid_display = str(sid).strip() or "—"
+            return f"{sid_display}.{clean_name}"
+        return f"{index + 1}.{clean_name}"
+
+    @staticmethod
+    def _format_score_text(score: int | float | str) -> str:
+        text = "—"
+        try:
+            value = float(score)
+        except (TypeError, ValueError):
+            score_str = str(score).strip()
+            if score_str and score_str.lower() != "none":
+                text = score_str
+        else:
+            if math.isfinite(value):
+                if abs(value - int(value)) < 1e-6:
+                    text = str(int(round(value)))
+                else:
+                    text = f"{value:.2f}".rstrip("0").rstrip(".")
+        return f"{text} 分"
+
+    @staticmethod
+    def _fit_font_size(
+        text: str,
+        family: str,
+        weight: QFont.Weight,
+        max_width: int,
+        max_height: int,
+        minimum: int,
+        maximum: int,
+    ) -> int:
+        if not text:
+            return max(6, min(minimum, maximum))
+        if max_width <= 0 or max_height <= 0:
+            return max(6, min(minimum, maximum))
+        lower = max(6, min(minimum, maximum))
+        upper = max(6, max(minimum, maximum))
+        for size in range(upper, lower - 1, -1):
+            font = QFont(family, size, weight)
+            metrics = QFontMetrics(font)
+            rect = metrics.tightBoundingRect(text)
+            if rect.width() <= max_width and rect.height() <= max_height:
+                return size
+        return lower
+
+    def _populate_grid(self) -> None:
+        self._clear_grid()
+        count = len(self.students)
+        layout = self.grid_layout
+        calligraphy_font = self._calligraphy_font
 
         screen = QApplication.primaryScreen()
         self._available_geometry = screen.availableGeometry() if screen is not None else QRect(0, 0, 1920, 1080)
@@ -2736,8 +3183,7 @@ class RollCallTimerWindow(QWidget):
         self.title_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         top.addWidget(self.title_label, 0, Qt.AlignmentFlag.AlignLeft)
 
-        self.mode_button = QPushButton("切换到计时"); self.mode_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.mode_button.clicked.connect(self.toggle_mode); self.mode_button.setFixedHeight(28)
+        self.mode_button = QPushButton("切换到计时")
         mode_font = QFont("Microsoft YaHei UI", 9, QFont.Weight.Medium)
         self.mode_button.setFont(mode_font)
         fm = self.mode_button.fontMetrics()
@@ -2745,38 +3191,18 @@ class RollCallTimerWindow(QWidget):
         target_width = fm.horizontalAdvance(max_text) + 24
         self.mode_button.setFixedWidth(target_width)  # 固定宽度，避免文本切换导致按钮位置跳动
         self.mode_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        control_height = recommended_control_height(mode_font, extra=12, minimum=34)
+        apply_button_style(self.mode_button, ButtonStyles.TOOLBAR, height=control_height)
+        self.mode_button.clicked.connect(self.toggle_mode)
         top.addWidget(self.mode_button, 0, Qt.AlignmentFlag.AlignLeft)
 
         compact_font = QFont("Microsoft YaHei UI", 9, QFont.Weight.Medium)
-        button_style = (
-            "QPushButton {"
-            "    padding: 2px 10px;"
-            "    min-height: 28px;"
-            "    border-radius: 11px;"
-            "    border: 1px solid #c3c7cf;"
-            "    background-color: #ffffff;"
-            "    color: #1a1c1f;"
-            "}"
-            "QPushButton:disabled {"
-            "    color: rgba(26, 28, 31, 0.45);"
-            "    background-color: #f3f5f9;"
-            "    border-color: #d9dde3;"
-            "}"
-            "QPushButton:hover {"
-            "    border-color: #1a73e8;"
-            "    background-color: #eaf2ff;"
-            "}"
-            "QPushButton:pressed {"
-            "    background-color: #d7e7ff;"
-            "}"
-        )
+        toolbar_height = recommended_control_height(compact_font, extra=12, minimum=34)
 
         def _setup_secondary_button(button: QPushButton) -> None:
-            button.setCursor(Qt.CursorShape.PointingHandCursor)
-            button.setFixedHeight(28)
+            apply_button_style(button, ButtonStyles.TOOLBAR, height=toolbar_height)
             button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             button.setFont(compact_font)
-            button.setStyleSheet(button_style)
 
         control_bar = QWidget()
         control_bar.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
@@ -2804,7 +3230,8 @@ class RollCallTimerWindow(QWidget):
         top.addStretch(1)
 
         self.menu_button = QToolButton(); self.menu_button.setText("..."); self.menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self.menu_button.setFixedSize(28, 28); self.menu_button.setStyleSheet("font-size: 18px; padding-bottom: 6px;")
+        self.menu_button.setFixedSize(toolbar_height, toolbar_height)
+        self.menu_button.setStyleSheet("font-size: 18px; padding-bottom: 6px;")
         self.main_menu = self._build_menu(); self.menu_button.setMenu(self.main_menu)
         top.addWidget(self.menu_button, 0, Qt.AlignmentFlag.AlignRight)
         toolbar_layout.addLayout(top)
@@ -2816,13 +3243,13 @@ class RollCallTimerWindow(QWidget):
         self.group_label = QLabel("分组")
         self.group_label.setFont(QFont("Microsoft YaHei UI", 9, QFont.Weight.Medium))
         self.group_label.setStyleSheet("color: #3c4043;")
-        self.group_label.setFixedHeight(28)
+        self.group_label.setFixedHeight(toolbar_height)
         self.group_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
         self.group_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         group_row.addWidget(self.group_label, 0, Qt.AlignmentFlag.AlignLeft)
 
         self.group_bar = QWidget()
-        self.group_bar.setFixedHeight(28)
+        self.group_bar.setFixedHeight(toolbar_height)
         self.group_bar.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.group_bar_layout = QHBoxLayout(self.group_bar)
         self.group_bar_layout.setContentsMargins(0, 0, 0, 0)
@@ -2877,10 +3304,11 @@ class RollCallTimerWindow(QWidget):
         self.timer_reset_button = QPushButton("重置"); self.timer_reset_button.clicked.connect(self.reset_timer)
         self.timer_set_button = QPushButton("设定"); self.timer_set_button.clicked.connect(self.set_countdown_time)
         for b in (self.timer_mode_button, self.timer_start_pause_button, self.timer_reset_button, self.timer_set_button):
-            b.setCursor(Qt.CursorShape.PointingHandCursor)
-            b.setFixedHeight(30)
+            b.setFont(compact_font)
+        timer_height = recommended_control_height(compact_font, extra=12, minimum=34)
+        for b in (self.timer_mode_button, self.timer_start_pause_button, self.timer_reset_button, self.timer_set_button):
+            apply_button_style(b, ButtonStyles.TOOLBAR, height=timer_height)
             b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            b.setStyleSheet(button_style)
             ctrl.addWidget(b)
         tl.addLayout(ctrl); self.stack.addWidget(self.timer_frame)
 
@@ -4146,35 +4574,12 @@ class RollCallTimerWindow(QWidget):
         if not self.groups:
             return
         button_font = QFont("Microsoft YaHei UI", 9, QFont.Weight.Medium)
+        button_height = recommended_control_height(button_font, extra=12, minimum=34)
         for group in self.groups:
             button = QPushButton(group)
             button.setCheckable(True)
-            button.setCursor(Qt.CursorShape.PointingHandCursor)
-            button.setFixedHeight(28)
             button.setFont(button_font)
-            button.setStyleSheet(
-                "QPushButton {"
-                "    padding: 4px 14px;"
-                "    min-height: 28px;"
-                "    border-radius: 14px;"
-                "    border: 1px solid #d0d7de;"
-                "    background-color: #ffffff;"
-                "    color: #1b1f24;"
-                "}"
-                "QPushButton:disabled {"
-                "    color: rgba(27, 31, 36, 0.45);"
-                "    background-color: #f3f5f9;"
-                "    border-color: #d9dde3;"
-                "}"
-                "QPushButton:hover {"
-                "    border-color: #1a73e8;"
-                "}"
-                "QPushButton:checked {"
-                "    background-color: #1a73e8;"
-                "    color: #ffffff;"
-                "    border-color: #1a73e8;"
-                "}"
-            )
+            apply_button_style(button, ButtonStyles.TOOLBAR, height=button_height)
             button.clicked.connect(lambda _checked=False, name=group: self.on_group_change(name))
             self.group_bar_layout.addWidget(button)
             self.group_button_group.addButton(button)
