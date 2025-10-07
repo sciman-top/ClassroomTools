@@ -560,6 +560,7 @@ class PasswordPromptDialog(QDialog):
         self.setModal(True)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        self._captured_text: str = ""
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 18, 24, 18)
@@ -602,12 +603,20 @@ class PasswordPromptDialog(QDialog):
     ) -> tuple[str, bool]:
         dialog = cls(parent, title, prompt)
         accepted = dialog.exec() == QDialog.DialogCode.Accepted
-        value = dialog.line_edit.text() if accepted else ""
+        value = dialog._captured_text if accepted else ""
         return value, accepted
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
         self.line_edit.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
+
+    def accept(self) -> None:  # type: ignore[override]
+        self._captured_text = self.line_edit.text()
+        super().accept()
+
+    def reject(self) -> None:  # type: ignore[override]
+        self._captured_text = ""
+        super().reject()
 
 
 def ask_quiet_confirmation(parent: Optional[QWidget], text: str, title: str = "确认") -> bool:
