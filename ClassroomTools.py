@@ -462,7 +462,7 @@ class QuietInfoPopup(QWidget):
         apply_button_style(
             self.ok_button,
             ButtonStyles.PRIMARY,
-            height=recommended_control_height(self.ok_button.font(), extra=12, minimum=34),
+            height=recommended_control_height(self.ok_button.font(), extra=14, minimum=36),
         )
         self.ok_button.clicked.connect(self.close)
         button_row.addWidget(self.ok_button)
@@ -529,7 +529,7 @@ class QuietQuestionDialog(QDialog):
         buttons.addStretch(1)
 
         cancel = QPushButton("取消", self)
-        control_height = recommended_control_height(cancel.font(), extra=12, minimum=34)
+        control_height = recommended_control_height(cancel.font(), extra=14, minimum=36)
         apply_button_style(cancel, ButtonStyles.TOOLBAR, height=control_height)
         cancel.clicked.connect(self.reject)
         buttons.addWidget(cancel)
@@ -557,7 +557,10 @@ def recommended_control_height(font: QFont, *, extra: int = 12, minimum: int = 3
     """Return a DPI-aware button height based on the supplied font metrics."""
 
     metrics = QFontMetrics(font)
-    return max(minimum, metrics.height() + extra)
+    text_height = metrics.boundingRect("Ag").height()
+    line_height = metrics.height()
+    base_height = max(text_height, line_height)
+    return max(minimum, int(math.ceil(base_height + extra)))
 
 
 class ButtonStyles:
@@ -565,7 +568,7 @@ class ButtonStyles:
 
     TOOLBAR = (
         "QPushButton {\n"
-        "    padding: 4px 14px;\n"
+        "    padding: 4px 12px;\n"
         "    border-radius: 12px;\n"
         "    border: 1px solid #c4c8d0;\n"
         "    background-color: #ffffff;\n"
@@ -592,7 +595,7 @@ class ButtonStyles:
 
     GRID = (
         "QPushButton {\n"
-        "    padding: 6px 14px;\n"
+        "    padding: 6px 12px;\n"
         "    border-radius: 10px;\n"
         "    border: 1px solid #c4c8d0;\n"
         "    background-color: #ffffff;\n"
@@ -609,7 +612,7 @@ class ButtonStyles:
 
     PRIMARY = (
         "QPushButton {\n"
-        "    padding: 6px 22px;\n"
+        "    padding: 6px 20px;\n"
         "    border-radius: 20px;\n"
         "    background-color: #1a73e8;\n"
         "    color: #ffffff;\n"
@@ -656,7 +659,27 @@ def apply_button_style(button: QPushButton, style: str, *, height: Optional[int]
     if height is not None:
         button.setMinimumHeight(height)
         button.setMaximumHeight(height)
+        button.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
     button.setStyleSheet(style)
+
+
+def style_dialog_buttons(
+    button_box: QDialogButtonBox,
+    styles: Mapping[QDialogButtonBox.StandardButton, str],
+    *,
+    extra_padding: int = 10,
+    minimum_height: int = 34,
+) -> None:
+    """Apply shared styling to all buttons contained in a QDialogButtonBox."""
+
+    for standard_button, style in styles.items():
+        button = button_box.button(standard_button)
+        if button is None:
+            continue
+        control_height = recommended_control_height(
+            button.font(), extra=extra_padding, minimum=minimum_height
+        )
+        apply_button_style(button, style, height=control_height)
 
 
 # ---------- 配置 ----------
@@ -920,17 +943,15 @@ class PenSettingsDialog(QDialog):
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
-        for standard, style in (
-            (QDialogButtonBox.StandardButton.Ok, ButtonStyles.PRIMARY),
-            (QDialogButtonBox.StandardButton.Cancel, ButtonStyles.TOOLBAR),
-        ):
-            button = buttons.button(standard)
-            if button is not None:
-                apply_button_style(
-                    button,
-                    style,
-                    height=recommended_control_height(button.font(), extra=10, minimum=32),
-                )
+        style_dialog_buttons(
+            buttons,
+            {
+                QDialogButtonBox.StandardButton.Ok: ButtonStyles.PRIMARY,
+                QDialogButtonBox.StandardButton.Cancel: ButtonStyles.TOOLBAR,
+            },
+            extra_padding=10,
+            minimum_height=32,
+        )
         layout.addWidget(buttons)
 
         self.setFixedSize(self.sizeHint())
@@ -2008,17 +2029,15 @@ class CountdownSettingsDialog(QDialog):
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self._accept); buttons.rejected.connect(self.reject)
-        for standard, style in (
-            (QDialogButtonBox.StandardButton.Ok, ButtonStyles.PRIMARY),
-            (QDialogButtonBox.StandardButton.Cancel, ButtonStyles.TOOLBAR),
-        ):
-            button = buttons.button(standard)
-            if button is not None:
-                apply_button_style(
-                    button,
-                    style,
-                    height=recommended_control_height(button.font(), extra=12, minimum=34),
-                )
+        style_dialog_buttons(
+            buttons,
+            {
+                QDialogButtonBox.StandardButton.Ok: ButtonStyles.PRIMARY,
+                QDialogButtonBox.StandardButton.Cancel: ButtonStyles.TOOLBAR,
+            },
+            extra_padding=12,
+            minimum_height=34,
+        )
         layout.addWidget(buttons)
         self.setFixedSize(self.sizeHint())
 
@@ -2110,7 +2129,7 @@ class StudentListDialog(QDialog):
             apply_button_style(
                 close_button,
                 ButtonStyles.PRIMARY,
-                height=recommended_control_height(close_button.font(), extra=12, minimum=36),
+                height=recommended_control_height(close_button.font(), extra=14, minimum=36),
             )
         layout.addWidget(box)
 
@@ -3188,27 +3207,27 @@ class RollCallTimerWindow(QWidget):
         self.mode_button.setFont(mode_font)
         fm = self.mode_button.fontMetrics()
         max_text = max(("切换到计时", "切换到点名"), key=lambda t: fm.horizontalAdvance(t))
-        target_width = fm.horizontalAdvance(max_text) + 24
-        self.mode_button.setFixedWidth(target_width)  # 固定宽度，避免文本切换导致按钮位置跳动
-        self.mode_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        control_height = recommended_control_height(mode_font, extra=12, minimum=34)
+        target_width = fm.horizontalAdvance(max_text) + 28
+        self.mode_button.setMinimumWidth(target_width)
+        self.mode_button.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+        control_height = recommended_control_height(mode_font, extra=14, minimum=36)
         apply_button_style(self.mode_button, ButtonStyles.TOOLBAR, height=control_height)
         self.mode_button.clicked.connect(self.toggle_mode)
         top.addWidget(self.mode_button, 0, Qt.AlignmentFlag.AlignLeft)
 
         compact_font = QFont("Microsoft YaHei UI", 9, QFont.Weight.Medium)
-        toolbar_height = recommended_control_height(compact_font, extra=12, minimum=34)
+        toolbar_height = recommended_control_height(compact_font, extra=14, minimum=36)
 
         def _setup_secondary_button(button: QPushButton) -> None:
             apply_button_style(button, ButtonStyles.TOOLBAR, height=toolbar_height)
-            button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            button.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
             button.setFont(compact_font)
 
         control_bar = QWidget()
-        control_bar.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        control_bar.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         control_layout = QHBoxLayout(control_bar)
         control_layout.setContentsMargins(0, 0, 0, 0)
-        control_layout.setSpacing(4)
+        control_layout.setSpacing(2)
 
         self.list_button = QPushButton("名单"); _setup_secondary_button(self.list_button)
         self.list_button.clicked.connect(self.show_student_selector)
@@ -3238,7 +3257,7 @@ class RollCallTimerWindow(QWidget):
 
         group_row = QHBoxLayout()
         group_row.setContentsMargins(0, 0, 0, 0)
-        group_row.setSpacing(4)
+        group_row.setSpacing(2)
 
         self.group_label = QLabel("分组")
         self.group_label.setFont(QFont("Microsoft YaHei UI", 9, QFont.Weight.Medium))
@@ -3253,7 +3272,7 @@ class RollCallTimerWindow(QWidget):
         self.group_bar.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.group_bar_layout = QHBoxLayout(self.group_bar)
         self.group_bar_layout.setContentsMargins(0, 0, 0, 0)
-        self.group_bar_layout.setSpacing(2)
+        self.group_bar_layout.setSpacing(1)
         self.group_button_group = QButtonGroup(self)
         self.group_button_group.setExclusive(True)
         self.group_buttons: Dict[str, QPushButton] = {}
@@ -3298,14 +3317,14 @@ class RollCallTimerWindow(QWidget):
         self.time_display_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         tl.addWidget(self.time_display_label, 1)
 
-        ctrl = QHBoxLayout(); ctrl.setSpacing(6)
+        ctrl = QHBoxLayout(); ctrl.setSpacing(4)
         self.timer_mode_button = QPushButton("倒计时"); self.timer_mode_button.clicked.connect(self.toggle_timer_mode)
         self.timer_start_pause_button = QPushButton("开始"); self.timer_start_pause_button.clicked.connect(self.start_pause_timer)
         self.timer_reset_button = QPushButton("重置"); self.timer_reset_button.clicked.connect(self.reset_timer)
         self.timer_set_button = QPushButton("设定"); self.timer_set_button.clicked.connect(self.set_countdown_time)
         for b in (self.timer_mode_button, self.timer_start_pause_button, self.timer_reset_button, self.timer_set_button):
             b.setFont(compact_font)
-        timer_height = recommended_control_height(compact_font, extra=12, minimum=34)
+        timer_height = recommended_control_height(compact_font, extra=14, minimum=36)
         for b in (self.timer_mode_button, self.timer_start_pause_button, self.timer_reset_button, self.timer_set_button):
             apply_button_style(b, ButtonStyles.TOOLBAR, height=timer_height)
             b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -4574,7 +4593,7 @@ class RollCallTimerWindow(QWidget):
         if not self.groups:
             return
         button_font = QFont("Microsoft YaHei UI", 9, QFont.Weight.Medium)
-        button_height = recommended_control_height(button_font, extra=12, minimum=34)
+        button_height = recommended_control_height(button_font, extra=14, minimum=36)
         for group in self.groups:
             button = QPushButton(group)
             button.setCheckable(True)
