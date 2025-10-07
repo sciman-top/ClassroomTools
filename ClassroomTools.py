@@ -24,7 +24,18 @@ import hmac
 from collections import deque
 from queue import Empty, Queue
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Mapping, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Set,
+    Tuple,
+    Union,
+)
 
 from PyQt6.QtCore import (
     QByteArray,
@@ -192,6 +203,11 @@ except ImportError:
     sd = None
     np = None
     SOUNDDEVICE_AVAILABLE = False
+
+if TYPE_CHECKING:
+    from pandas import DataFrame as PandasDataFrame
+else:  # pragma: no cover - runtime fallback for typing
+    PandasDataFrame = Any  # type: ignore[misc, assignment]
 
 if sys.platform == "win32":
     try:
@@ -397,6 +413,81 @@ def _count_windows_voice_tokens() -> tuple[int, Optional[str]]:
     return len(token_names), None
 
 
+def _find_powershell_executable() -> Optional[str]:
+    if sys.platform != "win32":
+        return None
+    path = shutil.which("pwsh") or shutil.which("powershell")
+    if path:
+        return path
+    system_root = os.environ.get("SystemRoot") or os.environ.get("WINDIR")
+    candidate_paths: List[str] = []
+    if system_root:
+        candidate_paths.extend(
+            [
+                os.path.join(system_root, "System32", "WindowsPowerShell", "v1.0", "pwsh.exe"),
+                os.path.join(system_root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+                os.path.join(system_root, "SysWOW64", "WindowsPowerShell", "v1.0", "powershell.exe"),
+            ]
+        )
+    candidate_paths.extend(
+        [
+            os.path.join("C:\\Program Files\\PowerShell\\7", "pwsh.exe"),
+            os.path.join("C:\\Program Files\\PowerShell\\6", "pwsh.exe"),
+        ]
+    )
+    for candidate in candidate_paths:
+        if candidate and os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def _probe_powershell_speech_runtime(executable: Optional[str]) -> tuple[bool, Optional[str]]:
+    if sys.platform != "win32" or not executable:
+        return True, None
+    script = (
+        "try { "
+        "Add-Type -AssemblyName System.Speech; "
+        "[void][System.Speech.Synthesis.SpeechSynthesizer]::new().GetInstalledVoices().Count; "
+        "\"OK\" } catch { $_.Exception.Message }"
+    )
+    startupinfo = None
+    if os.name == "nt":
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    try:
+        result = subprocess.run(
+            [executable, "-NoLogo", "-NonInteractive", "-NoProfile", "-Command", script],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            startupinfo=startupinfo,
+        )
+    except Exception as exc:
+        return False, str(exc)
+    output = (result.stdout or "").strip()
+    if result.returncode != 0:
+        message = output or (result.stderr or "").strip()
+        return False, message or f"PowerShell exited with code {result.returncode}"
+    if "OK" in output:
+        return True, None
+    if output:
+        return False, output
+    return True, None
+
+
+def _detect_pyttsx3_driver_issue() -> Optional[str]:
+    if pyttsx3 is None or sys.platform != "win32":
+        return None
+    try:
+        drivers_spec = importlib.util.find_spec("pyttsx3.drivers")
+        sapi_spec = importlib.util.find_spec("pyttsx3.drivers.sapi5")
+    except Exception:
+        return None
+    if drivers_spec is None or sapi_spec is None:
+        return "pyttsx3 �Ĳ��� sapi5 ����û���ý���ɵط���ϵͳ�޷�ʹ�� pyttsx3 ��������"
+    return None
+
+
 def detect_speech_environment_issues(
     force_refresh: bool = False,
     cache_seconds: float = 30.0,
@@ -412,9 +503,9 @@ def detect_speech_environment_issues(
     if sys.platform == "win32":
         missing: List[str] = []
         module_hints = (
-            ("pyttsx3", "请安装 pyttsx3（pip install pyttsx3）后重新启动程序。"),
-            ("comtypes.client", "请安装 comtypes（pip install comtypes）后重新启动程序。"),
-            ("win32com.client", "请安装 pywin32（pip install pywin32）后重新启动程序。"),
+            ("pyttsx3", "请安装 pyttsx3（命令：pip install pyttsx3）"),
+            ("comtypes.client", "请安装 comtypes（命令：pip install comtypes）"),
+            ("win32com.client", "请安装 pywin32（命令：pip install pywin32）"),
         )
         for module_name, hint in module_hints:
             if not _try_import_module(module_name):
@@ -424,25 +515,36 @@ def detect_speech_environment_issues(
                 if hint not in suggestions:
                     suggestions.append(hint)
         if missing:
-            issues.append(f"缺少语音依赖：{'、'.join(sorted(missing))}")
+            issues.append(f"缺少依赖包{'、'.join(sorted(missing))}")
         token_count, token_error = _count_windows_voice_tokens()
         if token_error:
-            issues.append(f"无法读取语音包：{token_error}")
+            issues.append(f"无法读取语音库信息：{token_error}")
         elif token_count == 0:
             issues.append("系统未检测到任何语音包")
-            suggestions.append("请在 Windows 的“设置 -> 时间和语言 -> 语音”中下载并启用语音包。")
-        powershell = shutil.which("pwsh") or shutil.which("powershell")
-        if not powershell:
-            issues.append("未检测到 PowerShell，可用的语音播报方式受限")
-            suggestions.append("请确认系统已安装 PowerShell 5+ 或 PowerShell 7，并在环境变量中可用。")
+            suggestions.append("请在 Windows 设置 -> 时间和语言 -> 语音 中下载并启用语音包")
+        driver_issue = _detect_pyttsx3_driver_issue()
+        if driver_issue:
+            issues.append(driver_issue)
+            suggestions.append("请确认 pyttsx3 的 SAPI5 驱动已随程序打包，或在命令提示窗运行：python -m pip install pyttsx3 comtypes pywin32")
+        powershell_path = _find_powershell_executable()
+        if not powershell_path:
+            issues.append("未检测到 PowerShell，可用语音回退不可用")
+            suggestions.append("请确保系统安装了 PowerShell 5+ 或 PowerShell 7，并能在 PATH 中访问")
+        else:
+            ps_ok, ps_reason = _probe_powershell_speech_runtime(powershell_path)
+            if not ps_ok:
+                detail = (ps_reason or "").strip()
+                if detail:
+                    issues.append(f"PowerShell 初始化语音失败：{detail}")
+                else:
+                    issues.append("PowerShell 初始化语音失败")
+                suggestions.append("请在 PowerShell 中执行 Add-Type -AssemblyName System.Speech 检查错误，必要时启用 RemoteSigned 策略并安装最新 .NET 组件")
         if getattr(sys, "frozen", False):
-            suggestions.append(
-                "若为打包版本，请在打包配置中包含 pyttsx3、comtypes、pywin32 等语音依赖或在目标电脑上单独安装它们。"
-            )
-        suggestions.append("如已安装语音组件，请尝试以管理员权限首次运行程序以初始化语音服务。")
+            suggestions.append("如使用打包版，请确保 pyttsx3、comtypes、pywin32 被包含或在目标机器单独安装")
+        suggestions.append("建议在命令提示窗执行：python -m pip install pyttsx3 comtypes pywin32（需管理员权限）")
+        suggestions.append("若依旧失败，可尝试以管理员身份首次启动并重启系统")
     else:
-        suggestions.append("请确保系统已配置可用的语音引擎后重新启动程序。")
-
+        suggestions.append("请确认系统已安装可用的语音引擎（如 espeak 或系统自带语音）。")
     reason = "；".join(issues)
     deduped = dedupe_strings(suggestions)
     _SPEECH_ENV_CACHE = (now, reason, list(deduped))
@@ -1467,10 +1569,30 @@ class OverlayWindow(QWidget):
         self._last_shape_type: Optional[str] = None
         self._restoring_tool = False
         self._eraser_last_point: Optional[QPoint] = None
-        self._stroke_points: deque[QPointF] = deque(maxlen=6)
-        self._stroke_timestamps: deque[float] = deque(maxlen=6)
+        self._stroke_points: deque[QPointF] = deque(maxlen=8)
+        self._stroke_timestamps: deque[float] = deque(maxlen=8)
         self._stroke_speed: float = 0.0
         self._stroke_last_midpoint: Optional[QPointF] = None
+        self._stroke_filter_point: Optional[QPointF] = None
+        self._brush_painter: Optional[QPainter] = None
+        self._eraser_painter: Optional[QPainter] = None
+        base_width = float(max(1, self.pen_size))
+        self._brush_pen = QPen(
+            self.pen_color,
+            base_width,
+            Qt.PenStyle.SolidLine,
+            Qt.PenCapStyle.RoundCap,
+            Qt.PenJoinStyle.RoundJoin,
+        )
+        fade_color = QColor(self.pen_color)
+        fade_color.setAlpha(160)
+        self._brush_shadow_pen = QPen(
+            fade_color,
+            base_width * 1.2,
+            Qt.PenStyle.SolidLine,
+            Qt.PenCapStyle.RoundCap,
+            Qt.PenJoinStyle.RoundJoin,
+        )
         self._last_preview_bounds: Optional[QRect] = None
         self.whiteboard_active = False
         self.whiteboard_color = QColor(0, 0, 0, 0); self.last_board_color = QColor("#ffffff")
@@ -1502,6 +1624,48 @@ class OverlayWindow(QWidget):
         self.canvas = QPixmap(self.size()); self.canvas.fill(Qt.GlobalColor.transparent)
         self.temp_canvas = QPixmap(self.size()); self.temp_canvas.fill(Qt.GlobalColor.transparent)
 
+    # ---- ͼ��ͼ����� ----
+    def _ensure_brush_painter(self) -> QPainter:
+        painter = self._brush_painter
+        if painter is None:
+            painter = QPainter(self.canvas)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            self._brush_painter = painter
+        return painter
+
+    def _release_brush_painter(self) -> None:
+        if self._brush_painter is not None:
+            self._brush_painter.end()
+            self._brush_painter = None
+
+    def _ensure_eraser_painter(self) -> QPainter:
+        painter = self._eraser_painter
+        if painter is None:
+            painter = QPainter(self.canvas)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+            self._eraser_painter = painter
+        return painter
+
+    def _release_eraser_painter(self) -> None:
+        if self._eraser_painter is not None:
+            self._eraser_painter.end()
+            self._eraser_painter = None
+
+    def _release_canvas_painters(self) -> None:
+        self._release_brush_painter()
+        self._release_eraser_painter()
+
+    def _update_brush_pen_appearance(self, width: float, fade_alpha: int) -> None:
+        width = max(0.6, float(width))
+        fade_alpha = max(0, min(255, int(fade_alpha)))
+        self._brush_pen.setColor(self.pen_color)
+        self._brush_pen.setWidthF(width)
+        fade_color = QColor(self.pen_color)
+        fade_color.setAlpha(fade_alpha)
+        self._brush_shadow_pen.setColor(fade_color)
+        self._brush_shadow_pen.setWidthF(width * 1.25)
+
     def show_overlay(self) -> None:
         self.show(); self.toolbar.show(); self.raise_toolbar()
         self.set_mode(self.mode, self.current_shape)
@@ -1515,6 +1679,7 @@ class OverlayWindow(QWidget):
         d = PenSettingsDialog(self.toolbar, self.pen_size, self.pen_color.name())
         if d.exec():
             self.pen_size, self.pen_color = d.get_settings()
+            self._update_brush_pen_appearance(max(1.0, float(self.pen_size)), 180)
             self.update_cursor()
         self.set_mode(pm, ps)
         self.raise_toolbar()
@@ -1542,6 +1707,8 @@ class OverlayWindow(QWidget):
 
     def set_mode(self, mode: str, shape_type: Optional[str] = None, *, initial: bool = False) -> None:
         prev_mode = getattr(self, "mode", None)
+        if prev_mode != mode:
+            self._release_canvas_painters()
         self.mode = mode
         if shape_type is not None or mode != "shape":
             self.current_shape = shape_type
@@ -1688,6 +1855,7 @@ class OverlayWindow(QWidget):
         """清除整块画布，同时根据需要恢复画笔模式。"""
         restore_needed = self.mode not in {"brush", "shape"}
         self._push_history()
+        self._release_canvas_painters()
         self.canvas.fill(Qt.GlobalColor.transparent)
         self.temp_canvas.fill(Qt.GlobalColor.transparent)
         self._last_preview_bounds = None
@@ -1707,6 +1875,8 @@ class OverlayWindow(QWidget):
         if not color.isValid():
             return
         self.pen_color = color
+        base_width = max(1.0, float(self.pen_size))
+        self._update_brush_pen_appearance(base_width, 180)
         self.set_mode("brush")
 
     def undo_last_action(self) -> None:
@@ -1714,6 +1884,7 @@ class OverlayWindow(QWidget):
             return
         last = self.history.pop()
         if isinstance(last, QPixmap):
+            self._release_canvas_painters()
             self.canvas = last
         else:
             self._update_undo_button()
@@ -1755,11 +1926,17 @@ class OverlayWindow(QWidget):
             self._stroke_timestamps.append(now)
             self._stroke_speed = 0.0
             self._stroke_last_midpoint = QPointF(pointf)
+            self._stroke_filter_point = QPointF(pointf)
             self.last_width = max(1.0, float(self.pen_size) * 0.4)
             self.shape_start_point = e.pos() if self.mode == "shape" else None
             if self.mode == "shape":
                 self._last_preview_bounds = None
             self._eraser_last_point = e.pos() if self.mode == "eraser" else None
+            if self.mode == "brush":
+                self._ensure_brush_painter()
+                self._update_brush_pen_appearance(max(1.0, float(self.pen_size)), 180)
+            elif self.mode == "eraser":
+                self._ensure_eraser_painter()
             self.raise_toolbar()
             e.accept()
         super().mousePressEvent(e)
@@ -1787,9 +1964,12 @@ class OverlayWindow(QWidget):
             self.shape_start_point = None
             if self.mode == "eraser":
                 self._eraser_last_point = None
+                self._release_eraser_painter()
             if self.mode == "brush":
                 self._stroke_points.clear(); self._stroke_timestamps.clear()
                 self._stroke_last_midpoint = None; self._stroke_speed = 0.0
+                self._stroke_filter_point = None
+                self._release_brush_painter()
             if dirty_region is not None:
                 self._apply_dirty_region(dirty_region)
             self.raise_toolbar()
@@ -1811,20 +1991,31 @@ class OverlayWindow(QWidget):
             self.prev_point = QPointF(cur_point)
             self.last_point = QPointF(cur_point)
             self._stroke_last_midpoint = QPointF(cur_point)
+            self._stroke_filter_point = QPointF(cur_point)
             self.last_time = now
+            self._ensure_brush_painter()
             return None
 
+        painter = self._ensure_brush_painter()
         last_point = QPointF(self._stroke_points[-1])
+        filter_point = QPointF(self._stroke_filter_point) if self._stroke_filter_point else QPointF(last_point)
+        smoothing = 0.68
+        smoothed_x = filter_point.x() + (cur_point.x() - filter_point.x()) * smoothing
+        smoothed_y = filter_point.y() + (cur_point.y() - filter_point.y()) * smoothing
+        cur_point = QPointF(smoothed_x, smoothed_y)
+        self._stroke_filter_point = QPointF(cur_point)
+
         self._stroke_points.append(cur_point)
         self._stroke_timestamps.append(now)
+        if len(self._stroke_timestamps) < 2:
+            return None
 
         elapsed = max(1e-4, now - self._stroke_timestamps[-2])
         distance = math.hypot(cur_point.x() - last_point.x(), cur_point.y() - last_point.y())
-        speed = distance / elapsed
-        self._stroke_speed = self._stroke_speed * 0.65 + speed * 0.35
-
-        if distance < 0.05 and elapsed < 0.01:
+        if distance < 0.08 and elapsed < 0.012:
             return None
+        speed = distance / elapsed
+        self._stroke_speed = self._stroke_speed * 0.6 + speed * 0.4
 
         curvature = 0.0
         if len(self._stroke_points) >= 3:
@@ -1837,31 +2028,29 @@ class OverlayWindow(QWidget):
             if denom > 1e-5:
                 curvature = abs(v1x * v2y - v1y * v2x) / denom
 
-        pressure = min(1.0, (now - self.last_time) * 4.5)
+        base_size = float(max(1, self.pen_size))
+        travel = distance / max(1.0, base_size)
+        pressure = min(1.0, (now - self.last_time) * 3.5 + travel * 0.25)
         self.last_time = now
 
-        base_size = float(max(1, self.pen_size))
-        speed_scale = 1.0 / (1.0 + self._stroke_speed / (base_size * 18.0 + 36.0))
-        curve_scale = min(1.0, curvature * base_size * 0.65)
-        target_w = base_size * (0.42 + 0.45 * speed_scale + 0.25 * curve_scale)
-        target_w *= 1.0 + 0.3 * pressure
-        cur_w = self.last_width * 0.55 + target_w * 0.45
+        speed_scale = 1.0 / (1.0 + self._stroke_speed / (base_size * 16.0 + 24.0))
+        curve_scale = min(1.0, curvature * base_size * 0.7)
+        target_w = base_size * (0.45 + 0.4 * speed_scale + 0.25 * curve_scale)
+        target_w *= 1.0 + 0.28 * pressure
+        cur_w = self.last_width * 0.52 + target_w * 0.48
 
         last_mid = QPointF(self._stroke_last_midpoint) if self._stroke_last_midpoint else QPointF(last_point)
         current_mid = (last_point + cur_point) / 2.0
 
         path = QPainterPath(last_mid)
         path.quadTo(last_point, current_mid)
-        painter = QPainter(self.canvas)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        fade = QColor(self.pen_color)
-        fade_alpha = int(max(30, min(200, 200 * speed_scale)))
-        fade.setAlpha(fade_alpha)
-        painter.setPen(QPen(fade, cur_w * 1.35, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+
+        fade_alpha = int(max(40, min(230, 220 * speed_scale + 60 * curve_scale)))
+        self._update_brush_pen_appearance(cur_w, fade_alpha)
+        painter.setPen(self._brush_shadow_pen)
         painter.drawPath(path)
-        painter.setPen(QPen(self.pen_color, cur_w, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        painter.setPen(self._brush_pen)
         painter.drawPath(path)
-        painter.end()
 
         self.prev_point = QPointF(last_point)
         self.last_point = QPointF(cur_point)
@@ -1869,7 +2058,7 @@ class OverlayWindow(QWidget):
         self.last_width = cur_w
 
         dirty = path.boundingRect()
-        margin = cur_w * 0.8 + 4.0
+        margin = cur_w * 0.9 + 4.0
         return dirty.adjusted(-margin, -margin, margin, margin)
 
     def _erase_at(self, pos) -> Optional[QRectF]:
@@ -1898,11 +2087,8 @@ class OverlayWindow(QWidget):
         if distance >= 0.35:
             erase_path.addEllipse(start_point, radius, radius)
 
-        painter = QPainter(self.canvas)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+        painter = self._ensure_eraser_painter()
         painter.fillPath(erase_path, QColor(0, 0, 0, 0))
-        painter.end()
 
         self._eraser_last_point = current.toPoint()
 
@@ -1965,7 +2151,9 @@ class OverlayWindow(QWidget):
         self.raise_toolbar()
 
     def closeEvent(self, e) -> None:
-        self.save_settings(); self.save_window_position()
+        self._release_canvas_painters()
+        self.save_settings()
+        self.save_window_position()
         super().closeEvent(e)
 
 
@@ -2060,33 +2248,17 @@ class TTSManager(QObject):
     def _init_powershell_fallback(self) -> None:
         if sys.platform != "win32":
             return
-        path = shutil.which("pwsh") or shutil.which("powershell")
-        if not path:
-            system_root = os.environ.get("SystemRoot") or os.environ.get("WINDIR")
-            candidate_paths: List[str] = []
-            if system_root:
-                candidate_paths.extend(
-                    [
-                        os.path.join(system_root, "System32", "WindowsPowerShell", "v1.0", "pwsh.exe"),
-                        os.path.join(system_root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
-                        os.path.join(system_root, "SysWOW64", "WindowsPowerShell", "v1.0", "powershell.exe"),
-                    ]
-                )
-            candidate_paths.extend(
-                [
-                    os.path.join("C:\\Program Files\\PowerShell\\7", "pwsh.exe"),
-                    os.path.join("C:\\Program Files\\PowerShell\\6", "pwsh.exe"),
-                ]
-            )
-            for candidate in candidate_paths:
-                if candidate and os.path.exists(candidate):
-                    path = candidate
-                    break
+        path = _find_powershell_executable()
         if not path:
             if not self.failure_reason:
                 self._record_failure("未检测到 PowerShell，可用的语音播报方式受限")
             return
         self._powershell_path = os.path.abspath(path)
+        ps_ok, ps_reason = _probe_powershell_speech_runtime(self._powershell_path)
+        if not ps_ok:
+            message = ps_reason or "PowerShell 语音环境检测失败"
+            self._record_failure(message)
+            return
         self.engine = object()
         self.voice_ids = []
         self.default_voice_id = ""
@@ -3637,7 +3809,7 @@ class RollCallTimerWindow(QWidget):
         show_quiet_information(self, "密码输入次数过多，操作已取消。")
         return None
 
-    def _set_student_dataframe(self, df: Optional[pd.DataFrame], *, propagate: bool = True) -> None:
+    def _set_student_dataframe(self, df: Optional[PandasDataFrame], *, propagate: bool = True) -> None:
         if not (PANDAS_AVAILABLE and pd is not None):
             self.student_data = df
             return
@@ -3768,7 +3940,7 @@ class RollCallTimerWindow(QWidget):
         show_quiet_information(self, "已成功解密学生数据并恢复 students.xlsx。")
         self._schedule_save()
 
-    def _apply_decrypted_student_data(self, df: pd.DataFrame) -> None:
+    def _apply_decrypted_student_data(self, df: PandasDataFrame) -> None:
         if not (PANDAS_AVAILABLE and pd is not None):
             return
         self._set_student_dataframe(df, propagate=True)
@@ -4355,7 +4527,8 @@ class RollCallTimerWindow(QWidget):
             else:
                 show_quiet_information(self, f"'{group_name}' 的同学已经全部点到，请切换其他分组或点击“重置”按钮。")
             return
-        self.current_student_index = pool.pop()
+        draw_index = self._rng.randrange(len(pool)) if len(pool) > 1 else 0
+        self.current_student_index = pool.pop(draw_index)
         self._pending_passive_student = self.current_student_index
         self._group_last_student[group_name] = self.current_student_index
         self._mark_student_drawn(self.current_student_index)
@@ -5136,7 +5309,10 @@ def _normalize_text(value: object) -> str:
     return text
 
 
-def _normalize_student_dataframe(df: pd.DataFrame, drop_incomplete: bool = True) -> pd.DataFrame:
+def _normalize_student_dataframe(
+    df: PandasDataFrame,
+    drop_incomplete: bool = True,
+) -> PandasDataFrame:
     if not (PANDAS_AVAILABLE and pd is not None):
         return df.copy()
 
@@ -5176,7 +5352,7 @@ def _normalize_student_dataframe(df: pd.DataFrame, drop_incomplete: bool = True)
     return normalized
 
 
-def _write_student_workbook(file_path: str, df: pd.DataFrame) -> None:
+def _write_student_workbook(file_path: str, df: PandasDataFrame) -> None:
     data = _export_student_workbook_bytes(df)
     tmp_dir = os.path.dirname(os.path.abspath(file_path)) or "."
     fd, tmp_path = tempfile.mkstemp(suffix=".xlsx", dir=tmp_dir)
@@ -5189,7 +5365,7 @@ def _write_student_workbook(file_path: str, df: pd.DataFrame) -> None:
             os.remove(tmp_path)
 
 
-def _write_encrypted_student_workbook(file_path: str, df: pd.DataFrame, password: str) -> None:
+def _write_encrypted_student_workbook(file_path: str, df: PandasDataFrame, password: str) -> None:
     data = _export_student_workbook_bytes(df)
     payload = _encrypt_student_bytes(password, data)
     tmp_dir = os.path.dirname(os.path.abspath(file_path)) or "."
@@ -5203,7 +5379,7 @@ def _write_encrypted_student_workbook(file_path: str, df: pd.DataFrame, password
             os.remove(tmp_path)
 
 
-def _export_student_workbook_bytes(df: pd.DataFrame) -> bytes:
+def _export_student_workbook_bytes(df: PandasDataFrame) -> bytes:
     try:
         export_df = _normalize_student_dataframe(df, drop_incomplete=False)
     except Exception:
@@ -5260,7 +5436,7 @@ def _export_student_workbook_bytes(df: pd.DataFrame) -> bytes:
 
 
 def _save_student_workbook(
-    df: pd.DataFrame,
+    df: PandasDataFrame,
     file_path: str,
     encrypted_file_path: str,
     *,
@@ -5279,7 +5455,7 @@ def _save_student_workbook(
             os.remove(encrypted_file_path)
 
 
-def load_student_data(parent: Optional[QWidget]) -> Optional[pd.DataFrame]:
+def load_student_data(parent: Optional[QWidget]) -> Optional[PandasDataFrame]:
     """从 students.xlsx 读取点名所需的数据，不存在时自动生成模板。"""
     if not (PANDAS_AVAILABLE and OPENPYXL_AVAILABLE):
         QMessageBox.warning(parent, "提示", "未安装 pandas/openpyxl，点名功能不可用。")
@@ -5456,7 +5632,7 @@ class LauncherBubble(QWidget):
 
 
 class LauncherWindow(QWidget):
-    def __init__(self, settings_manager: SettingsManager, student_data: Optional[pd.DataFrame]) -> None:
+    def __init__(self, settings_manager: SettingsManager, student_data: Optional[PandasDataFrame]) -> None:
         super().__init__(None, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         self.settings_manager = settings_manager
         self.student_data = student_data
