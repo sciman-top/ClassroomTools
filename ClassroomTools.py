@@ -29,6 +29,7 @@ from typing import (
     Any,
     Callable,
     Dict,
+    Iterable,
     List,
     Mapping,
     Optional,
@@ -4568,6 +4569,31 @@ class RollCallTimerWindow(QWidget):
         except Exception:
             random.shuffle(values)
 
+    def _normalize_indices(self, values: Iterable[Any], *, allowed: Optional[Set[int]] = None) -> List[int]:
+        """Convert an iterable of values to a deduplicated integer list."""
+
+        normalized: List[int] = []
+        seen: Set[int] = set()
+        for value in values:
+            try:
+                idx = int(value)
+            except (TypeError, ValueError):
+                continue
+            if allowed is not None and idx not in allowed:
+                continue
+            if idx in seen:
+                continue
+            normalized.append(idx)
+            seen.add(idx)
+        return normalized
+
+    def _collect_base_indices(self, values: Optional[Iterable[Any]]) -> List[int]:
+        """Normalize the raw index list preserved in each group."""
+
+        if values is None:
+            return []
+        return self._normalize_indices(values)
+
     def reset_roll_call_pools(self) -> None:
         """根据当前分组执行重置：子分组独立重置，“全部”重置所有。"""
 
@@ -4600,12 +4626,7 @@ class RollCallTimerWindow(QWidget):
         base_indices_raw = self._group_all_indices.get(group_name)
         if base_indices_raw is None:
             return
-        base_indices: List[int] = []
-        for value in base_indices_raw:
-            try:
-                base_indices.append(int(value))
-            except (TypeError, ValueError):
-                continue
+        base_indices = self._collect_base_indices(base_indices_raw)
         shuffled = list(base_indices)
         self._shuffle(shuffled)
         self._group_remaining_indices[group_name] = shuffled
@@ -4736,20 +4757,11 @@ class RollCallTimerWindow(QWidget):
         for group, indices in remaining_data.items():
             if group not in self._group_all_indices:
                 continue
-            base_list = self._group_all_indices[group]
+            base_list = self._collect_base_indices(self._group_all_indices[group])
             base_set = set(base_list)
             restored: List[int] = []
             if isinstance(indices, list):
-                seen: set[int] = set()
-                for value in indices:
-                    try:
-                        idx = int(value)
-                    except (TypeError, ValueError):
-                        continue
-                    if idx not in base_set or idx in seen:
-                        continue
-                    restored.append(idx)
-                    seen.add(idx)
+                restored = self._normalize_indices(indices, allowed=base_set)
             self._group_remaining_indices[group] = restored
 
         for group, value in last_data.items():
@@ -4768,18 +4780,8 @@ class RollCallTimerWindow(QWidget):
         # 根据恢复后的剩余名单推导出每个分组已点名的学生集合
         # 重新整理所有分组的已点名学生，并同步更新全局集合
         for group, base_indices in self._group_all_indices.items():
-            normalized_base: List[int] = []
-            for value in base_indices:
-                try:
-                    normalized_base.append(int(value))
-                except (TypeError, ValueError):
-                    continue
-            remaining_set: set[int] = set()
-            for value in self._group_remaining_indices.get(group, []):
-                try:
-                    remaining_set.add(int(value))
-                except (TypeError, ValueError):
-                    continue
+            normalized_base = self._collect_base_indices(base_indices)
+            remaining_set = set(self._normalize_indices(self._group_remaining_indices.get(group, [])))
             drawn = {idx for idx in normalized_base if idx not in remaining_set}
             if group != "全部" and existing_global:
                 # 在恢复时合并先前记录的全局名单，防止由于意外写入丢失导致遗漏
@@ -4829,12 +4831,7 @@ class RollCallTimerWindow(QWidget):
             self._shuffle(shuffled)
             self._group_initial_sequences[group_name] = shuffled
 
-        base_indices: List[int] = []
-        for value in self._group_all_indices.get(group_name, []):
-            try:
-                base_indices.append(int(value))
-            except (TypeError, ValueError):
-                continue
+        base_indices = self._collect_base_indices(self._group_all_indices.get(group_name, []))
         if group_name == "全部":
             drawn_history = self._group_drawn_history.setdefault("全部", self._global_drawn_students)
             reference_drawn = self._global_drawn_students
@@ -4939,37 +4936,82 @@ class RollCallTimerWindow(QWidget):
     def _refresh_all_group_pool(self) -> None:
         """同步“全部”分组的剩余名单，使其与各子分组保持一致。"""
 
-        base_all = self._group_all_indices.get("全部", [])
-        if "全部" not in self._group_initial_sequences:
-            shuffled = list(base_all)
+        base_all_list = self._collect_base_indices(self._group_all_indices.get("全部", []))
+        base_all_set = set(base_all_list)
+
+        subgroup_base: Dict[str, Tuple[List[int], Set[int]]] = {}
+        subgroup_remaining: Dict[str, List[int]] = {}
+        subgroup_remaining_union: Set[int] = set()
+        drawn_from_subgroups: Set[int] = set()
+
+        for group, raw_indices in self._group_all_indices.items():
+            if group == "全部":
+                continue
+            base_list = self._collect_base_indices(raw_indices)
+            base_set = set(base_list)
+            subgroup_base[group] = (base_list, base_set)
+            pool = self._group_remaining_indices.get(group, [])
+            sanitized = self._normalize_indices(pool, allowed=base_set)
+            if sanitized != pool:
+                self._group_remaining_indices[group] = sanitized
+            subgroup_remaining[group] = sanitized
+            subgroup_remaining_union.update(sanitized)
+            drawn_from_subgroups.update(idx for idx in base_set if idx not in sanitized)
+            initial = self._group_initial_sequences.get(group)
+            if initial is None:
+                self._group_initial_sequences[group] = list(base_list)
+            else:
+                cleaned_initial = self._normalize_indices(initial, allowed=base_set)
+                if cleaned_initial != list(initial):
+                    self._group_initial_sequences[group] = cleaned_initial
+                for idx in base_list:
+                    if idx not in self._group_initial_sequences[group]:
+                        self._group_initial_sequences[group].append(idx)
+
+        valid_global = {
+            idx
+            for idx in self._global_drawn_students
+            if idx in base_all_set and idx not in subgroup_remaining_union
+        }
+        new_global = {idx for idx in drawn_from_subgroups if idx in base_all_set}
+        new_global.update(valid_global)
+
+        self._global_drawn_students = set(new_global)
+        self._group_drawn_history["全部"] = self._global_drawn_students
+
+        for group, (base_list, base_set) in subgroup_base.items():
+            pool = subgroup_remaining.get(group, [])
+            filtered = [idx for idx in pool if idx in base_set and idx not in self._global_drawn_students]
+            if filtered != pool:
+                self._group_remaining_indices[group] = filtered
+                subgroup_remaining[group] = filtered
+            drawn_set = {idx for idx in base_set if idx not in filtered}
+            self._group_drawn_history[group] = drawn_set
+
+        order_hint = self._group_initial_sequences.get("全部")
+        if order_hint is None:
+            shuffled = list(base_all_list)
             self._shuffle(shuffled)
-            self._group_initial_sequences["全部"] = shuffled
-        order = list(self._group_initial_sequences.get("全部", []))
-        normalized: List[int] = []
-        seen: set[int] = set()
-        for value in order:
-            try:
-                idx = int(value)
-            except (TypeError, ValueError):
+            order_hint = shuffled
+        else:
+            cleaned_all = self._normalize_indices(order_hint, allowed=base_all_set)
+            if cleaned_all != list(order_hint):
+                order_hint = cleaned_all
+            else:
+                order_hint = list(order_hint)
+            for idx in base_all_list:
+                if idx not in order_hint:
+                    order_hint.append(idx)
+        self._group_initial_sequences["全部"] = list(order_hint)
+
+        normalized_all = [idx for idx in order_hint if idx not in self._global_drawn_students]
+        seen_all: Set[int] = set(normalized_all)
+        for idx in base_all_list:
+            if idx in seen_all or idx in self._global_drawn_students:
                 continue
-            if idx in seen:
-                continue
-            seen.add(idx)
-            if idx in self._global_drawn_students:
-                continue
-            normalized.append(idx)
-        for value in base_all:
-            try:
-                idx = int(value)
-            except (TypeError, ValueError):
-                continue
-            if idx in seen:
-                continue
-            seen.add(idx)
-            if idx in self._global_drawn_students:
-                continue
-            normalized.append(idx)
-        self._group_remaining_indices["全部"] = normalized
+            normalized_all.append(idx)
+            seen_all.add(idx)
+        self._group_remaining_indices["全部"] = normalized_all
 
     def display_current_student(self) -> None:
         if self.current_student_index is None:
