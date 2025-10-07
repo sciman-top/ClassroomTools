@@ -701,6 +701,15 @@ class PasswordPromptDialog(QDialog):
         self.line_edit.setMinimumWidth(220)
         layout.addWidget(self.line_edit)
 
+        self.error_label = QLabel("", self)
+        self.error_label.setWordWrap(True)
+        self.error_label.setObjectName("passwordPromptErrorLabel")
+        self.error_label.setStyleSheet(
+            "#passwordPromptErrorLabel { color: #d93025; font-size: 12px; margin-top: 4px; }"
+        )
+        self.error_label.hide()
+        layout.addWidget(self.error_label)
+
         button_box = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
             Qt.Orientation.Horizontal,
@@ -721,12 +730,19 @@ class PasswordPromptDialog(QDialog):
         layout.addWidget(button_box)
 
         self.line_edit.returnPressed.connect(self.accept)
+        self.line_edit.textChanged.connect(self._clear_error)
 
     @classmethod
     def get_password(
-        cls, parent: Optional[QWidget], title: str, prompt: str
+        cls,
+        parent: Optional[QWidget],
+        title: str,
+        prompt: str,
+        *,
+        allow_empty: bool = True,
     ) -> tuple[str, bool]:
         dialog = cls(parent, title, prompt)
+        dialog._allow_empty = allow_empty  # type: ignore[attr-defined]
         accepted = dialog.exec() == QDialog.DialogCode.Accepted
         value = dialog._captured_text if accepted else ""
         return value, accepted
@@ -736,12 +752,140 @@ class PasswordPromptDialog(QDialog):
         self.line_edit.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
 
     def accept(self) -> None:  # type: ignore[override]
-        self._captured_text = self.line_edit.text()
+        text = self.line_edit.text()
+        if not getattr(self, "_allow_empty", True) and not text.strip():
+            self._show_error("密码不能为空，请重新输入。")
+            return
+        self._captured_text = text
         super().accept()
 
     def reject(self) -> None:  # type: ignore[override]
         self._captured_text = ""
         super().reject()
+
+    def _show_error(self, message: str) -> None:
+        self.error_label.setText(message)
+        self.error_label.show()
+        self.line_edit.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
+
+    def _clear_error(self, _: str) -> None:
+        if self.error_label.isVisible():
+            self.error_label.hide()
+
+
+class PasswordSetupDialog(QDialog):
+    """一次性采集两次输入的新密码，避免外部循环引发界面阻塞。"""
+
+    def __init__(self, parent: Optional[QWidget], title: str, prompt: str, confirm_prompt: str) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        self._password: str = ""
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 18, 24, 18)
+        layout.setSpacing(12)
+
+        prompt_label = QLabel(prompt, self)
+        prompt_label.setWordWrap(True)
+        prompt_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(prompt_label)
+
+        self.password_edit = QLineEdit(self)
+        self.password_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.password_edit.setMinimumWidth(220)
+        layout.addWidget(self.password_edit)
+
+        confirm_label = QLabel(confirm_prompt, self)
+        confirm_label.setWordWrap(True)
+        confirm_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(confirm_label)
+
+        self.confirm_edit = QLineEdit(self)
+        self.confirm_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.confirm_edit.setMinimumWidth(220)
+        layout.addWidget(self.confirm_edit)
+
+        self.error_label = QLabel("", self)
+        self.error_label.setWordWrap(True)
+        self.error_label.setObjectName("passwordSetupErrorLabel")
+        self.error_label.setStyleSheet(
+            "#passwordSetupErrorLabel { color: #d93025; font-size: 12px; margin-top: 4px; }"
+        )
+        self.error_label.hide()
+        layout.addWidget(self.error_label)
+
+        button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            Qt.Orientation.Horizontal,
+            self,
+        )
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        style_dialog_buttons(
+            button_box,
+            {
+                QDialogButtonBox.StandardButton.Ok: ButtonStyles.PRIMARY,
+                QDialogButtonBox.StandardButton.Cancel: ButtonStyles.TOOLBAR,
+            },
+            extra_padding=12,
+            minimum_height=34,
+            uniform_width=True,
+        )
+        layout.addWidget(button_box)
+
+        self.password_edit.returnPressed.connect(self._focus_confirm)
+        self.confirm_edit.returnPressed.connect(self.accept)
+        self.password_edit.textChanged.connect(self._clear_error)
+        self.confirm_edit.textChanged.connect(self._clear_error)
+
+    @classmethod
+    def get_new_password(
+        cls,
+        parent: Optional[QWidget],
+        title: str,
+        prompt: str,
+        confirm_prompt: str,
+    ) -> tuple[str, bool]:
+        dialog = cls(parent, title, prompt, confirm_prompt)
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        value = dialog._password if accepted else ""
+        return value, accepted
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        self.password_edit.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
+
+    def accept(self) -> None:  # type: ignore[override]
+        password = self.password_edit.text().strip()
+        confirm = self.confirm_edit.text().strip()
+        if not password:
+            self._show_error("密码不能为空，请重新输入。", focus_widget=self.password_edit)
+            return
+        if password != confirm:
+            self._show_error("两次输入的密码不一致，请重新设置。", focus_widget=self.confirm_edit)
+            return
+        self._password = password
+        super().accept()
+
+    def reject(self) -> None:  # type: ignore[override]
+        self._password = ""
+        super().reject()
+
+    def _show_error(self, message: str, *, focus_widget: Optional[QWidget] = None) -> None:
+        self.error_label.setText(message)
+        self.error_label.show()
+        target = focus_widget or self.password_edit
+        target.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
+
+    def _clear_error(self, _: str) -> None:
+        if self.error_label.isVisible():
+            self.error_label.hide()
+
+    def _focus_confirm(self) -> None:
+        self.confirm_edit.setFocus(Qt.FocusReason.TabFocusReason)
 
 
 def ask_quiet_confirmation(parent: Optional[QWidget], text: str, title: str = "确认") -> bool:
@@ -3761,35 +3905,16 @@ class RollCallTimerWindow(QWidget):
             self._handle_encrypt_student_file()
 
     def _prompt_new_encryption_password(self) -> Optional[str]:
-        attempts = 0
-        while attempts < 3:
-            password, ok = PasswordPromptDialog.get_password(
-                self,
-                "设置加密密码",
-                "请输入新的加密密码：",
-            )
-            if not ok:
-                return None
-            password = password.strip()
-            if not password:
-                show_quiet_information(self, "密码不能为空，请重新输入。")
-                attempts += 1
-                continue
-            confirm, ok = PasswordPromptDialog.get_password(
-                self,
-                "确认加密密码",
-                "请再次输入密码以确认：",
-            )
-            if not ok:
-                return None
-            confirm = confirm.strip()
-            if password != confirm:
-                show_quiet_information(self, "两次输入的密码不一致，请重新设置。")
-                attempts += 1
-                continue
-            return password
-        show_quiet_information(self, "未能成功设置密码，已取消加密操作。")
-        return None
+        password, ok = PasswordSetupDialog.get_new_password(
+            self,
+            "设置加密密码",
+            "请输入新的加密密码：",
+            "请再次输入密码以确认：",
+        )
+        if not ok or not password:
+            show_quiet_information(self, "未能成功设置密码，已取消加密操作。")
+            return None
+        return password
 
     def _prompt_existing_encryption_password(self, title: str) -> Optional[str]:
         attempts = 0
@@ -3798,6 +3923,7 @@ class RollCallTimerWindow(QWidget):
                 self,
                 title,
                 "请输入当前的加密密码：",
+                allow_empty=False,
             )
             if not ok:
                 return None
@@ -5519,6 +5645,7 @@ def load_student_data(parent: Optional[QWidget]) -> Optional[PandasDataFrame]:
                 parent,
                 "解密学生数据",
                 "检测到已加密的学生名单，请输入密码：",
+                allow_empty=False,
             )
             if not ok:
                 QMessageBox.information(parent, "提示", "已取消加载加密的学生名单。")
