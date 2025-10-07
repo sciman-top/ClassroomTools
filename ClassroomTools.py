@@ -19,6 +19,8 @@ import tempfile
 import threading
 import time
 import traceback
+import hashlib
+import hmac
 from queue import Empty, Queue
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Mapping
@@ -61,7 +63,9 @@ from PyQt6.QtWidgets import (
     QFrame,
     QGridLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
+    QLineEdit,
     QMenu,
     QMessageBox,
     QPushButton,
@@ -196,6 +200,20 @@ if sys.platform == "win32":
         WINREG_AVAILABLE = False
 else:
     WINREG_AVAILABLE = False
+
+
+_SESSION_STUDENT_PASSWORD: Optional[str] = None
+_SESSION_STUDENT_FILE_ENCRYPTED: bool = False
+
+
+def _set_session_student_encryption(encrypted: bool, password: Optional[str]) -> None:
+    global _SESSION_STUDENT_PASSWORD, _SESSION_STUDENT_FILE_ENCRYPTED
+    _SESSION_STUDENT_FILE_ENCRYPTED = bool(encrypted)
+    _SESSION_STUDENT_PASSWORD = password if encrypted else None
+
+
+def _get_session_student_encryption() -> tuple[bool, Optional[str]]:
+    return _SESSION_STUDENT_FILE_ENCRYPTED, _SESSION_STUDENT_PASSWORD
 
 
 # ---------- DPI ----------
@@ -2076,6 +2094,22 @@ class ScoreboardDialog(QDialog):
             "    border-color: #1a73e8;"
             "    color: #ffffff;"
             "}"
+            "QPushButton[class=\"orderButton\"] {"
+            "    background-color: rgba(255, 255, 255, 0.88);"
+            "    border-radius: 22px;"
+            "    border: 1px solid rgba(16, 61, 115, 0.24);"
+            "    padding: 4px 18px;"
+            "    color: #0b3d91;"
+            "}"
+            "QPushButton[class=\"orderButton\"]:hover {"
+            "    border-color: #1a73e8;"
+            "    background-color: rgba(26, 115, 232, 0.12);"
+            "}"
+            "QPushButton[class=\"orderButton\"]:checked {"
+            "    background-color: #1a73e8;"
+            "    border-color: #1a73e8;"
+            "    color: #ffffff;"
+            "}"
         )
 
         screen = QApplication.primaryScreen()
@@ -2799,6 +2833,334 @@ class ScoreboardDialog(QDialog):
         layout = self.grid_layout
         calligraphy_font = self._calligraphy_font
 
+        screen = QApplication.primaryScreen()
+        self._available_geometry = screen.availableGeometry() if screen is not None else QRect(0, 0, 1920, 1080)
+
+        self._update_order_buttons()
+        self._populate_grid()
+
+        if screen is not None:
+            self.setGeometry(self._available_geometry)
+
+    def _update_order_buttons(self) -> None:
+        for key, button in self.order_buttons.items():
+            block = button.blockSignals(True)
+            button.setChecked(key == self._order)
+            button.blockSignals(block)
+
+    def _on_order_button_clicked(self, order: str) -> None:
+        if order not in {self.ORDER_RANK, self.ORDER_ID}:
+            self._update_order_buttons()
+            return
+        if order == self._order:
+            self._update_order_buttons()
+            return
+        self._order = order
+        if callable(self._order_changed_callback):
+            try:
+                self._order_changed_callback(order)
+            except Exception:
+                pass
+        self._update_order_buttons()
+        self._populate_grid()
+
+    def _clear_grid(self) -> None:
+        while self.grid_layout.count():
+            item = self.grid_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        for row in range(self._grid_row_count):
+            self.grid_layout.setRowStretch(row, 0)
+            self.grid_layout.setRowMinimumHeight(row, 0)
+        for column in range(self._grid_column_count):
+            self.grid_layout.setColumnStretch(column, 0)
+            self.grid_layout.setColumnMinimumWidth(column, 0)
+        self._grid_row_count = 0
+        self._grid_column_count = 0
+
+    def _collect_display_candidates(self) -> tuple[List[tuple[int, str, str]], List[str], List[str]]:
+        sorted_students = self._sort_students()
+        alternate_order = (
+            self.ORDER_ID if self._order == self.ORDER_RANK else self.ORDER_RANK
+        )
+        alternate_students = self._sort_students(alternate_order)
+
+        display_entries: List[tuple[int, str, str]] = []
+        display_candidates: List[str] = []
+        score_candidates: List[str] = []
+
+        for idx, (sid, name, score) in enumerate(sorted_students):
+            display_text = self._format_display_text(idx, sid, name)
+            score_text = self._format_score_text(score)
+            display_entries.append((idx, display_text, score_text))
+            display_candidates.append(display_text)
+            score_candidates.append(score_text)
+
+        for idx, (sid, name, score) in enumerate(alternate_students):
+            display_candidates.append(
+                self._format_display_text_for_order(
+                    alternate_order, idx, sid, name
+                )
+            )
+            score_candidates.append(self._format_score_text(score))
+
+        return display_entries, display_candidates, score_candidates
+
+    def _compute_card_metrics(self) -> Optional[_CardMetrics]:
+        count = len(self.students)
+        if count == 0:
+            return None
+
+        available = self._available_geometry
+        key = (count, available.width(), available.height())
+        if self._card_metrics is not None and self._card_metrics_key == key:
+            return self._card_metrics
+
+        columns = 10
+        rows = max(1, math.ceil(count / columns))
+
+        usable_width = max(available.width() - 160, 640)
+        usable_height = max(available.height() - 240, 520)
+
+        margins = self.grid_layout.contentsMargins()
+        horizontal_spacing = max(14, int(usable_width * 0.01))
+        vertical_spacing = max(18, int(usable_height * 0.035 / rows))
+
+        spacing_total_x = horizontal_spacing * max(0, columns - 1)
+        spacing_total_y = vertical_spacing * max(0, rows - 1)
+
+        available_width_for_cards = (
+            usable_width - margins.left() - margins.right() - spacing_total_x
+        )
+        available_height_for_cards = (
+            usable_height - margins.top() - margins.bottom() - spacing_total_y
+        )
+
+        per_card_width = max(1.0, available_width_for_cards / columns)
+        per_card_height = max(1.0, available_height_for_cards / rows)
+
+        card_width = int(math.floor(per_card_width))
+        card_height = int(math.floor(per_card_height))
+
+        if per_card_width >= 120:
+            card_width = max(card_width, 120)
+        if per_card_height >= 180:
+            card_height = max(card_height, 180)
+
+        padding_h = max(12, int(card_width * 0.08))
+        padding_v = max(14, int(card_height * 0.1))
+        inner_spacing = max(6, int(card_height * 0.045))
+
+        display_entries, display_candidates, score_candidates = self._collect_display_candidates()
+
+        if not display_candidates:
+            return None
+
+        calligraphy_font = self._calligraphy_font or QApplication.font().family()
+        if not calligraphy_font:
+            calligraphy_font = QFont().family()
+
+        try:
+            probe_font = QFont(calligraphy_font, 64, QFont.Weight.Bold)
+            metrics = QFontMetrics(probe_font)
+        except Exception:
+            probe_font = QFont()
+            metrics = QFontMetrics(probe_font)
+
+        widest_display = max(
+            display_candidates,
+            key=lambda text: metrics.tightBoundingRect(text).width(),
+        )
+        widest_score = max(
+            score_candidates,
+            key=lambda text: metrics.tightBoundingRect(text).width(),
+        )
+
+        usable_name_width = max(60, card_width - 2 * padding_h)
+        content_height = max(80, card_height - 2 * padding_v - inner_spacing)
+        name_height = int(content_height * 0.58)
+        score_height = max(32, content_height - name_height)
+
+        font_upper_bound = int(min(card_width * 0.28, card_height * 0.36))
+        font_upper_bound = max(20, font_upper_bound)
+        fit_minimum = 14
+
+        name_fit = self._fit_font_size(
+            widest_display,
+            calligraphy_font,
+            QFont.Weight.Bold,
+            usable_name_width,
+            name_height,
+            fit_minimum,
+            font_upper_bound,
+        )
+        score_fit = self._fit_font_size(
+            widest_score,
+            calligraphy_font,
+            QFont.Weight.Bold,
+            usable_name_width,
+            score_height,
+            fit_minimum,
+            font_upper_bound,
+        )
+
+        final_font_size = max(fit_minimum, min(name_fit, score_fit, font_upper_bound))
+
+        self._card_metrics = ScoreboardDialog._CardMetrics(
+            count=count,
+            columns=columns,
+            rows=rows,
+            card_width=card_width,
+            card_height=card_height,
+            padding_h=padding_h,
+            padding_v=padding_v,
+            inner_spacing=inner_spacing,
+            font_size=final_font_size,
+            horizontal_spacing=horizontal_spacing,
+            vertical_spacing=vertical_spacing,
+        )
+        self._card_metrics_key = key
+        return self._card_metrics
+
+    def _ensure_metrics(self) -> Optional[_CardMetrics]:
+        metrics = self._compute_card_metrics()
+        if metrics is not None:
+            return metrics
+        self._card_metrics = None
+        self._card_metrics_key = None
+        return None
+
+    def _sort_students(self, order: Optional[str] = None) -> List[tuple[str, str, int]]:
+        data = list(self.students)
+        current_order = self._order if order is None else order
+        if current_order == self.ORDER_ID:
+            def _id_key(item: tuple[str, str, int]) -> tuple[int, str, str]:
+                sid_text = str(item[0]).strip()
+                try:
+                    sid_value = int(sid_text)
+                except (TypeError, ValueError):
+                    sid_value = sys.maxsize
+                return (sid_value, sid_text, item[1])
+
+            data.sort(key=_id_key)
+        else:
+            def _rank_key(item: tuple[str, str, int]) -> tuple[int, int, str]:
+                sid_text = str(item[0]).strip()
+                try:
+                    sid_value = int(sid_text)
+                except (TypeError, ValueError):
+                    sid_value = sys.maxsize
+                return (-item[2], sid_value, item[1])
+
+            data.sort(key=_rank_key)
+        return data
+
+    def _create_card(
+        self,
+        display_text: str,
+        score_text: str,
+        card_width: int,
+        card_height: int,
+        font_size: int,
+        padding_h: int,
+        padding_v: int,
+        inner_spacing: int,
+    ) -> QWidget:
+        calligraphy_font = self._calligraphy_font
+        wrapper = QWidget()
+        wrapper.setProperty("class", "scoreboardWrapper")
+        wrapper.setFixedSize(card_width, card_height)
+        wrapper.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(padding_h, padding_v, padding_h, padding_v)
+        layout.setSpacing(inner_spacing)
+
+        name_label = QLabel(display_text or "未命名")
+        name_label.setProperty("class", "scoreboardName")
+        name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        name_label.setWordWrap(False)
+        name_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        name_label.setFont(QFont(calligraphy_font, font_size, QFont.Weight.Bold))
+        name_label.setStyleSheet("margin: 0px; padding: 0px;")
+        layout.addWidget(name_label)
+
+        score_label = QLabel(score_text)
+        score_label.setProperty("class", "scoreboardScore")
+        score_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        score_label.setWordWrap(False)
+        score_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        score_label.setFont(QFont(calligraphy_font, font_size, QFont.Weight.Bold))
+        score_label.setStyleSheet(f"margin-top: {max(6, inner_spacing // 2)}px;")
+        layout.addWidget(score_label)
+
+        layout.addStretch(1)
+        return wrapper
+
+    def _format_display_text(self, index: int, sid: str, name: str) -> str:
+        return self._format_display_text_for_order(self._order, index, sid, name)
+
+    def _format_display_text_for_order(
+        self, order: str, index: int, sid: str, name: str
+    ) -> str:
+        clean_name = (name or "").strip() or "未命名"
+        if order == self.ORDER_ID:
+            sid_display = str(sid).strip() or "—"
+            return f"{sid_display}.{clean_name}"
+        return f"{index + 1}.{clean_name}"
+
+    @staticmethod
+    def _format_score_text(score: int | float | str) -> str:
+        text = "—"
+        try:
+            value = float(score)
+        except (TypeError, ValueError):
+            score_str = str(score).strip()
+            if score_str and score_str.lower() != "none":
+                text = score_str
+        else:
+            if math.isfinite(value):
+                if abs(value - int(value)) < 1e-6:
+                    text = str(int(round(value)))
+                else:
+                    text = f"{value:.2f}".rstrip("0").rstrip(".")
+        return f"{text} 分"
+
+    @staticmethod
+    def _fit_font_size(
+        text: str,
+        family: str,
+        weight: QFont.Weight,
+        max_width: int,
+        max_height: int,
+        minimum: int,
+        maximum: int,
+    ) -> int:
+        if not text:
+            return max(6, min(minimum, maximum))
+        if max_width <= 0 or max_height <= 0:
+            return max(6, min(minimum, maximum))
+        lower = max(6, min(minimum, maximum))
+        upper = max(6, max(minimum, maximum))
+        for size in range(upper, lower - 1, -1):
+            font = QFont(family, size, weight)
+            metrics = QFontMetrics(font)
+            rect = metrics.tightBoundingRect(text)
+            if rect.width() <= max_width and rect.height() <= max_height:
+                return size
+        return lower
+
+    def _populate_grid(self) -> None:
+        self._clear_grid()
+        count = len(self.students)
+        layout = self.grid_layout
+        calligraphy_font = self._calligraphy_font
+
         if count == 0:
             empty = QLabel("暂无成绩数据")
             empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -2875,6 +3237,7 @@ class RollCallTimerWindow(QWidget):
     visibility_changed = pyqtSignal(bool)
 
     STUDENT_FILE = "students.xlsx"
+    ENCRYPTED_STUDENT_FILE = "students.xlsx.enc"
     MIN_FONT_SIZE = 5
     MAX_FONT_SIZE = 220
 
@@ -2891,7 +3254,13 @@ class RollCallTimerWindow(QWidget):
         self.setWindowFlags(flags)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.settings_manager = settings_manager
+        if student_data is None and PANDAS_AVAILABLE and pd is not None:
+            student_data = pd.DataFrame(columns=["学号", "姓名", "分组", "成绩"])
         self.student_data = student_data
+        encrypted_state, encrypted_password = _get_session_student_encryption()
+        self._student_file_encrypted = bool(encrypted_state)
+        self._student_password = encrypted_password
+        self._encrypted_file_path = self.ENCRYPTED_STUDENT_FILE
         try:
             self._rng = random.SystemRandom()
         except NotImplementedError:
@@ -2951,6 +3320,13 @@ class RollCallTimerWindow(QWidget):
 
         order_value = str(s.get("scoreboard_order", "rank")).strip().lower()
         self.scoreboard_order = order_value if order_value in {"rank", "id"} else "rank"
+        saved_encrypted = str_to_bool(s.get("students_encrypted", bool_to_str(self._student_file_encrypted)), self._student_file_encrypted)
+        disk_encrypted = os.path.exists(self._encrypted_file_path) and not os.path.exists(self.STUDENT_FILE)
+        if disk_encrypted:
+            self._student_file_encrypted = True
+        elif not saved_encrypted:
+            self._student_file_encrypted = False
+            self._student_password = None
 
         self.last_id_font_size = max(self.MIN_FONT_SIZE, _get_int("id_font_size", 48))
         self.last_name_font_size = max(self.MIN_FONT_SIZE, _get_int("name_font_size", 60))
@@ -2999,6 +3375,7 @@ class RollCallTimerWindow(QWidget):
         self.update_mode_ui(force_timer_reset=self.mode == "timer")
         self.on_group_change(initial=True)
         self.display_current_student()
+        self._update_encryption_button()
 
     def _build_ui(self) -> None:
         self.setStyleSheet("background-color: #f4f5f7;")
@@ -3077,6 +3454,10 @@ class RollCallTimerWindow(QWidget):
         self.reset_button.clicked.connect(self.reset_roll_call_pools)
         control_layout.addWidget(self.reset_button)
 
+        self.encrypt_button = QPushButton(""); _setup_secondary_button(self.encrypt_button)
+        self.encrypt_button.clicked.connect(self._on_encrypt_button_clicked)
+        control_layout.addWidget(self.encrypt_button)
+
         top.addWidget(control_bar, 0, Qt.AlignmentFlag.AlignLeft)
         top.addStretch(1)
 
@@ -3154,6 +3535,192 @@ class RollCallTimerWindow(QWidget):
 
         self.roll_call_frame.clicked.connect(self.roll_student)
         self.id_label.installEventFilter(self); self.name_label.installEventFilter(self)
+
+    def _update_encryption_button(self) -> None:
+        if not hasattr(self, "encrypt_button"):
+            return
+        disk_encrypted = os.path.exists(self._encrypted_file_path) and not os.path.exists(self.STUDENT_FILE)
+        if disk_encrypted and not self._student_file_encrypted:
+            self._student_file_encrypted = True
+        elif not disk_encrypted and self._student_file_encrypted and not os.path.exists(self._encrypted_file_path):
+            self._student_file_encrypted = False
+            self._student_password = None
+        self.encrypt_button.setText("解密" if self._student_file_encrypted else "加密")
+        if self._student_file_encrypted:
+            self.encrypt_button.setToolTip("当前学生数据已加密，点击输入密码以解密或更新。")
+        else:
+            self.encrypt_button.setToolTip("点击为 students.xlsx 设置密码并生成加密文件。")
+
+    def _on_encrypt_button_clicked(self) -> None:
+        if self._student_file_encrypted:
+            self._handle_decrypt_student_file()
+        else:
+            self._handle_encrypt_student_file()
+
+    def _prompt_new_encryption_password(self) -> Optional[str]:
+        attempts = 0
+        while attempts < 3:
+            password, ok = QInputDialog.getText(
+                self,
+                "设置加密密码",
+                "请输入新的加密密码：",
+                QLineEdit.EchoMode.Password,
+            )
+            if not ok:
+                return None
+            password = password.strip()
+            if not password:
+                show_quiet_information(self, "密码不能为空，请重新输入。")
+                attempts += 1
+                continue
+            confirm, ok = QInputDialog.getText(
+                self,
+                "确认加密密码",
+                "请再次输入密码以确认：",
+                QLineEdit.EchoMode.Password,
+            )
+            if not ok:
+                return None
+            confirm = confirm.strip()
+            if password != confirm:
+                show_quiet_information(self, "两次输入的密码不一致，请重新设置。")
+                attempts += 1
+                continue
+            return password
+        show_quiet_information(self, "未能成功设置密码，已取消加密操作。")
+        return None
+
+    def _prompt_existing_encryption_password(self, title: str) -> Optional[str]:
+        attempts = 0
+        while attempts < 3:
+            password, ok = QInputDialog.getText(
+                self,
+                title,
+                "请输入当前的加密密码：",
+                QLineEdit.EchoMode.Password,
+            )
+            if not ok:
+                return None
+            password = password.strip()
+            if not password:
+                show_quiet_information(self, "密码不能为空，请重新输入。")
+                attempts += 1
+                continue
+            return password
+        show_quiet_information(self, "密码输入次数过多，操作已取消。")
+        return None
+
+    def _handle_encrypt_student_file(self) -> None:
+        if not (PANDAS_AVAILABLE and pd is not None):
+            show_quiet_information(self, "当前环境缺少 pandas/openpyxl，无法执行加密。")
+            return
+        password = self._prompt_new_encryption_password()
+        if not password:
+            return
+        if self.student_data is None:
+            show_quiet_information(self, "没有可加密的学生数据。")
+            return
+        try:
+            df = self.student_data.copy()
+        except Exception:
+            df = pd.DataFrame(self.student_data)
+        try:
+            _save_student_workbook(
+                df,
+                self.STUDENT_FILE,
+                self._encrypted_file_path,
+                encrypted=True,
+                password=password,
+            )
+            _set_session_student_encryption(True, password)
+            self._student_file_encrypted = True
+            self._student_password = password
+            self._update_encryption_button()
+            self._propagate_student_dataframe()
+            show_quiet_information(self, "已生成加密文件 students.xlsx.enc，并移除明文数据。")
+            self._schedule_save()
+        except Exception as exc:
+            show_quiet_information(self, f"加密失败：{exc}")
+
+    def _handle_decrypt_student_file(self) -> None:
+        encrypted_path = self._encrypted_file_path
+        if not os.path.exists(encrypted_path):
+            show_quiet_information(self, "未找到加密文件，无法解密。")
+            self._student_file_encrypted = False
+            self._update_encryption_button()
+            return
+        password = self._prompt_existing_encryption_password("解密学生数据")
+        if not password:
+            return
+        try:
+            with open(encrypted_path, "rb") as fh:
+                payload = fh.read()
+            plain_bytes = _decrypt_student_bytes(password, payload)
+        except Exception as exc:
+            show_quiet_information(self, f"解密失败：{exc}")
+            return
+        try:
+            buffer = io.BytesIO(plain_bytes)
+            df = pd.read_excel(buffer)
+            df = _normalize_student_dataframe(df, drop_incomplete=False)
+        except Exception as exc:
+            show_quiet_information(self, f"读取解密后的学生数据失败：{exc}")
+            return
+        try:
+            _save_student_workbook(
+                df,
+                self.STUDENT_FILE,
+                self._encrypted_file_path,
+                encrypted=False,
+                password=None,
+            )
+        except Exception as exc:
+            show_quiet_information(self, f"写入学生数据失败：{exc}")
+            return
+        self._student_file_encrypted = False
+        self._student_password = None
+        _set_session_student_encryption(False, None)
+        self._apply_decrypted_student_data(df)
+        self._update_encryption_button()
+        show_quiet_information(self, "已成功解密学生数据并恢复 students.xlsx。")
+        self._schedule_save()
+
+    def _apply_decrypted_student_data(self, df: pd.DataFrame) -> None:
+        if not (PANDAS_AVAILABLE and pd is not None):
+            return
+        self.student_data = df
+        self.groups = ["全部"]
+        if not self.student_data.empty:
+            group_values = {
+                str(g).strip().upper()
+                for g in self.student_data.get("分组", pd.Series([], dtype="object")).dropna()
+                if str(g).strip()
+            }
+            self.groups.extend(sorted(group_values))
+        if self.current_group_name not in self.groups:
+            self.current_group_name = "全部"
+        self._group_all_indices = {}
+        self._group_remaining_indices = {}
+        self._group_last_student = {}
+        self._group_initial_sequences = {}
+        self._group_drawn_history = {}
+        self._global_drawn_students = set()
+        self._student_groups = {}
+        self._rebuild_group_buttons_ui()
+        self._rebuild_group_indices()
+        self._ensure_group_pool(self.current_group_name, force_reset=True)
+        self.current_student_index = None
+        self._pending_passive_student = None
+        self.display_current_student()
+        self._propagate_student_dataframe()
+
+    def _propagate_student_dataframe(self) -> None:
+        parent = self.parent()
+        if parent is not None and hasattr(parent, "student_data"):
+            try:
+                setattr(parent, "student_data", self.student_data)
+            except Exception:
+                pass
 
     def _apply_saved_fonts(self) -> None:
         id_font = QFont("Microsoft YaHei UI", self.last_id_font_size, QFont.Weight.Bold)
@@ -3505,7 +4072,13 @@ class RollCallTimerWindow(QWidget):
             with self._score_write_lock:
                 df = self.student_data.copy()
                 df = _normalize_student_dataframe(df, drop_incomplete=False)
-                _write_student_workbook(self.STUDENT_FILE, df)
+                _save_student_workbook(
+                    df,
+                    self.STUDENT_FILE,
+                    self._encrypted_file_path,
+                    encrypted=self._student_file_encrypted,
+                    password=self._student_password,
+                )
             self._score_persist_failed = False
         except Exception as exc:
             if not self._score_persist_failed:
@@ -4349,6 +4922,7 @@ class RollCallTimerWindow(QWidget):
         sec["name_font_size"] = str(self.last_name_font_size)
         sec["timer_font_size"] = str(self.last_timer_font_size)
         sec["scoreboard_order"] = self.scoreboard_order
+        sec["students_encrypted"] = bool_to_str(self._student_file_encrypted)
         remaining_payload: Dict[str, List[int]] = {}
         for group, indices in self._group_remaining_indices.items():
             cleaned: List[int] = []
@@ -4417,6 +4991,49 @@ class AboutDialog(QDialog):
 
 
 # ---------- 数据 ----------
+_ENCRYPTED_MAGIC = b"CTS1"
+
+
+def _derive_stream_keys(password: str, salt: bytes) -> tuple[bytes, bytes]:
+    material = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 120000, dklen=64)
+    return material[:32], material[32:]
+
+
+def _generate_keystream(stream_key: bytes, length: int) -> bytes:
+    output = bytearray()
+    counter = 0
+    while len(output) < length:
+        block = hashlib.sha256(stream_key + counter.to_bytes(8, "big")).digest()
+        output.extend(block)
+        counter += 1
+    return bytes(output[:length])
+
+
+def _encrypt_student_bytes(password: str, data: bytes) -> bytes:
+    if not password:
+        raise ValueError("缺少加密密码")
+    salt = os.urandom(16)
+    stream_key, mac_key = _derive_stream_keys(password, salt)
+    keystream = _generate_keystream(stream_key, len(data))
+    cipher = bytes(b ^ k for b, k in zip(data, keystream))
+    tag = hmac.new(mac_key, cipher, hashlib.sha256).digest()
+    return _ENCRYPTED_MAGIC + salt + tag + cipher
+
+
+def _decrypt_student_bytes(password: str, blob: bytes) -> bytes:
+    if not blob.startswith(_ENCRYPTED_MAGIC) or len(blob) <= len(_ENCRYPTED_MAGIC) + 48:
+        raise ValueError("文件格式无效")
+    salt = blob[len(_ENCRYPTED_MAGIC): len(_ENCRYPTED_MAGIC) + 16]
+    tag = blob[len(_ENCRYPTED_MAGIC) + 16: len(_ENCRYPTED_MAGIC) + 48]
+    cipher = blob[len(_ENCRYPTED_MAGIC) + 48:]
+    stream_key, mac_key = _derive_stream_keys(password, salt)
+    expected_tag = hmac.new(mac_key, cipher, hashlib.sha256).digest()
+    if not hmac.compare_digest(expected_tag, tag):
+        raise ValueError("密码错误或文件已损坏")
+    keystream = _generate_keystream(stream_key, len(cipher))
+    return bytes(b ^ k for b, k in zip(cipher, keystream))
+
+
 def _normalize_text(value: object) -> str:
     if PANDAS_AVAILABLE and pd is not None:
         if pd.isna(value):
@@ -4476,21 +5093,70 @@ def _normalize_student_dataframe(df: pd.DataFrame, drop_incomplete: bool = True)
 
 
 def _write_student_workbook(file_path: str, df: pd.DataFrame) -> None:
+    data = _export_student_workbook_bytes(df)
+    tmp_dir = os.path.dirname(os.path.abspath(file_path)) or "."
+    fd, tmp_path = tempfile.mkstemp(suffix=".xlsx", dir=tmp_dir)
+    try:
+        with os.fdopen(fd, "wb") as tmp_file:
+            tmp_file.write(data)
+        os.replace(tmp_path, file_path)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(tmp_path)
+
+
+def _write_encrypted_student_workbook(file_path: str, df: pd.DataFrame, password: str) -> None:
+    data = _export_student_workbook_bytes(df)
+    payload = _encrypt_student_bytes(password, data)
+    tmp_dir = os.path.dirname(os.path.abspath(file_path)) or "."
+    fd, tmp_path = tempfile.mkstemp(suffix=".enc", dir=tmp_dir)
+    try:
+        with os.fdopen(fd, "wb") as tmp_file:
+            tmp_file.write(payload)
+        os.replace(tmp_path, file_path)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(tmp_path)
+
+
+def _export_student_workbook_bytes(df: pd.DataFrame) -> bytes:
     try:
         export_df = _normalize_student_dataframe(df, drop_incomplete=False)
     except Exception:
         export_df = df.copy()
 
     if not OPENPYXL_AVAILABLE:
-        export_df.to_excel(file_path, index=False)
-        return
+        buffer = io.BytesIO()
+        export_df.to_excel(buffer, index=False)
+        return buffer.getvalue()
+
+
+def _save_student_workbook(
+    df: pd.DataFrame,
+    file_path: str,
+    encrypted_file_path: str,
+    *,
+    encrypted: bool,
+    password: Optional[str],
+) -> None:
+    if encrypted:
+        if not password:
+            raise ValueError("缺少加密密码")
+        _write_encrypted_student_workbook(encrypted_file_path, df, password)
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(file_path)
+    else:
+        _write_student_workbook(file_path, df)
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(encrypted_file_path)
 
     try:
         from openpyxl import Workbook
         from openpyxl.styles import Font
     except Exception:
-        export_df.to_excel(file_path, index=False)
-        return
+        buffer = io.BytesIO()
+        export_df.to_excel(buffer, index=False)
+        return buffer.getvalue()
 
     try:
         workbook = Workbook()
@@ -4519,9 +5185,14 @@ def _write_student_workbook(file_path: str, df: pd.DataFrame) -> None:
                 if isinstance(cell.value, str):
                     cell.value = cell.value.strip()
 
-        workbook.save(file_path)
+        buffer = io.BytesIO()
+        workbook.save(buffer)
+        buffer.seek(0)
+        return buffer.getvalue()
     except Exception:
-        export_df.to_excel(file_path, index=False)
+        buffer = io.BytesIO()
+        export_df.to_excel(buffer, index=False)
+        return buffer.getvalue()
 
 
 def load_student_data(parent: Optional[QWidget]) -> Optional[pd.DataFrame]:
@@ -4530,6 +5201,38 @@ def load_student_data(parent: Optional[QWidget]) -> Optional[pd.DataFrame]:
         QMessageBox.warning(parent, "提示", "未安装 pandas/openpyxl，点名功能不可用。")
         return None
     file_path = RollCallTimerWindow.STUDENT_FILE
+    encrypted_path = getattr(RollCallTimerWindow, "ENCRYPTED_STUDENT_FILE", file_path + ".enc")
+    if not os.path.exists(file_path) and os.path.exists(encrypted_path):
+        attempts = 0
+        while attempts < 3:
+            password, ok = QInputDialog.getText(
+                parent,
+                "解密学生数据",
+                "检测到已加密的学生名单，请输入密码：",
+                QLineEdit.EchoMode.Password,
+            )
+            if not ok:
+                QMessageBox.information(parent, "提示", "已取消加载加密的学生名单。")
+                return None
+            password = password.strip()
+            if not password:
+                QMessageBox.warning(parent, "提示", "密码不能为空，请重新输入。")
+                attempts += 1
+                continue
+            try:
+                with open(encrypted_path, "rb") as fh:
+                    payload = fh.read()
+                plain_bytes = _decrypt_student_bytes(password, payload)
+                buffer = io.BytesIO(plain_bytes)
+                df = pd.read_excel(buffer)
+                df = _normalize_student_dataframe(df)
+                _set_session_student_encryption(True, password)
+                return df
+            except Exception as exc:
+                attempts += 1
+                QMessageBox.warning(parent, "提示", f"解密失败：{exc}")
+        QMessageBox.critical(parent, "错误", "多次输入密码失败，无法加载学生名单。")
+        return None
     if not os.path.exists(file_path):
         try:
             df = pd.DataFrame(
@@ -4538,6 +5241,7 @@ def load_student_data(parent: Optional[QWidget]) -> Optional[pd.DataFrame]:
             df = _normalize_student_dataframe(df)
             _write_student_workbook(file_path, df)
             show_quiet_information(parent, f"未找到学生名单，已为您创建模板文件：{file_path}")
+            _set_session_student_encryption(False, None)
         except Exception as exc:
             QMessageBox.critical(parent, "错误", f"创建模板文件失败：{exc}")
             return None
@@ -4545,6 +5249,9 @@ def load_student_data(parent: Optional[QWidget]) -> Optional[pd.DataFrame]:
         df = pd.read_excel(file_path)
         df = _normalize_student_dataframe(df)
         _write_student_workbook(file_path, df)
+        _set_session_student_encryption(False, None)
+        if os.path.exists(encrypted_path):
+            show_quiet_information(parent, "检测到同时存在加密文件，将优先使用明文 students.xlsx。")
         return df
     except Exception as exc:
         QMessageBox.critical(parent, "错误", f"无法加载学生名单，请检查文件格式。\n错误：{exc}")
@@ -4856,9 +5563,12 @@ class LauncherWindow(QWidget):
     def toggle_roll_call(self) -> None:
         """切换点名/计时窗口的显示状态，必要时先创建窗口。"""
         if self.student_data is None:
-            QMessageBox.warning(self, "提示", "学生数据加载失败，无法打开点名器。"); return
+            self.student_data = load_student_data(self) if PANDAS_AVAILABLE else None
+        if self.student_data is None:
+            QMessageBox.warning(self, "提示", "学生数据加载失败，无法打开点名器。")
+            return
         if self.roll_call_window is None:
-            self.roll_call_window = RollCallTimerWindow(self.settings_manager, self.student_data)
+            self.roll_call_window = RollCallTimerWindow(self.settings_manager, self.student_data, parent=self)
             self.roll_call_window.window_closed.connect(self.on_roll_call_window_closed)
             self.roll_call_window.visibility_changed.connect(self.on_roll_call_visibility_changed)
             self.roll_call_window.show()
@@ -4872,6 +5582,12 @@ class LauncherWindow(QWidget):
                 self.roll_call_button.setText("隐藏点名")
 
     def on_roll_call_window_closed(self) -> None:
+        window = self.roll_call_window
+        if window is not None:
+            try:
+                self.student_data = window.student_data
+            except Exception:
+                pass
         self.roll_call_window = None
         self.roll_call_button.setText("点名/计时")
 
