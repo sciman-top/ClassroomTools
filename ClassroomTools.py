@@ -501,6 +501,53 @@ def show_quiet_information(parent: Optional[QWidget], text: str, title: str = "�
     popup.show()
 
 
+class QuietQuestionDialog(QDialog):
+    """静音确认对话框，避免系统默认的提示音。"""
+
+    def __init__(self, parent: Optional[QWidget], text: str, title: str) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.setMinimumWidth(320)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 18, 24, 18)
+        layout.setSpacing(12)
+
+        label = QLabel(text, self)
+        label.setWordWrap(True)
+        label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(label)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+
+        cancel = QPushButton("取消", self)
+        cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(cancel)
+
+        ok = QPushButton("确定", self)
+        ok.setCursor(Qt.CursorShape.PointingHandCursor)
+        ok.setDefault(True)
+        ok.clicked.connect(self.accept)
+        buttons.addWidget(ok)
+
+        layout.addLayout(buttons)
+        self._ok_button = ok
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        self._ok_button.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
+
+
+def ask_quiet_confirmation(parent: Optional[QWidget], text: str, title: str = "确认") -> bool:
+    dialog = QuietQuestionDialog(parent, text, title)
+    return dialog.exec() == QDialog.DialogCode.Accepted
+
+
 # ---------- 配置 ----------
 class SettingsManager:
     """负责读取/写入配置文件的轻量封装。"""
@@ -1912,6 +1959,22 @@ class StudentListDialog(QDialog):
             button.setCursor(Qt.CursorShape.PointingHandCursor)
             button.setFixedSize(button_size)
             button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            button.setStyleSheet(
+                "QPushButton {"
+                "    padding: 4px 12px;"
+                "    border-radius: 10px;"
+                "    border: 1px solid #c3c7cf;"
+                "    background-color: #ffffff;"
+                "    color: #1a1c1f;"
+                "}"
+                "QPushButton:hover {"
+                "    border-color: #1a73e8;"
+                "    background-color: #eaf2ff;"
+                "}"
+                "QPushButton:pressed {"
+                "    background-color: #d7e7ff;"
+                "}"
+            )
             button.clicked.connect(lambda _checked=False, value=data_index: self._select_student(value))
             grid.addWidget(button, row, column, Qt.AlignmentFlag.AlignCenter)
 
@@ -2036,6 +2099,21 @@ class ScoreboardDialog(QDialog):
             close_button.setMinimumHeight(42)
             close_button.setCursor(Qt.CursorShape.PointingHandCursor)
             close_button.setFont(QFont(calligraphy_font, 22, QFont.Weight.Bold))
+        box.setStyleSheet(
+            "QDialogButtonBox QPushButton {"
+            "    padding: 6px 24px;"
+            "    border-radius: 22px;"
+            "    border: 1px solid #1a73e8;"
+            "    background-color: #1a73e8;"
+            "    color: #ffffff;"
+            "}"
+            "QDialogButtonBox QPushButton:hover {"
+            "    background-color: #185abc;"
+            "}"
+            "QDialogButtonBox QPushButton:pressed {"
+            "    background-color: #174ea6;"
+            "}"
+        )
         box.rejected.connect(self.reject)
         layout.addWidget(box)
 
@@ -2078,1104 +2156,7 @@ class ScoreboardDialog(QDialog):
             "    border-color: #1a73e8;"
             "    color: #ffffff;"
             "}"
-            "QPushButton[class=\"orderButton\"] {"
-            "    background-color: rgba(255, 255, 255, 0.88);"
-            "    border-radius: 22px;"
-            "    border: 1px solid rgba(16, 61, 115, 0.24);"
-            "    padding: 4px 18px;"
-            "    color: #0b3d91;"
-            "}"
-            "QPushButton[class=\"orderButton\"]:hover {"
-            "    border-color: #1a73e8;"
-            "    background-color: rgba(26, 115, 232, 0.12);"
-            "}"
-            "QPushButton[class=\"orderButton\"]:checked {"
-            "    background-color: #1a73e8;"
-            "    border-color: #1a73e8;"
-            "    color: #ffffff;"
-            "}"
-            "QPushButton[class=\"orderButton\"] {"
-            "    background-color: rgba(255, 255, 255, 0.88);"
-            "    border-radius: 22px;"
-            "    border: 1px solid rgba(16, 61, 115, 0.24);"
-            "    padding: 4px 18px;"
-            "    color: #0b3d91;"
-            "}"
-            "QPushButton[class=\"orderButton\"]:hover {"
-            "    border-color: #1a73e8;"
-            "    background-color: rgba(26, 115, 232, 0.12);"
-            "}"
-            "QPushButton[class=\"orderButton\"]:checked {"
-            "    background-color: #1a73e8;"
-            "    border-color: #1a73e8;"
-            "    color: #ffffff;"
-            "}"
-            "QPushButton[class=\"orderButton\"] {"
-            "    background-color: rgba(255, 255, 255, 0.88);"
-            "    border-radius: 22px;"
-            "    border: 1px solid rgba(16, 61, 115, 0.24);"
-            "    padding: 4px 18px;"
-            "    color: #0b3d91;"
-            "}"
-            "QPushButton[class=\"orderButton\"]:hover {"
-            "    border-color: #1a73e8;"
-            "    background-color: rgba(26, 115, 232, 0.12);"
-            "}"
-            "QPushButton[class=\"orderButton\"]:checked {"
-            "    background-color: #1a73e8;"
-            "    border-color: #1a73e8;"
-            "    color: #ffffff;"
-            "}"
         )
-
-        screen = QApplication.primaryScreen()
-        self._available_geometry = screen.availableGeometry() if screen is not None else QRect(0, 0, 1920, 1080)
-
-        self._update_order_buttons()
-        self._populate_grid()
-
-        if screen is not None:
-            self.setGeometry(self._available_geometry)
-
-    def _update_order_buttons(self) -> None:
-        for key, button in self.order_buttons.items():
-            block = button.blockSignals(True)
-            button.setChecked(key == self._order)
-            button.blockSignals(block)
-
-    def _on_order_button_clicked(self, order: str) -> None:
-        if order not in {self.ORDER_RANK, self.ORDER_ID}:
-            self._update_order_buttons()
-            return
-        if order == self._order:
-            self._update_order_buttons()
-            return
-        self._order = order
-        if callable(self._order_changed_callback):
-            try:
-                self._order_changed_callback(order)
-            except Exception:
-                pass
-        self._update_order_buttons()
-        self._populate_grid()
-
-    def _clear_grid(self) -> None:
-        while self.grid_layout.count():
-            item = self.grid_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-        for row in range(self._grid_row_count):
-            self.grid_layout.setRowStretch(row, 0)
-            self.grid_layout.setRowMinimumHeight(row, 0)
-        for column in range(self._grid_column_count):
-            self.grid_layout.setColumnStretch(column, 0)
-            self.grid_layout.setColumnMinimumWidth(column, 0)
-        self._grid_row_count = 0
-        self._grid_column_count = 0
-
-    def _collect_display_candidates(self) -> tuple[List[tuple[int, str, str]], List[str], List[str]]:
-        sorted_students = self._sort_students()
-        alternate_order = (
-            self.ORDER_ID if self._order == self.ORDER_RANK else self.ORDER_RANK
-        )
-        alternate_students = self._sort_students(alternate_order)
-
-        display_entries: List[tuple[int, str, str]] = []
-        display_candidates: List[str] = []
-        score_candidates: List[str] = []
-
-        for idx, (sid, name, score) in enumerate(sorted_students):
-            display_text = self._format_display_text(idx, sid, name)
-            score_text = self._format_score_text(score)
-            display_entries.append((idx, display_text, score_text))
-            display_candidates.append(display_text)
-            score_candidates.append(score_text)
-
-        for idx, (sid, name, score) in enumerate(alternate_students):
-            display_candidates.append(
-                self._format_display_text_for_order(
-                    alternate_order, idx, sid, name
-                )
-            )
-            score_candidates.append(self._format_score_text(score))
-
-        return display_entries, display_candidates, score_candidates
-
-    def _compute_card_metrics(self) -> Optional[_CardMetrics]:
-        count = len(self.students)
-        if count == 0:
-            return None
-
-        available = self._available_geometry
-        key = (count, available.width(), available.height())
-        if self._card_metrics is not None and self._card_metrics_key == key:
-            return self._card_metrics
-
-        columns = 10
-        rows = max(1, math.ceil(count / columns))
-
-        usable_width = max(available.width() - 160, 640)
-        usable_height = max(available.height() - 240, 520)
-
-        margins = self.grid_layout.contentsMargins()
-        horizontal_spacing = max(14, int(usable_width * 0.01))
-        vertical_spacing = max(18, int(usable_height * 0.035 / rows))
-
-        spacing_total_x = horizontal_spacing * max(0, columns - 1)
-        spacing_total_y = vertical_spacing * max(0, rows - 1)
-
-        available_width_for_cards = (
-            usable_width - margins.left() - margins.right() - spacing_total_x
-        )
-        available_height_for_cards = (
-            usable_height - margins.top() - margins.bottom() - spacing_total_y
-        )
-
-        per_card_width = max(1.0, available_width_for_cards / columns)
-        per_card_height = max(1.0, available_height_for_cards / rows)
-
-        card_width = int(math.floor(per_card_width))
-        card_height = int(math.floor(per_card_height))
-
-        if per_card_width >= 120:
-            card_width = max(card_width, 120)
-        if per_card_height >= 180:
-            card_height = max(card_height, 180)
-
-        padding_h = max(12, int(card_width * 0.08))
-        padding_v = max(14, int(card_height * 0.1))
-        inner_spacing = max(6, int(card_height * 0.045))
-
-        display_entries, display_candidates, score_candidates = self._collect_display_candidates()
-
-        if not display_candidates:
-            return None
-
-        calligraphy_font = self._calligraphy_font
-        probe_font = QFont(calligraphy_font, 64, QFont.Weight.Bold)
-        metrics = QFontMetrics(probe_font)
-
-        widest_display = max(
-            display_candidates,
-            key=lambda text: metrics.tightBoundingRect(text).width(),
-        )
-        widest_score = max(
-            score_candidates,
-            key=lambda text: metrics.tightBoundingRect(text).width(),
-        )
-        name_label.setFont(QFont(calligraphy_font, font_size, QFont.Weight.Bold))
-        name_label.setStyleSheet("margin: 0px; padding: 0px;")
-        layout.addWidget(name_label)
-
-        score_label = QLabel(score_text)
-        score_label.setProperty("class", "scoreboardScore")
-        score_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        score_label.setFont(QFont(calligraphy_font, font_size, QFont.Weight.Bold))
-        score_label.setStyleSheet(f"margin-top: {max(6, inner_spacing // 2)}px;")
-        layout.addWidget(score_label)
-
-        layout.addStretch(1)
-        return wrapper
-
-    def _format_display_text(self, index: int, sid: str, name: str) -> str:
-        return self._format_display_text_for_order(self._order, index, sid, name)
-
-    def _format_display_text_for_order(
-        self, order: str, index: int, sid: str, name: str
-    ) -> str:
-        clean_name = (name or "").strip() or "未命名"
-        if order == self.ORDER_ID:
-            sid_display = str(sid).strip() or "—"
-            return f"{sid_display}.{clean_name}"
-        return f"{index + 1}.{clean_name}"
-
-    @staticmethod
-    def _format_score_text(score: int | float | str) -> str:
-        text = "—"
-        try:
-            value = float(score)
-        except (TypeError, ValueError):
-            score_str = str(score).strip()
-            if score_str and score_str.lower() != "none":
-                text = score_str
-        else:
-            if math.isfinite(value):
-                if abs(value - int(value)) < 1e-6:
-                    text = str(int(round(value)))
-                else:
-                    text = f"{value:.2f}".rstrip("0").rstrip(".")
-        return f"{text} 分"
-
-    @staticmethod
-    def _fit_font_size(
-        text: str,
-        family: str,
-        weight: QFont.Weight,
-        max_width: int,
-        max_height: int,
-        minimum: int,
-        maximum: int,
-    ) -> int:
-        if not text:
-            return max(6, min(minimum, maximum))
-        if max_width <= 0 or max_height <= 0:
-            return max(6, min(minimum, maximum))
-        lower = max(6, min(minimum, maximum))
-        upper = max(6, max(minimum, maximum))
-        for size in range(upper, lower - 1, -1):
-            font = QFont(family, size, weight)
-            metrics = QFontMetrics(font)
-            rect = metrics.tightBoundingRect(text)
-            if rect.width() <= max_width and rect.height() <= max_height:
-                return size
-        return lower
-
-    def _populate_grid(self) -> None:
-        self._clear_grid()
-        count = len(self.students)
-        layout = self.grid_layout
-        calligraphy_font = self._calligraphy_font
-
-        usable_name_width = max(60, card_width - 2 * padding_h)
-        content_height = max(80, card_height - 2 * padding_v - inner_spacing)
-        name_height = int(content_height * 0.58)
-        score_height = max(32, content_height - name_height)
-
-        font_upper_bound = int(min(card_width * 0.28, card_height * 0.36))
-        font_upper_bound = max(20, font_upper_bound)
-        fit_minimum = 14
-
-        name_fit = self._fit_font_size(
-            widest_display,
-            calligraphy_font,
-            QFont.Weight.Bold,
-            usable_name_width,
-            name_height,
-            fit_minimum,
-            font_upper_bound,
-        )
-        score_fit = self._fit_font_size(
-            widest_score,
-            calligraphy_font,
-            QFont.Weight.Bold,
-            usable_name_width,
-            score_height,
-            fit_minimum,
-            font_upper_bound,
-        )
-
-        final_font_size = max(fit_minimum, min(name_fit, score_fit, font_upper_bound))
-
-        self._card_metrics = ScoreboardDialog._CardMetrics(
-            count=count,
-            columns=columns,
-            rows=rows,
-            card_width=card_width,
-            card_height=card_height,
-            padding_h=padding_h,
-            padding_v=padding_v,
-            inner_spacing=inner_spacing,
-            font_size=final_font_size,
-            horizontal_spacing=horizontal_spacing,
-            vertical_spacing=vertical_spacing,
-        )
-        self._card_metrics_key = key
-        return self._card_metrics
-
-    def _ensure_metrics(self) -> Optional[_CardMetrics]:
-        metrics = self._compute_card_metrics()
-        if metrics is not None:
-            return metrics
-        self._card_metrics = None
-        self._card_metrics_key = None
-        return None
-
-    def _sort_students(self, order: Optional[str] = None) -> List[tuple[str, str, int]]:
-        data = list(self.students)
-        current_order = self._order if order is None else order
-        if current_order == self.ORDER_ID:
-            def _id_key(item: tuple[str, str, int]) -> tuple[int, str, str]:
-                sid_text = str(item[0]).strip()
-                try:
-                    sid_value = int(sid_text)
-                except (TypeError, ValueError):
-                    sid_value = sys.maxsize
-                return (sid_value, sid_text, item[1])
-
-            data.sort(key=_id_key)
-        else:
-            def _rank_key(item: tuple[str, str, int]) -> tuple[int, int, str]:
-                sid_text = str(item[0]).strip()
-                try:
-                    sid_value = int(sid_text)
-                except (TypeError, ValueError):
-                    sid_value = sys.maxsize
-                return (-item[2], sid_value, item[1])
-
-            data.sort(key=_rank_key)
-        return data
-
-    def _create_card(
-        self,
-        display_text: str,
-        score_text: str,
-        card_width: int,
-        card_height: int,
-        font_size: int,
-        padding_h: int,
-        padding_v: int,
-        inner_spacing: int,
-    ) -> QWidget:
-        calligraphy_font = self._calligraphy_font
-        wrapper = QWidget()
-        wrapper.setProperty("class", "scoreboardWrapper")
-        wrapper.setFixedSize(card_width, card_height)
-        wrapper.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-
-        layout = QVBoxLayout(wrapper)
-        layout.setContentsMargins(padding_h, padding_v, padding_h, padding_v)
-        layout.setSpacing(inner_spacing)
-
-        name_label = QLabel(display_text or "未命名")
-        name_label.setProperty("class", "scoreboardName")
-        name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        name_label.setWordWrap(False)
-        name_label.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
-        )
-        name_label.setFont(QFont(calligraphy_font, font_size, QFont.Weight.Bold))
-        name_label.setStyleSheet("margin: 0px; padding: 0px;")
-        layout.addWidget(name_label)
-
-        score_label = QLabel(score_text)
-        score_label.setProperty("class", "scoreboardScore")
-        score_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        score_label.setWordWrap(False)
-        score_label.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
-        )
-        score_label.setFont(QFont(calligraphy_font, font_size, QFont.Weight.Bold))
-        score_label.setStyleSheet(f"margin-top: {max(6, inner_spacing // 2)}px;")
-        layout.addWidget(score_label)
-
-        layout.addStretch(1)
-        return wrapper
-
-    def _format_display_text(self, index: int, sid: str, name: str) -> str:
-        return self._format_display_text_for_order(self._order, index, sid, name)
-
-    def _format_display_text_for_order(
-        self, order: str, index: int, sid: str, name: str
-    ) -> str:
-        clean_name = (name or "").strip() or "未命名"
-        if order == self.ORDER_ID:
-            sid_display = str(sid).strip() or "—"
-            return f"{sid_display}.{clean_name}"
-        return f"{index + 1}.{clean_name}"
-
-    @staticmethod
-    def _format_score_text(score: int | float | str) -> str:
-        text = "—"
-        try:
-            value = float(score)
-        except (TypeError, ValueError):
-            score_str = str(score).strip()
-            if score_str and score_str.lower() != "none":
-                text = score_str
-        else:
-            if math.isfinite(value):
-                if abs(value - int(value)) < 1e-6:
-                    text = str(int(round(value)))
-                else:
-                    text = f"{value:.2f}".rstrip("0").rstrip(".")
-        return f"{text} 分"
-
-    @staticmethod
-    def _fit_font_size(
-        text: str,
-        family: str,
-        weight: QFont.Weight,
-        max_width: int,
-        max_height: int,
-        minimum: int,
-        maximum: int,
-    ) -> int:
-        if not text:
-            return max(6, min(minimum, maximum))
-        if max_width <= 0 or max_height <= 0:
-            return max(6, min(minimum, maximum))
-        lower = max(6, min(minimum, maximum))
-        upper = max(6, max(minimum, maximum))
-        for size in range(upper, lower - 1, -1):
-            font = QFont(family, size, weight)
-            metrics = QFontMetrics(font)
-            rect = metrics.tightBoundingRect(text)
-            if rect.width() <= max_width and rect.height() <= max_height:
-                return size
-        return lower
-
-    def _populate_grid(self) -> None:
-        self._clear_grid()
-        count = len(self.students)
-        layout = self.grid_layout
-        calligraphy_font = self._calligraphy_font
-
-        screen = QApplication.primaryScreen()
-        self._available_geometry = screen.availableGeometry() if screen is not None else QRect(0, 0, 1920, 1080)
-
-        self._update_order_buttons()
-        self._populate_grid()
-
-        if screen is not None:
-            self.setGeometry(self._available_geometry)
-
-    def _update_order_buttons(self) -> None:
-        for key, button in self.order_buttons.items():
-            block = button.blockSignals(True)
-            button.setChecked(key == self._order)
-            button.blockSignals(block)
-
-    def _on_order_button_clicked(self, order: str) -> None:
-        if order not in {self.ORDER_RANK, self.ORDER_ID}:
-            self._update_order_buttons()
-            return
-        if order == self._order:
-            self._update_order_buttons()
-            return
-        self._order = order
-        if callable(self._order_changed_callback):
-            try:
-                self._order_changed_callback(order)
-            except Exception:
-                pass
-        self._update_order_buttons()
-        self._populate_grid()
-
-    def _clear_grid(self) -> None:
-        while self.grid_layout.count():
-            item = self.grid_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-        for row in range(self._grid_row_count):
-            self.grid_layout.setRowStretch(row, 0)
-            self.grid_layout.setRowMinimumHeight(row, 0)
-        for column in range(self._grid_column_count):
-            self.grid_layout.setColumnStretch(column, 0)
-            self.grid_layout.setColumnMinimumWidth(column, 0)
-        self._grid_row_count = 0
-        self._grid_column_count = 0
-
-    def _collect_display_candidates(self) -> tuple[List[tuple[int, str, str]], List[str], List[str]]:
-        sorted_students = self._sort_students()
-        alternate_order = (
-            self.ORDER_ID if self._order == self.ORDER_RANK else self.ORDER_RANK
-        )
-        alternate_students = self._sort_students(alternate_order)
-
-        display_entries: List[tuple[int, str, str]] = []
-        display_candidates: List[str] = []
-        score_candidates: List[str] = []
-
-        for idx, (sid, name, score) in enumerate(sorted_students):
-            display_text = self._format_display_text(idx, sid, name)
-            score_text = self._format_score_text(score)
-            display_entries.append((idx, display_text, score_text))
-            display_candidates.append(display_text)
-            score_candidates.append(score_text)
-
-        for idx, (sid, name, score) in enumerate(alternate_students):
-            display_candidates.append(
-                self._format_display_text_for_order(
-                    alternate_order, idx, sid, name
-                )
-            )
-            score_candidates.append(self._format_score_text(score))
-
-        return display_entries, display_candidates, score_candidates
-
-    def _compute_card_metrics(self) -> Optional[_CardMetrics]:
-        count = len(self.students)
-        if count == 0:
-            return None
-
-        available = self._available_geometry
-        key = (count, available.width(), available.height())
-        if self._card_metrics is not None and self._card_metrics_key == key:
-            return self._card_metrics
-
-        columns = 10
-        rows = max(1, math.ceil(count / columns))
-
-        usable_width = max(available.width() - 160, 640)
-        usable_height = max(available.height() - 240, 520)
-
-        margins = self.grid_layout.contentsMargins()
-        horizontal_spacing = max(14, int(usable_width * 0.01))
-        vertical_spacing = max(18, int(usable_height * 0.035 / rows))
-
-        spacing_total_x = horizontal_spacing * max(0, columns - 1)
-        spacing_total_y = vertical_spacing * max(0, rows - 1)
-
-        available_width_for_cards = (
-            usable_width - margins.left() - margins.right() - spacing_total_x
-        )
-        available_height_for_cards = (
-            usable_height - margins.top() - margins.bottom() - spacing_total_y
-        )
-
-        per_card_width = max(1.0, available_width_for_cards / columns)
-        per_card_height = max(1.0, available_height_for_cards / rows)
-
-        card_width = int(math.floor(per_card_width))
-        card_height = int(math.floor(per_card_height))
-
-        if per_card_width >= 120:
-            card_width = max(card_width, 120)
-        if per_card_height >= 180:
-            card_height = max(card_height, 180)
-
-        padding_h = max(12, int(card_width * 0.08))
-        padding_v = max(14, int(card_height * 0.1))
-        inner_spacing = max(6, int(card_height * 0.045))
-
-        display_entries, display_candidates, score_candidates = self._collect_display_candidates()
-
-        if not display_candidates:
-            return None
-
-        calligraphy_font = self._calligraphy_font or QApplication.font().family()
-        if not calligraphy_font:
-            calligraphy_font = QFont().family()
-
-        try:
-            probe_font = QFont(calligraphy_font, 64, QFont.Weight.Bold)
-            metrics = QFontMetrics(probe_font)
-        except Exception:
-            probe_font = QFont()
-            metrics = QFontMetrics(probe_font)
-
-        widest_display = max(
-            display_candidates,
-            key=lambda text: metrics.tightBoundingRect(text).width(),
-        )
-        widest_score = max(
-            score_candidates,
-            key=lambda text: metrics.tightBoundingRect(text).width(),
-        )
-
-        usable_name_width = max(60, card_width - 2 * padding_h)
-        content_height = max(80, card_height - 2 * padding_v - inner_spacing)
-        name_height = int(content_height * 0.58)
-        score_height = max(32, content_height - name_height)
-
-        font_upper_bound = int(min(card_width * 0.28, card_height * 0.36))
-        font_upper_bound = max(20, font_upper_bound)
-        fit_minimum = 14
-
-        name_fit = self._fit_font_size(
-            widest_display,
-            calligraphy_font,
-            QFont.Weight.Bold,
-            usable_name_width,
-            name_height,
-            fit_minimum,
-            font_upper_bound,
-        )
-        score_fit = self._fit_font_size(
-            widest_score,
-            calligraphy_font,
-            QFont.Weight.Bold,
-            usable_name_width,
-            score_height,
-            fit_minimum,
-            font_upper_bound,
-        )
-
-        final_font_size = max(fit_minimum, min(name_fit, score_fit, font_upper_bound))
-
-        self._card_metrics = ScoreboardDialog._CardMetrics(
-            count=count,
-            columns=columns,
-            rows=rows,
-            card_width=card_width,
-            card_height=card_height,
-            padding_h=padding_h,
-            padding_v=padding_v,
-            inner_spacing=inner_spacing,
-            font_size=final_font_size,
-            horizontal_spacing=horizontal_spacing,
-            vertical_spacing=vertical_spacing,
-        )
-        self._card_metrics_key = key
-        return self._card_metrics
-
-    def _ensure_metrics(self) -> Optional[_CardMetrics]:
-        metrics = self._compute_card_metrics()
-        if metrics is not None:
-            return metrics
-        self._card_metrics = None
-        self._card_metrics_key = None
-        return None
-
-    def _sort_students(self, order: Optional[str] = None) -> List[tuple[str, str, int]]:
-        data = list(self.students)
-        current_order = self._order if order is None else order
-        if current_order == self.ORDER_ID:
-            def _id_key(item: tuple[str, str, int]) -> tuple[int, str, str]:
-                sid_text = str(item[0]).strip()
-                try:
-                    sid_value = int(sid_text)
-                except (TypeError, ValueError):
-                    sid_value = sys.maxsize
-                return (sid_value, sid_text, item[1])
-
-            data.sort(key=_id_key)
-        else:
-            def _rank_key(item: tuple[str, str, int]) -> tuple[int, int, str]:
-                sid_text = str(item[0]).strip()
-                try:
-                    sid_value = int(sid_text)
-                except (TypeError, ValueError):
-                    sid_value = sys.maxsize
-                return (-item[2], sid_value, item[1])
-
-            data.sort(key=_rank_key)
-        return data
-
-    def _create_card(
-        self,
-        display_text: str,
-        score_text: str,
-        card_width: int,
-        card_height: int,
-        font_size: int,
-        padding_h: int,
-        padding_v: int,
-        inner_spacing: int,
-    ) -> QWidget:
-        calligraphy_font = self._calligraphy_font
-        wrapper = QWidget()
-        wrapper.setProperty("class", "scoreboardWrapper")
-        wrapper.setFixedSize(card_width, card_height)
-        wrapper.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-
-        layout = QVBoxLayout(wrapper)
-        layout.setContentsMargins(padding_h, padding_v, padding_h, padding_v)
-        layout.setSpacing(inner_spacing)
-
-        name_label = QLabel(display_text or "未命名")
-        name_label.setProperty("class", "scoreboardName")
-        name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        name_label.setWordWrap(False)
-        name_label.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
-        )
-        name_label.setFont(QFont(calligraphy_font, font_size, QFont.Weight.Bold))
-        name_label.setStyleSheet("margin: 0px; padding: 0px;")
-        layout.addWidget(name_label)
-
-        score_label = QLabel(score_text)
-        score_label.setProperty("class", "scoreboardScore")
-        score_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        score_label.setWordWrap(False)
-        score_label.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
-        )
-        score_label.setFont(QFont(calligraphy_font, font_size, QFont.Weight.Bold))
-        score_label.setStyleSheet(f"margin-top: {max(6, inner_spacing // 2)}px;")
-        layout.addWidget(score_label)
-
-        layout.addStretch(1)
-        return wrapper
-
-    def _format_display_text(self, index: int, sid: str, name: str) -> str:
-        return self._format_display_text_for_order(self._order, index, sid, name)
-
-    def _format_display_text_for_order(
-        self, order: str, index: int, sid: str, name: str
-    ) -> str:
-        clean_name = (name or "").strip() or "未命名"
-        if order == self.ORDER_ID:
-            sid_display = str(sid).strip() or "—"
-            return f"{sid_display}.{clean_name}"
-        return f"{index + 1}.{clean_name}"
-
-    @staticmethod
-    def _format_score_text(score: int | float | str) -> str:
-        text = "—"
-        try:
-            value = float(score)
-        except (TypeError, ValueError):
-            score_str = str(score).strip()
-            if score_str and score_str.lower() != "none":
-                text = score_str
-        else:
-            if math.isfinite(value):
-                if abs(value - int(value)) < 1e-6:
-                    text = str(int(round(value)))
-                else:
-                    text = f"{value:.2f}".rstrip("0").rstrip(".")
-        return f"{text} 分"
-
-    @staticmethod
-    def _fit_font_size(
-        text: str,
-        family: str,
-        weight: QFont.Weight,
-        max_width: int,
-        max_height: int,
-        minimum: int,
-        maximum: int,
-    ) -> int:
-        if not text:
-            return max(6, min(minimum, maximum))
-        if max_width <= 0 or max_height <= 0:
-            return max(6, min(minimum, maximum))
-        lower = max(6, min(minimum, maximum))
-        upper = max(6, max(minimum, maximum))
-        for size in range(upper, lower - 1, -1):
-            font = QFont(family, size, weight)
-            metrics = QFontMetrics(font)
-            rect = metrics.tightBoundingRect(text)
-            if rect.width() <= max_width and rect.height() <= max_height:
-                return size
-        return lower
-
-    def _populate_grid(self) -> None:
-        self._clear_grid()
-        count = len(self.students)
-        layout = self.grid_layout
-        calligraphy_font = self._calligraphy_font
-
-        screen = QApplication.primaryScreen()
-        self._available_geometry = screen.availableGeometry() if screen is not None else QRect(0, 0, 1920, 1080)
-
-        self._update_order_buttons()
-        self._populate_grid()
-
-        if screen is not None:
-            self.setGeometry(self._available_geometry)
-
-    def _update_order_buttons(self) -> None:
-        for key, button in self.order_buttons.items():
-            block = button.blockSignals(True)
-            button.setChecked(key == self._order)
-            button.blockSignals(block)
-
-    def _on_order_button_clicked(self, order: str) -> None:
-        if order not in {self.ORDER_RANK, self.ORDER_ID}:
-            self._update_order_buttons()
-            return
-        if order == self._order:
-            self._update_order_buttons()
-            return
-        self._order = order
-        if callable(self._order_changed_callback):
-            try:
-                self._order_changed_callback(order)
-            except Exception:
-                pass
-        self._update_order_buttons()
-        self._populate_grid()
-
-    def _clear_grid(self) -> None:
-        while self.grid_layout.count():
-            item = self.grid_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-        for row in range(self._grid_row_count):
-            self.grid_layout.setRowStretch(row, 0)
-            self.grid_layout.setRowMinimumHeight(row, 0)
-        for column in range(self._grid_column_count):
-            self.grid_layout.setColumnStretch(column, 0)
-            self.grid_layout.setColumnMinimumWidth(column, 0)
-        self._grid_row_count = 0
-        self._grid_column_count = 0
-
-    def _collect_display_candidates(self) -> tuple[List[tuple[int, str, str]], List[str], List[str]]:
-        sorted_students = self._sort_students()
-        alternate_order = (
-            self.ORDER_ID if self._order == self.ORDER_RANK else self.ORDER_RANK
-        )
-        alternate_students = self._sort_students(alternate_order)
-
-        display_entries: List[tuple[int, str, str]] = []
-        display_candidates: List[str] = []
-        score_candidates: List[str] = []
-
-        for idx, (sid, name, score) in enumerate(sorted_students):
-            display_text = self._format_display_text(idx, sid, name)
-            score_text = self._format_score_text(score)
-            display_entries.append((idx, display_text, score_text))
-            display_candidates.append(display_text)
-            score_candidates.append(score_text)
-
-        for idx, (sid, name, score) in enumerate(alternate_students):
-            display_candidates.append(
-                self._format_display_text_for_order(
-                    alternate_order, idx, sid, name
-                )
-            )
-            score_candidates.append(self._format_score_text(score))
-
-        return display_entries, display_candidates, score_candidates
-
-    def _compute_card_metrics(self) -> Optional[_CardMetrics]:
-        count = len(self.students)
-        if count == 0:
-            return None
-
-        available = self._available_geometry
-        key = (count, available.width(), available.height())
-        if self._card_metrics is not None and self._card_metrics_key == key:
-            return self._card_metrics
-
-        columns = 10
-        rows = max(1, math.ceil(count / columns))
-
-        usable_width = max(available.width() - 160, 640)
-        usable_height = max(available.height() - 240, 520)
-
-        margins = self.grid_layout.contentsMargins()
-        horizontal_spacing = max(14, int(usable_width * 0.01))
-        vertical_spacing = max(18, int(usable_height * 0.035 / rows))
-
-        spacing_total_x = horizontal_spacing * max(0, columns - 1)
-        spacing_total_y = vertical_spacing * max(0, rows - 1)
-
-        available_width_for_cards = (
-            usable_width - margins.left() - margins.right() - spacing_total_x
-        )
-        available_height_for_cards = (
-            usable_height - margins.top() - margins.bottom() - spacing_total_y
-        )
-
-        per_card_width = max(1.0, available_width_for_cards / columns)
-        per_card_height = max(1.0, available_height_for_cards / rows)
-
-        card_width = int(math.floor(per_card_width))
-        card_height = int(math.floor(per_card_height))
-
-        if per_card_width >= 120:
-            card_width = max(card_width, 120)
-        if per_card_height >= 180:
-            card_height = max(card_height, 180)
-
-        padding_h = max(12, int(card_width * 0.08))
-        padding_v = max(14, int(card_height * 0.1))
-        inner_spacing = max(6, int(card_height * 0.045))
-
-        display_entries, display_candidates, score_candidates = self._collect_display_candidates()
-
-        if not display_candidates:
-            return None
-
-        calligraphy_font = self._calligraphy_font or QApplication.font().family()
-        if not calligraphy_font:
-            calligraphy_font = QFont().family()
-
-        try:
-            probe_font = QFont(calligraphy_font, 64, QFont.Weight.Bold)
-            metrics = QFontMetrics(probe_font)
-        except Exception:
-            probe_font = QFont()
-            metrics = QFontMetrics(probe_font)
-
-        widest_display = max(
-            display_candidates,
-            key=lambda text: metrics.tightBoundingRect(text).width(),
-        )
-        widest_score = max(
-            score_candidates,
-            key=lambda text: metrics.tightBoundingRect(text).width(),
-        )
-
-        usable_name_width = max(60, card_width - 2 * padding_h)
-        content_height = max(80, card_height - 2 * padding_v - inner_spacing)
-        name_height = int(content_height * 0.58)
-        score_height = max(32, content_height - name_height)
-
-        font_upper_bound = int(min(card_width * 0.28, card_height * 0.36))
-        font_upper_bound = max(20, font_upper_bound)
-        fit_minimum = 14
-
-        name_fit = self._fit_font_size(
-            widest_display,
-            calligraphy_font,
-            QFont.Weight.Bold,
-            usable_name_width,
-            name_height,
-            fit_minimum,
-            font_upper_bound,
-        )
-        score_fit = self._fit_font_size(
-            widest_score,
-            calligraphy_font,
-            QFont.Weight.Bold,
-            usable_name_width,
-            score_height,
-            fit_minimum,
-            font_upper_bound,
-        )
-
-        final_font_size = max(fit_minimum, min(name_fit, score_fit, font_upper_bound))
-
-        self._card_metrics = ScoreboardDialog._CardMetrics(
-            count=count,
-            columns=columns,
-            rows=rows,
-            card_width=card_width,
-            card_height=card_height,
-            padding_h=padding_h,
-            padding_v=padding_v,
-            inner_spacing=inner_spacing,
-            font_size=final_font_size,
-            horizontal_spacing=horizontal_spacing,
-            vertical_spacing=vertical_spacing,
-        )
-        self._card_metrics_key = key
-        return self._card_metrics
-
-    def _ensure_metrics(self) -> Optional[_CardMetrics]:
-        metrics = self._compute_card_metrics()
-        if metrics is not None:
-            return metrics
-        self._card_metrics = None
-        self._card_metrics_key = None
-        return None
-
-    def _sort_students(self, order: Optional[str] = None) -> List[tuple[str, str, int]]:
-        data = list(self.students)
-        current_order = self._order if order is None else order
-        if current_order == self.ORDER_ID:
-            def _id_key(item: tuple[str, str, int]) -> tuple[int, str, str]:
-                sid_text = str(item[0]).strip()
-                try:
-                    sid_value = int(sid_text)
-                except (TypeError, ValueError):
-                    sid_value = sys.maxsize
-                return (sid_value, sid_text, item[1])
-
-            data.sort(key=_id_key)
-        else:
-            def _rank_key(item: tuple[str, str, int]) -> tuple[int, int, str]:
-                sid_text = str(item[0]).strip()
-                try:
-                    sid_value = int(sid_text)
-                except (TypeError, ValueError):
-                    sid_value = sys.maxsize
-                return (-item[2], sid_value, item[1])
-
-            data.sort(key=_rank_key)
-        return data
-
-    def _create_card(
-        self,
-        display_text: str,
-        score_text: str,
-        card_width: int,
-        card_height: int,
-        font_size: int,
-        padding_h: int,
-        padding_v: int,
-        inner_spacing: int,
-    ) -> QWidget:
-        calligraphy_font = self._calligraphy_font
-        wrapper = QWidget()
-        wrapper.setProperty("class", "scoreboardWrapper")
-        wrapper.setFixedSize(card_width, card_height)
-        wrapper.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-
-        layout = QVBoxLayout(wrapper)
-        layout.setContentsMargins(padding_h, padding_v, padding_h, padding_v)
-        layout.setSpacing(inner_spacing)
-
-        name_label = QLabel(display_text or "未命名")
-        name_label.setProperty("class", "scoreboardName")
-        name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        name_label.setWordWrap(False)
-        name_label.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
-        )
-        name_label.setFont(QFont(calligraphy_font, font_size, QFont.Weight.Bold))
-        name_label.setStyleSheet("margin: 0px; padding: 0px;")
-        layout.addWidget(name_label)
-
-        score_label = QLabel(score_text)
-        score_label.setProperty("class", "scoreboardScore")
-        score_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        score_label.setWordWrap(False)
-        score_label.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
-        )
-        score_label.setFont(QFont(calligraphy_font, font_size, QFont.Weight.Bold))
-        score_label.setStyleSheet(f"margin-top: {max(6, inner_spacing // 2)}px;")
-        layout.addWidget(score_label)
-
-        layout.addStretch(1)
-        return wrapper
-
-    def _format_display_text(self, index: int, sid: str, name: str) -> str:
-        return self._format_display_text_for_order(self._order, index, sid, name)
-
-    def _format_display_text_for_order(
-        self, order: str, index: int, sid: str, name: str
-    ) -> str:
-        clean_name = (name or "").strip() or "未命名"
-        if order == self.ORDER_ID:
-            sid_display = str(sid).strip() or "—"
-            return f"{sid_display}.{clean_name}"
-        return f"{index + 1}.{clean_name}"
-
-    @staticmethod
-    def _format_score_text(score: int | float | str) -> str:
-        text = "—"
-        try:
-            value = float(score)
-        except (TypeError, ValueError):
-            score_str = str(score).strip()
-            if score_str and score_str.lower() != "none":
-                text = score_str
-        else:
-            if math.isfinite(value):
-                if abs(value - int(value)) < 1e-6:
-                    text = str(int(round(value)))
-                else:
-                    text = f"{value:.2f}".rstrip("0").rstrip(".")
-        return f"{text} 分"
-
-    @staticmethod
-    def _fit_font_size(
-        text: str,
-        family: str,
-        weight: QFont.Weight,
-        max_width: int,
-        max_height: int,
-        minimum: int,
-        maximum: int,
-    ) -> int:
-        if not text:
-            return max(6, min(minimum, maximum))
-        if max_width <= 0 or max_height <= 0:
-            return max(6, min(minimum, maximum))
-        lower = max(6, min(minimum, maximum))
-        upper = max(6, max(minimum, maximum))
-        for size in range(upper, lower - 1, -1):
-            font = QFont(family, size, weight)
-            metrics = QFontMetrics(font)
-            rect = metrics.tightBoundingRect(text)
-            if rect.width() <= max_width and rect.height() <= max_height:
-                return size
-        return lower
-
-    def _populate_grid(self) -> None:
-        self._clear_grid()
-        count = len(self.students)
-        layout = self.grid_layout
-        calligraphy_font = self._calligraphy_font
 
         screen = QApplication.primaryScreen()
         self._available_geometry = screen.availableGeometry() if screen is not None else QRect(0, 0, 1920, 1080)
@@ -3585,7 +2566,14 @@ class RollCallTimerWindow(QWidget):
     MIN_FONT_SIZE = 5
     MAX_FONT_SIZE = 220
 
-    def __init__(self, settings_manager: SettingsManager, student_data, parent: Optional[QWidget] = None) -> None:
+    def __init__(
+        self,
+        settings_manager: SettingsManager,
+        student_data,
+        parent: Optional[QWidget] = None,
+        *,
+        defer_password_prompt: bool = False,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("点名 / 计时")
         flags = (
@@ -3598,13 +2586,26 @@ class RollCallTimerWindow(QWidget):
         self.setWindowFlags(flags)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.settings_manager = settings_manager
-        if student_data is None and PANDAS_AVAILABLE and pd is not None:
-            student_data = pd.DataFrame(columns=["学号", "姓名", "分组", "成绩"])
-        self.student_data = student_data
+        self._encrypted_file_path = self.ENCRYPTED_STUDENT_FILE
+        base_dataframe = student_data
+        if isinstance(base_dataframe, pd.DataFrame):
+            pass
+        elif base_dataframe is None and PANDAS_AVAILABLE and pd is not None:
+            base_dataframe = pd.DataFrame(columns=["学号", "姓名", "分组", "成绩"])
+        self.student_data = base_dataframe
+        self._student_data_pending_load = False
         encrypted_state, encrypted_password = _get_session_student_encryption()
         self._student_file_encrypted = bool(encrypted_state)
         self._student_password = encrypted_password
-        self._encrypted_file_path = self.ENCRYPTED_STUDENT_FILE
+        if defer_password_prompt:
+            base_empty = not isinstance(self.student_data, pd.DataFrame) or getattr(self.student_data, "empty", True)
+            if base_empty:
+                has_plain = os.path.exists(self.STUDENT_FILE)
+                has_encrypted = os.path.exists(self._encrypted_file_path)
+                if has_plain or has_encrypted:
+                    self._student_data_pending_load = True
+                    if not isinstance(self.student_data, pd.DataFrame) and PANDAS_AVAILABLE and pd is not None:
+                        self.student_data = pd.DataFrame(columns=["学号", "姓名", "分组", "成绩"])
         try:
             self._rng = random.SystemRandom()
         except NotImplementedError:
@@ -3639,10 +2640,6 @@ class RollCallTimerWindow(QWidget):
 
         self.current_group_name = s.get("current_group", "全部")
         self.groups = ["全部"]
-        if not self.student_data.empty:
-            gs = sorted({str(g).strip().upper() for g in self.student_data["分组"].dropna() if str(g).strip()})
-            self.groups.extend(gs)
-        if self.current_group_name not in self.groups: self.current_group_name = "全部"
 
         self.current_student_index: Optional[int] = None
         self._placeholder_on_show = True
@@ -3656,8 +2653,6 @@ class RollCallTimerWindow(QWidget):
         # 统一维护一个全局已点名集合，确保“全部”分组与子分组状态一致
         self._global_drawn_students: set[int] = set()
         self._student_groups: Dict[int, set[str]] = {}
-        self._rebuild_group_indices()
-        self._restore_group_state(s)
         self.timer_seconds_left = max(0, _get_int("timer_seconds_left", self.timer_countdown_minutes * 60 + self.timer_countdown_seconds))
         self.timer_stopwatch_seconds = max(0, _get_int("timer_stopwatch_seconds", 0))
         self.timer_running = str_to_bool(s.get("timer_running", "False"), False)
@@ -3714,8 +2709,10 @@ class RollCallTimerWindow(QWidget):
         self._save_timer.timeout.connect(self.save_settings)
 
         self._build_ui()
+        self._set_student_dataframe(self.student_data, propagate=False)
         self._apply_saved_fonts()
         self._update_menu_state()
+        self._restore_group_state(s)
         self.update_mode_ui(force_timer_reset=self.mode == "timer")
         self.on_group_change(initial=True)
         self.display_current_student()
@@ -3754,10 +2751,16 @@ class RollCallTimerWindow(QWidget):
         button_style = (
             "QPushButton {"
             "    padding: 2px 10px;"
+            "    min-height: 28px;"
             "    border-radius: 11px;"
             "    border: 1px solid #c3c7cf;"
             "    background-color: #ffffff;"
             "    color: #1a1c1f;"
+            "}"
+            "QPushButton:disabled {"
+            "    color: rgba(26, 28, 31, 0.45);"
+            "    background-color: #f3f5f9;"
+            "    border-color: #d9dde3;"
             "}"
             "QPushButton:hover {"
             "    border-color: #1a73e8;"
@@ -3779,28 +2782,23 @@ class RollCallTimerWindow(QWidget):
         control_bar.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         control_layout = QHBoxLayout(control_bar)
         control_layout.setContentsMargins(0, 0, 0, 0)
-        control_layout.setSpacing(0)
+        control_layout.setSpacing(4)
 
         self.list_button = QPushButton("名单"); _setup_secondary_button(self.list_button)
         self.list_button.clicked.connect(self.show_student_selector)
         control_layout.addWidget(self.list_button)
 
-        self.add_score_button = QPushButton("加分"); _setup_secondary_button(self.add_score_button)
-        self.add_score_button.setEnabled(False)
-        self.add_score_button.clicked.connect(self.increment_current_score)
-        control_layout.addWidget(self.add_score_button)
-
         self.showcase_button = QPushButton("展示"); _setup_secondary_button(self.showcase_button)
         self.showcase_button.clicked.connect(self.show_scoreboard)
         control_layout.addWidget(self.showcase_button)
 
-        self.reset_button = QPushButton("重置"); _setup_secondary_button(self.reset_button)
-        self.reset_button.clicked.connect(self.reset_roll_call_pools)
-        control_layout.addWidget(self.reset_button)
-
         self.encrypt_button = QPushButton(""); _setup_secondary_button(self.encrypt_button)
         self.encrypt_button.clicked.connect(self._on_encrypt_button_clicked)
         control_layout.addWidget(self.encrypt_button)
+
+        self.reset_button = QPushButton("重置"); _setup_secondary_button(self.reset_button)
+        self.reset_button.clicked.connect(self.reset_roll_call_pools)
+        control_layout.addWidget(self.reset_button)
 
         top.addWidget(control_bar, 0, Qt.AlignmentFlag.AlignLeft)
         top.addStretch(1)
@@ -3834,6 +2832,11 @@ class RollCallTimerWindow(QWidget):
         self.group_buttons: Dict[str, QPushButton] = {}
         self._rebuild_group_buttons_ui()
         group_row.addWidget(self.group_bar, 1, Qt.AlignmentFlag.AlignLeft)
+
+        self.add_score_button = QPushButton("加分"); _setup_secondary_button(self.add_score_button)
+        self.add_score_button.setEnabled(False)
+        self.add_score_button.clicked.connect(self.increment_current_score)
+        group_row.addWidget(self.add_score_button, 0, Qt.AlignmentFlag.AlignLeft)
         group_row.addStretch(1)
         toolbar_layout.addLayout(group_row)
         layout.addLayout(toolbar_layout)
@@ -3874,7 +2877,11 @@ class RollCallTimerWindow(QWidget):
         self.timer_reset_button = QPushButton("重置"); self.timer_reset_button.clicked.connect(self.reset_timer)
         self.timer_set_button = QPushButton("设定"); self.timer_set_button.clicked.connect(self.set_countdown_time)
         for b in (self.timer_mode_button, self.timer_start_pause_button, self.timer_reset_button, self.timer_set_button):
-            b.setCursor(Qt.CursorShape.PointingHandCursor); b.setFixedHeight(30); b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed); ctrl.addWidget(b)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setFixedHeight(30)
+            b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            b.setStyleSheet(button_style)
+            ctrl.addWidget(b)
         tl.addLayout(ctrl); self.stack.addWidget(self.timer_frame)
 
         self.roll_call_frame.clicked.connect(self.roll_student)
@@ -3954,6 +2961,62 @@ class RollCallTimerWindow(QWidget):
         show_quiet_information(self, "密码输入次数过多，操作已取消。")
         return None
 
+    def _set_student_dataframe(self, df: Optional[pd.DataFrame], *, propagate: bool = True) -> None:
+        if not (PANDAS_AVAILABLE and pd is not None):
+            self.student_data = df
+            return
+        if df is None:
+            df = pd.DataFrame(columns=["学号", "姓名", "分组", "成绩"])
+        try:
+            working = df.copy()
+        except Exception:
+            working = pd.DataFrame(df)
+        self.student_data = working
+        self.groups = ["全部"]
+        if not working.empty:
+            group_values = {
+                str(g).strip().upper()
+                for g in working.get("分组", pd.Series([], dtype="object")).dropna()
+                if str(g).strip()
+            }
+            self.groups.extend(sorted(group_values))
+        if self.current_group_name not in self.groups:
+            self.current_group_name = "全部"
+        self._group_all_indices = {}
+        self._group_remaining_indices = {}
+        self._group_last_student = {}
+        self._group_initial_sequences = {}
+        self._group_drawn_history = {}
+        self._global_drawn_students = set()
+        self._student_groups = {}
+        self._rebuild_group_buttons_ui()
+        self._rebuild_group_indices()
+        self._ensure_group_pool(self.current_group_name, force_reset=True)
+        self.current_student_index = None
+        self._pending_passive_student = None
+        if propagate:
+            self._propagate_student_dataframe()
+
+    def _load_student_data_if_needed(self) -> bool:
+        if not self._student_data_pending_load:
+            return True
+        if not (PANDAS_AVAILABLE and OPENPYXL_AVAILABLE):
+            return False
+        df = load_student_data(self)
+        if df is None:
+            return False
+        self._student_data_pending_load = False
+        self._set_student_dataframe(df, propagate=True)
+        encrypted_state, encrypted_password = _get_session_student_encryption()
+        self._student_file_encrypted = bool(encrypted_state)
+        self._student_password = encrypted_password
+        saved = self.settings_manager.load_settings().get("RollCallTimer", {})
+        self._restore_group_state(saved)
+        self._update_encryption_button()
+        self.display_current_student()
+        self._schedule_save()
+        return True
+
     def _handle_encrypt_student_file(self) -> None:
         if not (PANDAS_AVAILABLE and pd is not None):
             show_quiet_information(self, "当前环境缺少 pandas/openpyxl，无法执行加密。")
@@ -4032,31 +3095,8 @@ class RollCallTimerWindow(QWidget):
     def _apply_decrypted_student_data(self, df: pd.DataFrame) -> None:
         if not (PANDAS_AVAILABLE and pd is not None):
             return
-        self.student_data = df
-        self.groups = ["全部"]
-        if not self.student_data.empty:
-            group_values = {
-                str(g).strip().upper()
-                for g in self.student_data.get("分组", pd.Series([], dtype="object")).dropna()
-                if str(g).strip()
-            }
-            self.groups.extend(sorted(group_values))
-        if self.current_group_name not in self.groups:
-            self.current_group_name = "全部"
-        self._group_all_indices = {}
-        self._group_remaining_indices = {}
-        self._group_last_student = {}
-        self._group_initial_sequences = {}
-        self._group_drawn_history = {}
-        self._global_drawn_students = set()
-        self._student_groups = {}
-        self._rebuild_group_buttons_ui()
-        self._rebuild_group_indices()
-        self._ensure_group_pool(self.current_group_name, force_reset=True)
-        self.current_student_index = None
-        self._pending_passive_student = None
+        self._set_student_dataframe(df, propagate=True)
         self.display_current_student()
-        self._propagate_student_dataframe()
 
     def _propagate_student_dataframe(self) -> None:
         parent = self.parent()
@@ -4438,6 +3478,12 @@ class RollCallTimerWindow(QWidget):
 
     def update_mode_ui(self, force_timer_reset: bool = False) -> None:
         is_roll = self.mode == "roll_call"
+        timer_reset_required = force_timer_reset
+        if is_roll and self._student_data_pending_load:
+            if not self._load_student_data_if_needed():
+                self.mode = "timer"
+                is_roll = False
+                timer_reset_required = True
         self.title_label.setText("点名" if is_roll else "计时")
         self.mode_button.setText("切换到计时" if is_roll else "切换到点名")
         self.group_label.setVisible(is_roll)
@@ -4455,13 +3501,16 @@ class RollCallTimerWindow(QWidget):
         else:
             self.stack.setCurrentWidget(self.timer_frame)
             changed = False
-            if force_timer_reset:
+            if timer_reset_required:
                 changed = self.reset_timer(persist=False)
             self.update_timer_mode_ui()
             if changed:
                 self._schedule_save()
             self.schedule_font_update()
-        self.reset_button.setVisible(is_roll)
+        if hasattr(self, "encrypt_button"):
+            self.encrypt_button.setVisible(is_roll)
+        if hasattr(self, "reset_button"):
+            self.reset_button.setVisible(is_roll)
         self.updateGeometry()
 
     def _handle_timer_mode_transition(self, previous_mode: Optional[str], new_mode: str) -> None:
@@ -4669,7 +3718,18 @@ class RollCallTimerWindow(QWidget):
     def reset_roll_call_pools(self) -> None:
         """根据当前分组执行重置：子分组独立重置，“全部”重置所有。"""
 
+        if self.mode != "roll_call":
+            return
         group_name = self.current_group_name
+        if self.student_data is None or getattr(self.student_data, "empty", True):
+            show_quiet_information(self, "暂无学生数据可供重置。")
+            return
+        if group_name == "全部":
+            prompt = "确定要重置所有分组的点名状态并重新开始吗？"
+        else:
+            prompt = f"确定要重置“{group_name}”分组的点名状态并重新开始吗？"
+        if not ask_quiet_confirmation(self, prompt, "确认重置"):
+            return
         if group_name == "全部":
             self._reset_roll_call_state()
         else:
@@ -5095,10 +4155,16 @@ class RollCallTimerWindow(QWidget):
             button.setStyleSheet(
                 "QPushButton {"
                 "    padding: 4px 14px;"
+                "    min-height: 28px;"
                 "    border-radius: 14px;"
                 "    border: 1px solid #d0d7de;"
                 "    background-color: #ffffff;"
                 "    color: #1b1f24;"
+                "}"
+                "QPushButton:disabled {"
+                "    color: rgba(27, 31, 36, 0.45);"
+                "    background-color: #f3f5f9;"
+                "    border-color: #d9dde3;"
                 "}"
                 "QPushButton:hover {"
                 "    border-color: #1a73e8;"
@@ -5155,6 +4221,11 @@ class RollCallTimerWindow(QWidget):
         self.add_score_button.setEnabled(is_roll and has_student)
         self.list_button.setEnabled(is_roll and has_data)
         self.showcase_button.setEnabled(is_roll and has_data)
+        if hasattr(self, "encrypt_button"):
+            self.encrypt_button.setVisible(is_roll)
+            self.encrypt_button.setEnabled(is_roll and has_data)
+        if hasattr(self, "reset_button"):
+            self.reset_button.setEnabled(is_roll and has_data)
 
     def schedule_font_update(self) -> None:
         QTimer.singleShot(0, self.update_dynamic_fonts)
@@ -5906,13 +4977,26 @@ class LauncherWindow(QWidget):
 
     def toggle_roll_call(self) -> None:
         """切换点名/计时窗口的显示状态，必要时先创建窗口。"""
-        if self.student_data is None:
-            self.student_data = load_student_data(self) if PANDAS_AVAILABLE else None
-        if self.student_data is None:
-            QMessageBox.warning(self, "提示", "学生数据加载失败，无法打开点名器。")
-            return
         if self.roll_call_window is None:
-            self.roll_call_window = RollCallTimerWindow(self.settings_manager, self.student_data, parent=self)
+            if not PANDAS_AVAILABLE or not OPENPYXL_AVAILABLE:
+                QMessageBox.warning(self, "提示", "未安装 pandas/openpyxl，点名功能不可用。")
+                return
+            settings = self.settings_manager.load_settings().get("RollCallTimer", {})
+            initial_mode = settings.get("mode", "roll_call")
+            defer_prompt = initial_mode == "timer"
+            data = self.student_data
+            if data is None and not defer_prompt:
+                data = load_student_data(self)
+                if data is None:
+                    QMessageBox.warning(self, "提示", "学生数据加载失败，无法打开点名器。")
+                    return
+                self.student_data = data
+            self.roll_call_window = RollCallTimerWindow(
+                self.settings_manager,
+                self.student_data,
+                parent=self,
+                defer_password_prompt=defer_prompt,
+            )
             self.roll_call_window.window_closed.connect(self.on_roll_call_window_closed)
             self.roll_call_window.visibility_changed.connect(self.on_roll_call_visibility_changed)
             self.roll_call_window.show()
@@ -5922,7 +5006,8 @@ class LauncherWindow(QWidget):
                 self.roll_call_window.hide()
                 self.roll_call_button.setText("显示点名")
             else:
-                self.roll_call_window.show(); self.roll_call_window.raise_()
+                self.roll_call_window.show()
+                self.roll_call_window.raise_()
                 self.roll_call_button.setText("隐藏点名")
 
     def on_roll_call_window_closed(self) -> None:
