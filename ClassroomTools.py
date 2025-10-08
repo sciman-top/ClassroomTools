@@ -3780,14 +3780,14 @@ class RollCallTimerWindow(QWidget):
         control_layout.setContentsMargins(0, 0, 0, 0)
         control_layout.setSpacing(2)
 
+        self.showcase_button = QPushButton("展示"); _setup_secondary_button(self.showcase_button)
+        self.showcase_button.clicked.connect(self.show_scoreboard)
+        control_layout.addWidget(self.showcase_button)
+
         self.class_button = QPushButton(""); _setup_secondary_button(self.class_button)
         self.class_button.clicked.connect(self.show_class_selector)
         self.class_button.setMinimumWidth(self.class_button.sizeHint().width())
         control_layout.addWidget(self.class_button)
-
-        self.showcase_button = QPushButton("展示"); _setup_secondary_button(self.showcase_button)
-        self.showcase_button.clicked.connect(self.show_scoreboard)
-        control_layout.addWidget(self.showcase_button)
 
         self.encrypt_button = QPushButton(""); _setup_secondary_button(self.encrypt_button)
         self.encrypt_button.clicked.connect(self._on_encrypt_button_clicked)
@@ -4015,8 +4015,11 @@ class RollCallTimerWindow(QWidget):
             return
         if self.student_data is None or not isinstance(self.student_data, pd.DataFrame):
             return
-        class_name = self.current_class_name or self.student_workbook.active_class
+        class_name = (self.current_class_name or self.student_workbook.active_class or "").strip()
         if not class_name:
+            available = self.student_workbook.class_names()
+            class_name = available[0] if available else self.student_workbook.active_class
+        if class_name not in self.student_workbook.class_names():
             class_name = self.student_workbook.active_class
         try:
             snapshot = self.student_data.copy()
@@ -5677,6 +5680,7 @@ def _normalize_text(value: object) -> str:
 
 def _normalize_student_dataframe(
     df: PandasDataFrame,
+    *,
     drop_incomplete: bool = True,
 ) -> PandasDataFrame:
     if not (PANDAS_AVAILABLE and pd is not None):
@@ -5718,6 +5722,13 @@ def _normalize_student_dataframe(
     return normalized
 
 
+def _empty_student_dataframe() -> PandasDataFrame:
+    if not (PANDAS_AVAILABLE and pd is not None):
+        raise RuntimeError("Pandas support is required to create student data tables.")
+    template = pd.DataFrame({"学号": [], "姓名": [], "分组": [], "成绩": []})
+    return _normalize_student_dataframe(template, drop_incomplete=False)
+
+
 def _sanitize_sheet_name(name: str, fallback: str) -> str:
     invalid = set("\\/:?*[]")
     cleaned = "".join(ch for ch in str(name) if ch not in invalid).strip()
@@ -5747,10 +5758,7 @@ class StudentWorkbook:
                     normalized = pd.DataFrame(df)
                 ordered[safe_name] = normalized
         if not ordered:
-            ordered["班级1"] = _normalize_student_dataframe(
-                pd.DataFrame({"学号": [], "姓名": [], "分组": [], "成绩": []}),
-                drop_incomplete=False,
-            )
+            ordered["班级1"] = _empty_student_dataframe().copy()
         self.sheets = ordered
         if not self.active_class or self.active_class not in self.sheets:
             self.active_class = next(iter(self.sheets))
@@ -5759,10 +5767,28 @@ class StudentWorkbook:
         return list(self.sheets.keys())
 
     def is_empty(self) -> bool:
-        return not bool(self.sheets)
+        if not self.sheets:
+            return True
+        for df in self.sheets.values():
+            try:
+                if not df.empty:
+                    return False
+            except AttributeError:
+                return False
+        return True
 
     def get_active_dataframe(self) -> PandasDataFrame:
-        return self.sheets[self.active_class].copy()
+        if not self.sheets:
+            return _empty_student_dataframe().copy()
+        if self.active_class not in self.sheets:
+            self.active_class = next(iter(self.sheets))
+        df = self.sheets.get(self.active_class)
+        if df is None:
+            return _empty_student_dataframe().copy()
+        try:
+            return df.copy()
+        except Exception:
+            return pd.DataFrame(df)
 
     def set_active_class(self, class_name: str) -> None:
         name = str(class_name).strip()
@@ -5787,11 +5813,7 @@ class StudentWorkbook:
             while f"{safe_name}_{suffix}" in self.sheets:
                 suffix += 1
             safe_name = f"{safe_name}_{suffix}"
-        empty_df = _normalize_student_dataframe(
-            pd.DataFrame({"学号": [], "姓名": [], "分组": [], "成绩": []}),
-            drop_incomplete=False,
-        )
-        self.sheets[safe_name] = empty_df
+        self.sheets[safe_name] = _empty_student_dataframe().copy()
         self.active_class = safe_name
         return safe_name
 
@@ -5843,10 +5865,7 @@ def _export_student_workbook_bytes(data: Mapping[str, PandasDataFrame]) -> bytes
             normalized_df = pd.DataFrame(df)
         normalized[sheet_name] = normalized_df
     if not normalized:
-        normalized["班级1"] = _normalize_student_dataframe(
-            pd.DataFrame({"学号": [], "姓名": [], "分组": [], "成绩": []}),
-            drop_incomplete=False,
-        )
+        normalized["班级1"] = _empty_student_dataframe().copy()
 
     buffer = io.BytesIO()
     try:
