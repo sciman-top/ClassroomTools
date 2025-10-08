@@ -82,6 +82,7 @@ from PyQt6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSpacerItem,
     QSizePolicy,
     QSlider,
@@ -3817,25 +3818,18 @@ class RollCallTimerWindow(QWidget):
         control_layout.setContentsMargins(0, 0, 0, 0)
         control_layout.setSpacing(2)
 
-        self.showcase_button = QPushButton("展示"); _setup_secondary_button(self.showcase_button)
-        self.showcase_button.clicked.connect(self.show_scoreboard)
-        control_layout.addWidget(self.showcase_button)
-
-        self.class_button = QPushButton("班级"); _setup_secondary_button(self.class_button)
-        self.class_button.clicked.connect(self.show_class_selector)
-        control_layout.addWidget(self.class_button)
-
-        self.showcase_button = QPushButton("展示"); _setup_secondary_button(self.showcase_button)
-        self.showcase_button.clicked.connect(self.show_scoreboard)
-        control_layout.addWidget(self.showcase_button)
-
-        self.encrypt_button = QPushButton(""); _setup_secondary_button(self.encrypt_button)
-        self.encrypt_button.clicked.connect(self._on_encrypt_button_clicked)
-        control_layout.addWidget(self.encrypt_button)
-
-        self.reset_button = QPushButton("重置"); _setup_secondary_button(self.reset_button)
-        self.reset_button.clicked.connect(self.reset_roll_call_pools)
-        control_layout.addWidget(self.reset_button)
+        toolbar_buttons: Tuple[Tuple[str, str, Callable[[], None], bool], ...] = (
+            ("showcase_button", "展示", self.show_scoreboard, False),
+            ("class_button", "班级", self.show_class_selector, False),
+            ("encrypt_button", "", self._on_encrypt_button_clicked, True),
+            ("reset_button", "重置", self.reset_roll_call_pools, True),
+        )
+        for attr, text, handler, lock_width in toolbar_buttons:
+            button = QPushButton(text)
+            _setup_secondary_button(button, lock_width=lock_width)
+            button.clicked.connect(handler)
+            setattr(self, attr, button)
+            control_layout.addWidget(button)
 
         top.addWidget(control_bar, 0, Qt.AlignmentFlag.AlignLeft)
         top.addStretch(1)
@@ -3864,24 +3858,34 @@ class RollCallTimerWindow(QWidget):
 
         group_container = QWidget()
         group_container.setFixedHeight(toolbar_height)
-        group_container.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
+        group_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         group_container_layout = QHBoxLayout(group_container)
         group_container_layout.setContentsMargins(0, 0, 0, 0)
         group_container_layout.setSpacing(2)
 
         self.group_container = group_container
 
-        self.group_bar = QWidget(group_container)
-        self.group_bar.setFixedHeight(toolbar_height)
-        self.group_bar.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
-        self.group_bar_layout = QHBoxLayout(self.group_bar)
+        group_scroll = QScrollArea(group_container)
+        group_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        group_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        group_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        group_scroll.setWidgetResizable(False)
+        group_scroll.setFixedHeight(toolbar_height)
+        group_scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.group_scroll = group_scroll
+
+        self.group_bar_widget = QWidget()
+        self.group_bar_widget.setFixedHeight(toolbar_height)
+        self.group_bar_widget.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.group_bar_layout = QHBoxLayout(self.group_bar_widget)
         self.group_bar_layout.setContentsMargins(0, 0, 0, 0)
-        self.group_bar_layout.setSpacing(1)
+        self.group_bar_layout.setSpacing(2)
         self.group_button_group = QButtonGroup(self)
         self.group_button_group.setExclusive(True)
         self.group_buttons: Dict[str, QPushButton] = {}
         self._rebuild_group_buttons_ui()
-        group_container_layout.addWidget(self.group_bar, 1, Qt.AlignmentFlag.AlignLeft)
+        group_scroll.setWidget(self.group_bar_widget)
+        group_container_layout.addWidget(group_scroll, 1, Qt.AlignmentFlag.AlignLeft)
 
         self.list_button = QPushButton("名单"); _setup_secondary_button(self.list_button, lock_width=True)
         self.list_button.clicked.connect(self.show_student_selector)
@@ -4664,8 +4668,10 @@ class RollCallTimerWindow(QWidget):
         self.group_label.setVisible(is_roll)
         if hasattr(self, "group_container"):
             self.group_container.setVisible(is_roll)
-        if hasattr(self, "group_bar"):
-            self.group_bar.setVisible(is_roll)
+        if hasattr(self, "group_scroll"):
+            self.group_scroll.setVisible(is_roll)
+        if hasattr(self, "group_bar_widget"):
+            self.group_bar_widget.setVisible(is_roll)
         if hasattr(self, "class_button"):
             self.class_button.setVisible(is_roll)
         if hasattr(self, "add_score_button"):
@@ -5386,7 +5392,10 @@ class RollCallTimerWindow(QWidget):
             "_toolbar_height",
             recommended_control_height(button_font, extra=12, minimum=34),
         )
-        for group in self.groups:
+        left, _top, right, _bottom = self.group_bar_layout.getContentsMargins()
+        spacing = self.group_bar_layout.spacing()
+        total_width = left + right
+        for index, group in enumerate(self.groups):
             button = QPushButton(group)
             button.setCheckable(True)
             button.setFont(button_font)
@@ -5398,7 +5407,19 @@ class RollCallTimerWindow(QWidget):
             self.group_bar_layout.addWidget(button)
             self.group_button_group.addButton(button)
             self.group_buttons[group] = button
-        self.group_bar_layout.addStretch(1)
+            if index:
+                total_width += spacing
+            total_width += width
+        if self.group_buttons:
+            self.group_bar_widget.setMinimumWidth(total_width)
+            self.group_bar_widget.setMaximumWidth(total_width)
+        else:
+            self.group_bar_widget.setMinimumWidth(0)
+            self.group_bar_widget.setMaximumWidth(16777215)
+        self.group_bar_widget.adjustSize()
+        self.group_bar_widget.updateGeometry()
+        if hasattr(self, "group_scroll"):
+            self.group_scroll.horizontalScrollBar().setValue(0)
         self._update_group_button_state(self.current_group_name)
 
     def _update_group_button_state(self, active_group: str) -> None:
@@ -5443,6 +5464,9 @@ class RollCallTimerWindow(QWidget):
         if hasattr(self, "class_button"):
             self.class_button.setVisible(is_roll)
             self.class_button.setEnabled(is_roll and bool(self._class_sheets) and not self._student_data_pending_load)
+        if hasattr(self, "group_scroll"):
+            self.group_scroll.setVisible(is_roll)
+            self.group_scroll.setEnabled(is_roll and has_data)
         if hasattr(self, "encrypt_button"):
             self.encrypt_button.setVisible(is_roll)
             self.encrypt_button.setEnabled(is_roll and has_data)
