@@ -1285,8 +1285,8 @@ class PenSettingsDialog(QDialog):
         self.pen_color = QColor(initial_color)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 8, 10, 14)
-        layout.setSpacing(5)
+        layout.setContentsMargins(12, 10, 12, 12)
+        layout.setSpacing(6)
 
         size_layout = QHBoxLayout()
         size_label = QLabel("粗细:")
@@ -1303,9 +1303,11 @@ class PenSettingsDialog(QDialog):
         layout.addLayout(size_layout)
 
         layout.addWidget(QLabel("颜色:"))
-        color_layout = QGridLayout()
+        color_widget = QWidget()
+        color_layout = QGridLayout(color_widget)
         color_layout.setContentsMargins(0, 0, 0, 0)
-        color_layout.setSpacing(4)
+        color_layout.setHorizontalSpacing(6)
+        color_layout.setVerticalSpacing(6)
         for index, (color_hex, name) in enumerate(self.COLORS.items()):
             button = QPushButton()
             button.setFixedSize(24, 24)
@@ -1316,7 +1318,7 @@ class PenSettingsDialog(QDialog):
             button.setToolTip(name)
             button.clicked.connect(lambda _checked, c=color_hex: self._select_color(c))
             color_layout.addWidget(button, index // 3, index % 3)
-        layout.addLayout(color_layout)
+        layout.addWidget(color_widget)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
@@ -1332,9 +1334,11 @@ class PenSettingsDialog(QDialog):
             uniform_width=True,
         )
         layout.addWidget(buttons)
+        if buttons.layout() is not None:
+            buttons.layout().setContentsMargins(0, 6, 0, 0)
 
-        hint = self.sizeHint()
-        self.setFixedSize(hint.width(), hint.height() + 18)
+        self.adjustSize()
+        self.setFixedSize(self.size())
 
     def _select_color(self, color_hex: str) -> None:
         self.pen_color = QColor(color_hex)
@@ -3787,7 +3791,9 @@ class RollCallTimerWindow(QWidget):
         self.mode_button.setMinimumWidth(target_width)
         self.mode_button.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         compact_font = QFont("Microsoft YaHei UI", 9, QFont.Weight.Medium)
-        toolbar_height = recommended_control_height(compact_font, extra=8, minimum=30)
+        toolbar_height = recommended_control_height(compact_font, extra=12, minimum=34)
+        self._toolbar_font = compact_font
+        self._toolbar_height = toolbar_height
         control_height = max(toolbar_height, recommended_control_height(mode_font, extra=8, minimum=30))
         apply_button_style(self.mode_button, ButtonStyles.TOOLBAR, height=control_height)
         self.mode_button.clicked.connect(self.toggle_mode)
@@ -3805,10 +3811,15 @@ class RollCallTimerWindow(QWidget):
                 button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
         control_bar = QWidget()
+        control_bar.setFixedHeight(toolbar_height)
         control_bar.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         control_layout = QHBoxLayout(control_bar)
         control_layout.setContentsMargins(0, 0, 0, 0)
         control_layout.setSpacing(2)
+
+        self.showcase_button = QPushButton("展示"); _setup_secondary_button(self.showcase_button)
+        self.showcase_button.clicked.connect(self.show_scoreboard)
+        control_layout.addWidget(self.showcase_button)
 
         self.class_button = QPushButton("班级"); _setup_secondary_button(self.class_button)
         self.class_button.clicked.connect(self.show_class_selector)
@@ -3836,7 +3847,10 @@ class RollCallTimerWindow(QWidget):
         top.addWidget(self.menu_button, 0, Qt.AlignmentFlag.AlignRight)
         toolbar_layout.addLayout(top)
 
-        group_row = QHBoxLayout()
+        group_row_widget = QWidget()
+        group_row_widget.setFixedHeight(toolbar_height)
+        group_row_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        group_row = QHBoxLayout(group_row_widget)
         group_row.setContentsMargins(0, 0, 0, 0)
         group_row.setSpacing(2)
 
@@ -3850,7 +3864,7 @@ class RollCallTimerWindow(QWidget):
 
         group_container = QWidget()
         group_container.setFixedHeight(toolbar_height)
-        group_container.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        group_container.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
         group_container_layout = QHBoxLayout(group_container)
         group_container_layout.setContentsMargins(0, 0, 0, 0)
         group_container_layout.setSpacing(2)
@@ -3859,7 +3873,7 @@ class RollCallTimerWindow(QWidget):
 
         self.group_bar = QWidget(group_container)
         self.group_bar.setFixedHeight(toolbar_height)
-        self.group_bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.group_bar.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
         self.group_bar_layout = QHBoxLayout(self.group_bar)
         self.group_bar_layout.setContentsMargins(0, 0, 0, 0)
         self.group_bar_layout.setSpacing(1)
@@ -3880,7 +3894,7 @@ class RollCallTimerWindow(QWidget):
 
         group_row.addWidget(group_container, 1, Qt.AlignmentFlag.AlignLeft)
         group_row.addStretch(1)
-        toolbar_layout.addLayout(group_row)
+        toolbar_layout.addWidget(group_row_widget)
         layout.addLayout(toolbar_layout)
 
         self.stack = QStackedWidget(); layout.addWidget(self.stack, 1)
@@ -5366,13 +5380,20 @@ class RollCallTimerWindow(QWidget):
         self.group_buttons = {}
         if not self.groups:
             return
-        button_font = QFont("Microsoft YaHei UI", 9, QFont.Weight.Medium)
-        button_height = recommended_control_height(button_font, extra=14, minimum=36)
+        button_font = getattr(self, "_toolbar_font", QFont("Microsoft YaHei UI", 9, QFont.Weight.Medium))
+        button_height = getattr(
+            self,
+            "_toolbar_height",
+            recommended_control_height(button_font, extra=12, minimum=34),
+        )
         for group in self.groups:
             button = QPushButton(group)
             button.setCheckable(True)
             button.setFont(button_font)
             apply_button_style(button, ButtonStyles.TOOLBAR, height=button_height)
+            width = max(button.sizeHint().width(), button.minimumSizeHint().width())
+            button.setFixedWidth(width)
+            button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             button.clicked.connect(lambda _checked=False, name=group: self.on_group_change(name))
             self.group_bar_layout.addWidget(button)
             self.group_button_group.addButton(button)
