@@ -3776,6 +3776,15 @@ class RollCallTimerWindow(QWidget):
             button.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
             button.setFont(compact_font)
 
+        def _lock_button_width(button: QPushButton) -> None:
+            """将按钮的宽度锁定在推荐值，避免随布局波动。"""
+
+            hint = button.sizeHint()
+            width = max(hint.width(), button.minimumSizeHint().width())
+            button.setMinimumWidth(width)
+            button.setMaximumWidth(width)
+            button.setSizePolicy(QSizePolicy.Policy.Fixed, button.sizePolicy().verticalPolicy())
+
         control_bar = QWidget()
         control_bar.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         control_layout = QHBoxLayout(control_bar)
@@ -3796,6 +3805,7 @@ class RollCallTimerWindow(QWidget):
 
         self.reset_button = QPushButton("重置"); _setup_secondary_button(self.reset_button)
         self.reset_button.clicked.connect(self.reset_roll_call_pools)
+        _lock_button_width(self.reset_button)
         control_layout.addWidget(self.reset_button)
 
         top.addWidget(control_bar, 0, Qt.AlignmentFlag.AlignLeft)
@@ -3843,9 +3853,7 @@ class RollCallTimerWindow(QWidget):
 
         self.list_button = QPushButton("名单"); _setup_secondary_button(self.list_button)
         self.list_button.clicked.connect(self.show_student_selector)
-        if self.list_button.sizePolicy().horizontalPolicy() != QSizePolicy.Policy.Fixed:
-            self.list_button.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
-        self.list_button.setMinimumWidth(self.list_button.sizeHint().width())
+        _lock_button_width(self.list_button)
         group_container_layout.addWidget(self.list_button, 0, Qt.AlignmentFlag.AlignLeft)
 
         self.add_score_button = QPushButton("加分"); _setup_secondary_button(self.add_score_button)
@@ -4040,15 +4048,11 @@ class RollCallTimerWindow(QWidget):
         text = name or "班级"
         self.class_button.setText(text)
         metrics = self.class_button.fontMetrics()
-        candidates = [text, "班级"]
-        if self.student_workbook is not None:
-            for candidate in self.student_workbook.class_names():
-                normalized = candidate.strip()
-                if normalized and normalized not in candidates:
-                    candidates.append(normalized)
-        width = max((metrics.horizontalAdvance(c) for c in candidates if c), default=metrics.horizontalAdvance("班级")) + 24
-        if width != self.class_button.minimumWidth():
-            self.class_button.setMinimumWidth(width)
+        baseline = metrics.horizontalAdvance("班级")
+        active_width = metrics.horizontalAdvance(text)
+        minimum = max(baseline, active_width) + 24
+        if self.class_button.minimumWidth() != minimum:
+            self.class_button.setMinimumWidth(minimum)
         has_data = self.student_workbook is not None and not self.student_workbook.is_empty()
         can_select = self.mode == "roll_call" and (has_data or self._student_data_pending_load)
         self.class_button.setEnabled(can_select)
