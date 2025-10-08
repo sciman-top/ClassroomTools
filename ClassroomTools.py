@@ -3891,6 +3891,10 @@ class RollCallTimerWindow(QWidget):
         self.showcase_button.clicked.connect(self.show_scoreboard)
         control_layout.addWidget(self.showcase_button)
 
+        self.class_button = QPushButton("班级"); _setup_secondary_button(self.class_button)
+        self.class_button.clicked.connect(self.show_class_selector)
+        control_layout.insertWidget(control_layout.indexOf(self.showcase_button), self.class_button)
+
         self.encrypt_button = QPushButton(""); _setup_secondary_button(self.encrypt_button)
         self.encrypt_button.clicked.connect(self._on_encrypt_button_clicked)
         control_layout.addWidget(self.encrypt_button)
@@ -4371,6 +4375,132 @@ class RollCallTimerWindow(QWidget):
         self._pending_passive_student = _valid_index(snapshot.pending_student)
 
         self._store_active_class_state(self._resolve_active_class_name())
+
+    def _update_class_button_label(self) -> None:
+        if not hasattr(self, "class_button"):
+            return
+        name = ""
+        if self.student_workbook is not None:
+            base_name = self.current_class_name or self.student_workbook.active_class
+            name = base_name.strip()
+        text = name or "班级"
+        self.class_button.setText(text)
+        metrics = self.class_button.fontMetrics()
+        baseline = metrics.horizontalAdvance("班级")
+        active_width = metrics.horizontalAdvance(text)
+        minimum = max(baseline, active_width) + 24
+        if self.class_button.minimumWidth() != minimum:
+            self.class_button.setMinimumWidth(minimum)
+        has_data = self.student_workbook is not None and not self.student_workbook.is_empty()
+        can_select = self.mode == "roll_call" and (has_data or self._student_data_pending_load)
+        self.class_button.setEnabled(can_select)
+        if has_data:
+            self.class_button.setToolTip("选择或新建班级")
+        else:
+            self.class_button.setToolTip("暂无班级数据，点击以尝试加载或创建班级")
+
+    def show_class_selector(self) -> None:
+        if self.mode != "roll_call":
+            return
+        if self._student_data_pending_load:
+            if not self._load_student_data_if_needed():
+                return
+        if self.student_workbook is None:
+            show_quiet_information(self, "暂无学生数据，无法选择班级。")
+            return
+        menu = QMenu(self)
+        current = self.current_class_name or self.student_workbook.active_class
+        for name in self.student_workbook.class_names():
+            action = menu.addAction(name)
+            action.setCheckable(True)
+            action.setChecked(name == current)
+            action.triggered.connect(lambda _checked=False, n=name: self._switch_class(n))
+        menu.addSeparator()
+        create_action = menu.addAction("新建班级...")
+        create_action.triggered.connect(self._create_new_class)
+        pos = self.class_button.mapToGlobal(self.class_button.rect().bottomLeft())
+        menu.exec(pos)
+
+    def _switch_class(self, class_name: str) -> None:
+        if self.student_workbook is None:
+            return
+        if class_name not in self.student_workbook.class_names():
+            return
+        target = class_name.strip()
+        current = self.current_class_name or self.student_workbook.active_class
+        if target == current:
+            return
+        if self._student_data_pending_load:
+            if not self._load_student_data_if_needed():
+                return
+        self._snapshot_current_class()
+        self.student_workbook.set_active_class(target)
+        self.current_class_name = target
+        if PANDAS_READY:
+            df = self.student_workbook.get_active_dataframe()
+        else:
+            df = None
+        self._set_student_dataframe(df, propagate=True)
+        self._schedule_save()
+
+    def _create_new_class(self) -> None:
+        if self._student_data_pending_load:
+            if not self._load_student_data_if_needed():
+                return
+        if self.student_workbook is None:
+            self.student_workbook = StudentWorkbook(OrderedDict(), active_class="")
+        if not PANDAS_READY:
+            show_quiet_information(self, "当前环境缺少 pandas，无法创建班级。")
+            return
+        self._snapshot_current_class()
+        suggested = f"班级{len(self.student_workbook.class_names()) + 1}" if self.student_workbook.class_names() else "班级1"
+        name, ok = QInputDialog.getText(
+            self,
+            "新建班级",
+            "请输入班级名称：",
+            QLineEdit.EchoMode.Normal,
+            suggested,
+        )
+        if not ok:
+            return
+        new_name = self.student_workbook.add_class(name)
+        self.current_class_name = new_name
+        self._apply_student_workbook(self.student_workbook, propagate=True)
+        self._schedule_save()
+        self._update_class_button_label()
+
+    def _apply_student_workbook(self, workbook: StudentWorkbook, *, propagate: bool) -> None:
+        self.student_workbook = workbook
+        if not PANDAS_READY:
+            self.current_class_name = workbook.active_class
+            self.student_data = None
+            return
+        if self.current_class_name:
+            workbook.set_active_class(self.current_class_name)
+        self.current_class_name = workbook.active_class
+        df = workbook.get_active_dataframe()
+        self._set_student_dataframe(df, propagate=propagate)
+
+    def _snapshot_current_class(self) -> None:
+        if not PANDAS_READY:
+            return
+        if self.student_workbook is None:
+            return
+        if self.student_data is None or not isinstance(self.student_data, pd.DataFrame):
+            return
+        class_name = (self.current_class_name or self.student_workbook.active_class or "").strip()
+        if not class_name:
+            available = self.student_workbook.class_names()
+            class_name = available[0] if available else self.student_workbook.active_class
+        if class_name not in self.student_workbook.class_names():
+            class_name = self.student_workbook.active_class
+        try:
+            snapshot = self.student_data.copy()
+        except Exception:
+            snapshot = pd.DataFrame(self.student_data)
+        self.student_workbook.update_class(class_name, snapshot)
+        self.student_workbook.set_active_class(class_name)
+        self.current_class_name = class_name
 
     def _update_class_button_label(self) -> None:
         if not hasattr(self, "class_button"):
