@@ -3878,23 +3878,27 @@ class RollCallTimerWindow(QWidget):
         control_layout.setContentsMargins(0, 0, 0, 0)
         control_layout.setSpacing(2)
 
+        def _recycle_button(button: Optional[QPushButton]) -> None:
+            if button is None:
+                return
+            parent = button.parentWidget()
+            layout = parent.layout() if parent is not None else None
+            if isinstance(layout, QHBoxLayout):
+                layout.removeWidget(button)
+            button.setParent(None)
+            button.deleteLater()
+
+        existing_class_button = getattr(self, "class_button", None)
+        if isinstance(existing_class_button, QPushButton):
+            _recycle_button(existing_class_button)
+        self.class_button = QPushButton("班级"); _setup_secondary_button(self.class_button)
+        self.class_button.clicked.connect(self.show_class_selector)
+        control_layout.addWidget(self.class_button)
+
         self.reset_button = QPushButton("重置"); _setup_secondary_button(self.reset_button)
         self.reset_button.clicked.connect(self.reset_roll_call_pools)
         _lock_button_width(self.reset_button)
         control_layout.addWidget(self.reset_button)
-
-        if hasattr(self, "class_button") and isinstance(self.class_button, QPushButton):
-            try:
-                self.class_button.deleteLater()
-            except Exception:
-                pass
-        self.class_button = QPushButton("班级"); _setup_secondary_button(self.class_button)
-        self.class_button.clicked.connect(self.show_class_selector)
-        reset_index = control_layout.indexOf(self.reset_button)
-        if reset_index == -1:
-            control_layout.addWidget(self.class_button)
-        else:
-            control_layout.insertWidget(reset_index, self.class_button)
 
         self.showcase_button = QPushButton("展示"); _setup_secondary_button(self.showcase_button)
         self.showcase_button.clicked.connect(self.show_scoreboard)
