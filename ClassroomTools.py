@@ -3563,6 +3563,92 @@ class ScoreboardDialog(QDialog):
             self.setWindowState(self.windowState() | Qt.WindowState.WindowMaximized)
 
 
+@dataclass
+class ClassRollState:
+    current_group: str
+    group_remaining: Dict[str, List[int]]
+    group_last: Dict[str, Optional[int]]
+    global_drawn: List[int]
+    current_student: Optional[int] = None
+    pending_student: Optional[int] = None
+
+    def to_json(self) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "current_group": self.current_group,
+            "group_remaining": {group: list(values) for group, values in self.group_remaining.items()},
+            "group_last": {group: value for group, value in self.group_last.items()},
+            "global_drawn": list(self.global_drawn),
+            "current_student": self.current_student,
+            "pending_student": self.pending_student,
+        }
+        return payload
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any]) -> Optional["ClassRollState"]:
+        if not isinstance(data, Mapping):
+            return None
+
+        current_group = str(data.get("current_group", "") or "")
+
+        remaining_raw = data.get("group_remaining", {})
+        remaining: Dict[str, List[int]] = {}
+        if isinstance(remaining_raw, Mapping):
+            for key, values in remaining_raw.items():
+                if not isinstance(key, str):
+                    continue
+                if isinstance(values, Iterable) and not isinstance(values, (str, bytes)):
+                    cleaned: List[int] = []
+                    for value in values:
+                        try:
+                            cleaned.append(int(value))
+                        except (TypeError, ValueError):
+                            continue
+                    remaining[key] = cleaned
+
+        last_raw = data.get("group_last", {})
+        last: Dict[str, Optional[int]] = {}
+        if isinstance(last_raw, Mapping):
+            for key, value in last_raw.items():
+                if not isinstance(key, str):
+                    continue
+                if value is None:
+                    last[key] = None
+                    continue
+                try:
+                    last[key] = int(value)
+                except (TypeError, ValueError):
+                    continue
+
+        global_raw = data.get("global_drawn", [])
+        global_drawn: List[int] = []
+        if isinstance(global_raw, Iterable) and not isinstance(global_raw, (str, bytes)):
+            for value in global_raw:
+                try:
+                    global_drawn.append(int(value))
+                except (TypeError, ValueError):
+                    continue
+
+        def _parse_optional_int(value: Any) -> Optional[int]:
+            if value is None:
+                return None
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+
+        current_student = _parse_optional_int(data.get("current_student"))
+        pending_student = _parse_optional_int(data.get("pending_student"))
+
+        return cls(
+            current_group=current_group,
+            group_remaining=remaining,
+            group_last=last,
+            global_drawn=global_drawn,
+            current_student=current_student,
+            pending_student=pending_student,
+        )
+
+
 class RollCallTimerWindow(QWidget):
     """集成点名与计时的主功能窗口。"""
     window_closed = pyqtSignal()
@@ -3669,6 +3755,7 @@ class RollCallTimerWindow(QWidget):
         # 统一维护一个全局已点名集合，确保“全部”分组与子分组状态一致
         self._global_drawn_students: set[int] = set()
         self._student_groups: Dict[int, set[str]] = {}
+        self._class_roll_states: Dict[str, ClassRollState] = {}
         self.timer_seconds_left = max(0, _get_int("timer_seconds_left", self.timer_countdown_minutes * 60 + self.timer_countdown_seconds))
         self.timer_stopwatch_seconds = max(0, _get_int("timer_stopwatch_seconds", 0))
         self.timer_running = str_to_bool(s.get("timer_running", "False"), False)
@@ -3791,6 +3878,15 @@ class RollCallTimerWindow(QWidget):
         control_layout.setContentsMargins(0, 0, 0, 0)
         control_layout.setSpacing(2)
 
+        self.class_button = QPushButton("班级"); _setup_secondary_button(self.class_button)
+        self.class_button.clicked.connect(self.show_class_selector)
+        control_layout.addWidget(self.class_button)
+
+        self.reset_button = QPushButton("重置"); _setup_secondary_button(self.reset_button)
+        self.reset_button.clicked.connect(self.reset_roll_call_pools)
+        _lock_button_width(self.reset_button)
+        control_layout.addWidget(self.reset_button)
+
         self.showcase_button = QPushButton("展示"); _setup_secondary_button(self.showcase_button)
         self.showcase_button.clicked.connect(self.show_scoreboard)
         control_layout.addWidget(self.showcase_button)
@@ -3802,11 +3898,6 @@ class RollCallTimerWindow(QWidget):
         self.encrypt_button = QPushButton(""); _setup_secondary_button(self.encrypt_button)
         self.encrypt_button.clicked.connect(self._on_encrypt_button_clicked)
         control_layout.addWidget(self.encrypt_button)
-
-        self.reset_button = QPushButton("重置"); _setup_secondary_button(self.reset_button)
-        self.reset_button.clicked.connect(self.reset_roll_call_pools)
-        _lock_button_width(self.reset_button)
-        control_layout.addWidget(self.reset_button)
 
         top.addWidget(control_bar, 0, Qt.AlignmentFlag.AlignLeft)
         top.addStretch(1)
@@ -4000,10 +4091,383 @@ class RollCallTimerWindow(QWidget):
         self._ensure_group_pool(self.current_group_name, force_reset=True)
         self.current_student_index = None
         self._pending_passive_student = None
+        self._restore_active_class_state()
         self._snapshot_current_class()
         self._update_class_button_label()
         if propagate:
             self._propagate_student_dataframe()
+        self.display_current_student()
+
+    def _apply_student_workbook(self, workbook: StudentWorkbook, *, propagate: bool) -> None:
+        self.student_workbook = workbook
+        if not PANDAS_READY:
+            self.current_class_name = workbook.active_class
+            self.student_data = None
+            return
+        if self.current_class_name:
+            workbook.set_active_class(self.current_class_name)
+        self.current_class_name = workbook.active_class
+        df = workbook.get_active_dataframe()
+        self._set_student_dataframe(df, propagate=propagate)
+
+    def _snapshot_current_class(self) -> None:
+        if not PANDAS_READY:
+            return
+        if self.student_workbook is None:
+            return
+        if self.student_data is None or not isinstance(self.student_data, pd.DataFrame):
+            return
+        class_name = (self.current_class_name or self.student_workbook.active_class or "").strip()
+        if not class_name:
+            available = self.student_workbook.class_names()
+            class_name = available[0] if available else self.student_workbook.active_class
+        if class_name not in self.student_workbook.class_names():
+            class_name = self.student_workbook.active_class
+        try:
+            snapshot = self.student_data.copy()
+        except Exception:
+            snapshot = pd.DataFrame(self.student_data)
+        self.student_workbook.update_class(class_name, snapshot)
+        self.student_workbook.set_active_class(class_name)
+        self.current_class_name = class_name
+        self._store_active_class_state(class_name)
+
+    def _resolve_active_class_name(self) -> str:
+        base = self.current_class_name
+        if not base and self.student_workbook is not None:
+            base = self.student_workbook.active_class
+        return str(base or "").strip()
+
+    def _capture_roll_state(self) -> Optional[ClassRollState]:
+        if not PANDAS_READY:
+            return None
+        if not isinstance(self.student_data, pd.DataFrame):
+            return None
+
+        base_sets: Dict[str, Set[int]] = {}
+        for group, indices in self._group_all_indices.items():
+            base_list = self._collect_base_indices(indices)
+            base_sets[group] = set(base_list)
+
+        if "全部" not in base_sets:
+            try:
+                base_sets["全部"] = set(self._collect_base_indices(list(self.student_data.index)))
+            except Exception:
+                base_sets["全部"] = set()
+
+        all_set = base_sets.get("全部", set())
+
+        remaining_payload: Dict[str, List[int]] = {}
+        for group, indices in self._group_remaining_indices.items():
+            base_set = base_sets.get(group, all_set)
+            if base_set:
+                restored = self._normalize_indices(indices, allowed=base_set)
+            else:
+                restored = []
+            remaining_payload[group] = restored
+
+        last_payload: Dict[str, Optional[int]] = {}
+        for group, value in self._group_last_student.items():
+            base_set = base_sets.get(group, all_set)
+            if value is None:
+                last_payload[group] = None
+                continue
+            try:
+                idx = int(value)
+            except (TypeError, ValueError):
+                last_payload[group] = None
+                continue
+            if base_set and idx not in base_set:
+                last_payload[group] = None
+            else:
+                last_payload[group] = idx
+
+        global_drawn_payload: List[int] = []
+        for value in sorted(self._global_drawn_students):
+            try:
+                idx = int(value)
+            except (TypeError, ValueError):
+                continue
+            if not all_set or idx in all_set:
+                global_drawn_payload.append(idx)
+
+        if self.groups:
+            if self.current_group_name in self.groups:
+                target_group = self.current_group_name
+            elif "全部" in self.groups:
+                target_group = "全部"
+            else:
+                target_group = self.groups[0]
+        else:
+            target_group = ""
+
+        def _sanitize_index(value: Any) -> Optional[int]:
+            if value is None:
+                return None
+            try:
+                idx = int(value)
+            except (TypeError, ValueError):
+                return None
+            if all_set and idx not in all_set:
+                return None
+            return idx
+
+        current_student = _sanitize_index(self.current_student_index)
+        pending_student = _sanitize_index(self._pending_passive_student)
+
+        return ClassRollState(
+            current_group=target_group,
+            group_remaining=remaining_payload,
+            group_last=last_payload,
+            global_drawn=global_drawn_payload,
+            current_student=current_student,
+            pending_student=pending_student,
+        )
+
+    def _store_active_class_state(self, class_name: Optional[str] = None) -> None:
+        if not PANDAS_READY:
+            return
+        target = (class_name or self._resolve_active_class_name()).strip()
+        if not target:
+            return
+        snapshot = self._capture_roll_state()
+        if snapshot is None:
+            return
+        self._class_roll_states[target] = snapshot
+
+    def _encode_class_states(self) -> str:
+        payload = {name: state.to_json() for name, state in self._class_roll_states.items()}
+        return json.dumps(payload, ensure_ascii=False)
+
+    def _parse_legacy_roll_state(self, section: Mapping[str, str]) -> Optional[ClassRollState]:
+        def _load_dict(key: str) -> Dict[str, Any]:
+            raw = section.get(key, "")
+            if not raw:
+                return {}
+            try:
+                data = json.loads(raw)
+            except Exception:
+                return {}
+            return data if isinstance(data, dict) else {}
+
+        remaining = _load_dict("group_remaining")
+        last = _load_dict("group_last")
+
+        global_drawn_raw = section.get("global_drawn", "")
+        global_payload: List[int] = []
+        if global_drawn_raw:
+            try:
+                payload = json.loads(global_drawn_raw)
+            except Exception:
+                payload = []
+            if isinstance(payload, list):
+                for value in payload:
+                    try:
+                        global_payload.append(int(value))
+                    except (TypeError, ValueError):
+                        continue
+
+        payload_map: Dict[str, Any] = {
+            "current_group": section.get("current_group", self.current_group_name),
+            "group_remaining": remaining,
+            "group_last": last,
+            "global_drawn": global_payload,
+        }
+        return ClassRollState.from_mapping(payload_map)
+
+    def _restore_active_class_state(self) -> None:
+        if not PANDAS_READY:
+            return
+        class_name = self._resolve_active_class_name()
+        if not class_name:
+            return
+        snapshot = self._class_roll_states.get(class_name)
+        if snapshot is None:
+            return
+        self._apply_roll_state(snapshot)
+
+    def _apply_roll_state(self, snapshot: ClassRollState) -> None:
+        if not PANDAS_READY:
+            return
+
+        remaining_data = snapshot.group_remaining or {}
+        last_data = snapshot.group_last or {}
+        restored_global: Set[int] = set()
+        for value in snapshot.global_drawn:
+            try:
+                restored_global.add(int(value))
+            except (TypeError, ValueError):
+                continue
+
+        existing_global = set(restored_global)
+        self._global_drawn_students = set()
+        self._group_drawn_history["全部"] = self._global_drawn_students
+
+        for group, indices in remaining_data.items():
+            if group not in self._group_all_indices:
+                continue
+            base_list = self._collect_base_indices(self._group_all_indices[group])
+            base_set = set(base_list)
+            if base_set:
+                restored_list = self._normalize_indices(indices, allowed=base_set)
+            else:
+                restored_list = []
+            self._group_remaining_indices[group] = restored_list
+
+        for group, value in last_data.items():
+            if group not in self._group_all_indices:
+                continue
+            if value is None:
+                self._group_last_student[group] = None
+                continue
+            try:
+                idx = int(value)
+            except (TypeError, ValueError):
+                continue
+            base_indices = self._collect_base_indices(self._group_all_indices[group])
+            base_set = set(base_indices)
+            if base_set and idx not in base_set:
+                continue
+            self._group_last_student[group] = idx
+
+        for group, base_indices in self._group_all_indices.items():
+            normalized_base = self._collect_base_indices(base_indices)
+            remaining_set = set(self._normalize_indices(self._group_remaining_indices.get(group, [])))
+            drawn = {idx for idx in normalized_base if idx not in remaining_set}
+            if group != "全部" and existing_global:
+                drawn.update(idx for idx in existing_global if idx in normalized_base)
+            seq = list(self._group_remaining_indices.get(group, []))
+            seq.extend(idx for idx in normalized_base if idx not in seq)
+            self._group_initial_sequences[group] = seq
+            if group == "全部":
+                self._global_drawn_students.update(drawn)
+            else:
+                self._group_drawn_history[group] = drawn
+                self._global_drawn_students.update(drawn)
+
+        if existing_global:
+            self._global_drawn_students.update(existing_global)
+
+        self._group_drawn_history["全部"] = self._global_drawn_students
+        self._refresh_all_group_pool()
+
+        target_group = snapshot.current_group.strip() if snapshot.current_group else ""
+        if target_group not in self.groups:
+            target_group = "全部" if "全部" in self.groups else (self.groups[0] if self.groups else "全部")
+        self.current_group_name = target_group
+        self._update_group_button_state(target_group)
+
+        base_all = self._collect_base_indices(self._group_all_indices.get("全部", []))
+        base_all_set = set(base_all)
+
+        def _valid_index(value: Optional[int]) -> Optional[int]:
+            if value is None:
+                return None
+            try:
+                idx = int(value)
+            except (TypeError, ValueError):
+                return None
+            if base_all_set and idx not in base_all_set:
+                return None
+            return idx
+
+        self.current_student_index = _valid_index(snapshot.current_student)
+        self._pending_passive_student = _valid_index(snapshot.pending_student)
+
+        self._store_active_class_state(self._resolve_active_class_name())
+
+    def _update_class_button_label(self) -> None:
+        if not hasattr(self, "class_button"):
+            return
+        name = ""
+        if self.student_workbook is not None:
+            base_name = self.current_class_name or self.student_workbook.active_class
+            name = base_name.strip()
+        text = name or "班级"
+        self.class_button.setText(text)
+        metrics = self.class_button.fontMetrics()
+        baseline = metrics.horizontalAdvance("班级")
+        active_width = metrics.horizontalAdvance(text)
+        minimum = max(baseline, active_width) + 24
+        if self.class_button.minimumWidth() != minimum:
+            self.class_button.setMinimumWidth(minimum)
+        has_data = self.student_workbook is not None and not self.student_workbook.is_empty()
+        can_select = self.mode == "roll_call" and (has_data or self._student_data_pending_load)
+        self.class_button.setEnabled(can_select)
+        if has_data:
+            self.class_button.setToolTip("选择或新建班级")
+        else:
+            self.class_button.setToolTip("暂无班级数据，点击以尝试加载或创建班级")
+
+    def show_class_selector(self) -> None:
+        if self.mode != "roll_call":
+            return
+        if self._student_data_pending_load:
+            if not self._load_student_data_if_needed():
+                return
+        if self.student_workbook is None:
+            show_quiet_information(self, "暂无学生数据，无法选择班级。")
+            return
+        menu = QMenu(self)
+        current = self.current_class_name or self.student_workbook.active_class
+        for name in self.student_workbook.class_names():
+            action = menu.addAction(name)
+            action.setCheckable(True)
+            action.setChecked(name == current)
+            action.triggered.connect(lambda _checked=False, n=name: self._switch_class(n))
+        menu.addSeparator()
+        create_action = menu.addAction("新建班级...")
+        create_action.triggered.connect(self._create_new_class)
+        pos = self.class_button.mapToGlobal(self.class_button.rect().bottomLeft())
+        menu.exec(pos)
+
+    def _switch_class(self, class_name: str) -> None:
+        if self.student_workbook is None:
+            return
+        if class_name not in self.student_workbook.class_names():
+            return
+        target = class_name.strip()
+        current = self.current_class_name or self.student_workbook.active_class
+        if target == current:
+            return
+        if self._student_data_pending_load:
+            if not self._load_student_data_if_needed():
+                return
+        self._snapshot_current_class()
+        self.student_workbook.set_active_class(target)
+        self.current_class_name = target
+        if PANDAS_READY:
+            df = self.student_workbook.get_active_dataframe()
+        else:
+            df = None
+        self._set_student_dataframe(df, propagate=True)
+        self._schedule_save()
+
+    def _create_new_class(self) -> None:
+        if self._student_data_pending_load:
+            if not self._load_student_data_if_needed():
+                return
+        if self.student_workbook is None:
+            self.student_workbook = StudentWorkbook(OrderedDict(), active_class="")
+        if not PANDAS_READY:
+            show_quiet_information(self, "当前环境缺少 pandas，无法创建班级。")
+            return
+        self._snapshot_current_class()
+        suggested = f"班级{len(self.student_workbook.class_names()) + 1}" if self.student_workbook.class_names() else "班级1"
+        name, ok = QInputDialog.getText(
+            self,
+            "新建班级",
+            "请输入班级名称：",
+            QLineEdit.EchoMode.Normal,
+            suggested,
+        )
+        if not ok:
+            return
+        new_name = self.student_workbook.add_class(name)
+        self.current_class_name = new_name
+        self._apply_student_workbook(self.student_workbook, propagate=True)
+        self._schedule_save()
+        self._update_class_button_label()
 
     def _apply_student_workbook(self, workbook: StudentWorkbook, *, propagate: bool) -> None:
         self.student_workbook = workbook
@@ -5041,94 +5505,43 @@ class RollCallTimerWindow(QWidget):
     def _restore_group_state(self, section: Mapping[str, str]) -> None:
         """从配置中恢复各分组剩余学生池，保持未抽学生不重复。"""
 
-        def _load_dict(key: str) -> Dict[str, object]:
-            raw = section.get(key, "")
-            if not raw:
-                return {}
-            try:
-                data = json.loads(raw)
-            except Exception:
-                return {}
-            return data if isinstance(data, dict) else {}
+        if not PANDAS_READY:
+            return
 
-        remaining_data = _load_dict("group_remaining")
-        last_data = _load_dict("group_last")
-
-        # 读取保存的全局已点名名单，保证窗口被关闭后重新打开时仍能继承上一轮的状态
-        global_drawn_raw = section.get("global_drawn", "")
-        restored_global: set[int] = set()
-        if global_drawn_raw:
+        raw_states = section.get("class_states", "")
+        restored_states: Dict[str, ClassRollState] = {}
+        if raw_states:
             try:
-                payload = json.loads(global_drawn_raw)
+                payload = json.loads(raw_states)
             except Exception:
-                payload = []
-            if isinstance(payload, list):
-                for value in payload:
-                    try:
-                        restored_global.add(int(value))
-                    except (TypeError, ValueError):
+                payload = {}
+            if isinstance(payload, dict):
+                for name, state_data in payload.items():
+                    key = str(name).strip()
+                    if not key:
                         continue
+                    state = ClassRollState.from_mapping(state_data)
+                    if state is not None:
+                        restored_states[key] = state
 
-        self._global_drawn_students.clear()
-        self._global_drawn_students.update(restored_global)
-        self._group_drawn_history["全部"] = self._global_drawn_students
+        self._class_roll_states = restored_states
 
-        # 先记录一份备份，稍后重新计算所有集合时需要与持久化信息交叉验证
-        existing_global = set(self._global_drawn_students)
+        active_class = self._resolve_active_class_name()
+        snapshot = self._class_roll_states.get(active_class)
+        if snapshot is None:
+            legacy = self._parse_legacy_roll_state(section)
+            if legacy is not None and active_class:
+                self._class_roll_states[active_class] = legacy
+                snapshot = legacy
 
-        # 从头构建全局集合，避免旧对象上的引用导致状态被意外清空
-        self._global_drawn_students = set()
-        self._group_drawn_history["全部"] = self._global_drawn_students
+        if snapshot is None:
+            self._ensure_group_pool(self.current_group_name)
+            return
 
-        for group, indices in remaining_data.items():
-            if group not in self._group_all_indices:
-                continue
-            base_list = self._collect_base_indices(self._group_all_indices[group])
-            base_set = set(base_list)
-            restored: List[int] = []
-            if isinstance(indices, list):
-                restored = self._normalize_indices(indices, allowed=base_set)
-            self._group_remaining_indices[group] = restored
-
-        for group, value in last_data.items():
-            if group not in self._group_all_indices:
-                continue
-            if value is None:
-                self._group_last_student[group] = None
-                continue
-            try:
-                idx = int(value)
-            except (TypeError, ValueError):
-                continue
-            if idx in self._group_all_indices[group]:
-                self._group_last_student[group] = idx
-
-        # 根据恢复后的剩余名单推导出每个分组已点名的学生集合
-        # 重新整理所有分组的已点名学生，并同步更新全局集合
-        for group, base_indices in self._group_all_indices.items():
-            normalized_base = self._collect_base_indices(base_indices)
-            remaining_set = set(self._normalize_indices(self._group_remaining_indices.get(group, [])))
-            drawn = {idx for idx in normalized_base if idx not in remaining_set}
-            if group != "全部" and existing_global:
-                # 在恢复时合并先前记录的全局名单，防止由于意外写入丢失导致遗漏
-                drawn.update(idx for idx in existing_global if idx in normalized_base)
-            seq = list(self._group_remaining_indices.get(group, []))
-            seq.extend(idx for idx in normalized_base if idx not in seq)
-            self._group_initial_sequences[group] = seq
-            if group == "全部":
-                # “全部”分组的已点名集合以全局集合为准
-                self._global_drawn_students.update(drawn)
-            else:
-                self._group_drawn_history[group] = drawn
-                self._global_drawn_students.update(drawn)
-
-        # 合并持久化阶段记录的全局集合，防止遗漏尚未恢复的记录
-        if existing_global:
-            self._global_drawn_students.update(existing_global)
-
-        # 最后重新指定“全部”分组引用当前全局集合，保持一致性
-        self._group_drawn_history["全部"] = self._global_drawn_students
-        self._refresh_all_group_pool()
+        self._apply_roll_state(snapshot)
+        sanitized = self._capture_roll_state()
+        if sanitized is not None and active_class:
+            self._class_roll_states[active_class] = sanitized
 
     def _ensure_group_pool(self, group_name: str, force_reset: bool = False) -> None:
         """确保指定分组仍有待抽取的学生，必要时重新洗牌。"""
@@ -5556,6 +5969,9 @@ class RollCallTimerWindow(QWidget):
         sec["timer_font_size"] = str(self.last_timer_font_size)
         sec["scoreboard_order"] = self.scoreboard_order
         sec["students_encrypted"] = bool_to_str(self._student_file_encrypted)
+        if not self._student_data_pending_load:
+            self._store_active_class_state()
+        sec["class_states"] = self._encode_class_states()
         if self._student_data_pending_load:
             # 在尚未加载真实名单数据时，保留磁盘上已有的未点名状态，避免误把占位空列表写回
             # 此时直接返回，保持上一轮保存的名单信息不被覆盖。
