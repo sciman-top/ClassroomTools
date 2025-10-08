@@ -4315,8 +4315,17 @@ class RollCallTimerWindow(QWidget):
             return
         self._apply_roll_state(snapshot)
 
-    def _apply_roll_state(self, snapshot: ClassRollState) -> None:
+    def _can_apply_roll_state(self) -> bool:
+        """检查当前是否具备恢复点名状态所需的数据上下文。"""
+
         if not PANDAS_READY:
+            return False
+        if self._student_data_pending_load:
+            return False
+        return isinstance(self.student_data, pd.DataFrame)
+
+    def _apply_roll_state(self, snapshot: ClassRollState) -> None:
+        if not self._can_apply_roll_state():
             return
 
         remaining_data = snapshot.group_remaining or {}
@@ -5437,6 +5446,9 @@ class RollCallTimerWindow(QWidget):
             if legacy is not None and active_class:
                 self._class_roll_states[active_class] = legacy
                 snapshot = legacy
+
+        if not self._can_apply_roll_state():
+            return
 
         if snapshot is None:
             self._ensure_group_pool(self.current_group_name)
