@@ -21,7 +21,7 @@ import time
 import traceback
 import hashlib
 import hmac
-from collections import deque
+from collections import OrderedDict, deque
 from queue import Empty, Queue
 from dataclasses import dataclass
 from typing import (
@@ -80,6 +80,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMenu,
+    QInputDialog,
     QMessageBox,
     QPushButton,
     QSpacerItem,
@@ -3573,7 +3574,7 @@ class RollCallTimerWindow(QWidget):
     def __init__(
         self,
         settings_manager: SettingsManager,
-        student_data,
+        student_workbook: Optional[StudentWorkbook],
         parent: Optional[QWidget] = None,
         *,
         defer_password_prompt: bool = False,
@@ -3591,10 +3592,14 @@ class RollCallTimerWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.settings_manager = settings_manager
         self._encrypted_file_path = self.ENCRYPTED_STUDENT_FILE
-        base_dataframe = student_data
-        if isinstance(base_dataframe, pd.DataFrame):
-            pass
-        elif base_dataframe is None and PANDAS_AVAILABLE and pd is not None:
+        self.student_workbook: Optional[StudentWorkbook] = student_workbook
+        base_dataframe: Optional[PandasDataFrame] = None
+        if PANDAS_AVAILABLE and pd is not None and self.student_workbook is not None:
+            try:
+                base_dataframe = self.student_workbook.get_active_dataframe()
+            except Exception:
+                base_dataframe = pd.DataFrame(columns=["学号", "姓名", "分组", "成绩"])
+        if base_dataframe is None and PANDAS_AVAILABLE and pd is not None:
             base_dataframe = pd.DataFrame(columns=["学号", "姓名", "分组", "成绩"])
         self.student_data = base_dataframe
         self._student_data_pending_load = False
@@ -3602,13 +3607,17 @@ class RollCallTimerWindow(QWidget):
         self._student_file_encrypted = bool(encrypted_state)
         self._student_password = encrypted_password
         if defer_password_prompt:
-            base_empty = not isinstance(self.student_data, pd.DataFrame) or getattr(self.student_data, "empty", True)
+            base_empty = True
+            if PANDAS_AVAILABLE and pd is not None and isinstance(self.student_data, pd.DataFrame):
+                base_empty = getattr(self.student_data, "empty", True)
+            elif self.student_data is not None:
+                base_empty = False
             if base_empty:
                 has_plain = os.path.exists(self.STUDENT_FILE)
                 has_encrypted = os.path.exists(self._encrypted_file_path)
                 if has_plain or has_encrypted:
                     self._student_data_pending_load = True
-                    if not isinstance(self.student_data, pd.DataFrame) and PANDAS_AVAILABLE and pd is not None:
+                    if self.student_data is None and PANDAS_AVAILABLE and pd is not None:
                         self.student_data = pd.DataFrame(columns=["学号", "姓名", "分组", "成绩"])
         try:
             self._rng = random.SystemRandom()
@@ -3642,6 +3651,7 @@ class RollCallTimerWindow(QWidget):
         self.show_name = str_to_bool(s.get("show_name", "True"), True)
         if not self.show_id and not self.show_name: self.show_id = True
 
+        self.current_class_name = str(s.get("current_class", "")).strip()
         self.current_group_name = s.get("current_group", "全部")
         self.groups = ["全部"]
 
@@ -3713,7 +3723,10 @@ class RollCallTimerWindow(QWidget):
         self._save_timer.timeout.connect(self.save_settings)
 
         self._build_ui()
-        self._set_student_dataframe(self.student_data, propagate=False)
+        if self.student_workbook is not None and not self._student_data_pending_load:
+            self._apply_student_workbook(self.student_workbook, propagate=False)
+        else:
+            self._set_student_dataframe(self.student_data, propagate=False)
         self._apply_saved_fonts()
         self._update_menu_state()
         self._restore_group_state(s)
@@ -3767,9 +3780,10 @@ class RollCallTimerWindow(QWidget):
         control_layout.setContentsMargins(0, 0, 0, 0)
         control_layout.setSpacing(2)
 
-        self.list_button = QPushButton("名单"); _setup_secondary_button(self.list_button)
-        self.list_button.clicked.connect(self.show_student_selector)
-        control_layout.addWidget(self.list_button)
+        self.class_button = QPushButton(""); _setup_secondary_button(self.class_button)
+        self.class_button.clicked.connect(self.show_class_selector)
+        self.class_button.setMinimumWidth(self.class_button.sizeHint().width())
+        control_layout.addWidget(self.class_button)
 
         self.showcase_button = QPushButton("展示"); _setup_secondary_button(self.showcase_button)
         self.showcase_button.clicked.connect(self.show_scoreboard)
@@ -3810,7 +3824,7 @@ class RollCallTimerWindow(QWidget):
         group_container.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         group_container_layout = QHBoxLayout(group_container)
         group_container_layout.setContentsMargins(0, 0, 0, 0)
-        group_container_layout.setSpacing(0)
+        group_container_layout.setSpacing(4)
 
         self.group_container = group_container
 
@@ -3826,9 +3840,17 @@ class RollCallTimerWindow(QWidget):
         self._rebuild_group_buttons_ui()
         group_container_layout.addWidget(self.group_bar, 1, Qt.AlignmentFlag.AlignLeft)
 
+        self.list_button = QPushButton("名单"); _setup_secondary_button(self.list_button)
+        self.list_button.clicked.connect(self.show_student_selector)
+        if self.list_button.sizePolicy().horizontalPolicy() != QSizePolicy.Policy.Fixed:
+            self.list_button.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+        self.list_button.setMinimumWidth(self.list_button.sizeHint().width())
+        group_container_layout.addWidget(self.list_button, 0, Qt.AlignmentFlag.AlignLeft)
+
         self.add_score_button = QPushButton("加分"); _setup_secondary_button(self.add_score_button)
         self.add_score_button.setEnabled(False)
         self.add_score_button.clicked.connect(self.increment_current_score)
+        self.add_score_button.setMinimumWidth(self.add_score_button.sizeHint().width())
         group_container_layout.addWidget(self.add_score_button, 0, Qt.AlignmentFlag.AlignLeft)
 
         group_row.addWidget(group_container, 1, Qt.AlignmentFlag.AlignLeft)
@@ -3969,25 +3991,145 @@ class RollCallTimerWindow(QWidget):
         self._ensure_group_pool(self.current_group_name, force_reset=True)
         self.current_student_index = None
         self._pending_passive_student = None
+        self._snapshot_current_class()
+        self._update_class_button_label()
         if propagate:
             self._propagate_student_dataframe()
+
+    def _apply_student_workbook(self, workbook: StudentWorkbook, *, propagate: bool) -> None:
+        self.student_workbook = workbook
+        if not (PANDAS_AVAILABLE and pd is not None):
+            self.current_class_name = workbook.active_class
+            self.student_data = None
+            return
+        if self.current_class_name:
+            workbook.set_active_class(self.current_class_name)
+        self.current_class_name = workbook.active_class
+        df = workbook.get_active_dataframe()
+        self._set_student_dataframe(df, propagate=propagate)
+
+    def _snapshot_current_class(self) -> None:
+        if not (PANDAS_AVAILABLE and pd is not None):
+            return
+        if self.student_workbook is None:
+            return
+        if self.student_data is None or not isinstance(self.student_data, pd.DataFrame):
+            return
+        class_name = self.current_class_name or self.student_workbook.active_class
+        if not class_name:
+            class_name = self.student_workbook.active_class
+        try:
+            snapshot = self.student_data.copy()
+        except Exception:
+            snapshot = pd.DataFrame(self.student_data)
+        self.student_workbook.update_class(class_name, snapshot)
+        self.student_workbook.set_active_class(class_name)
+        self.current_class_name = class_name
+
+    def _update_class_button_label(self) -> None:
+        if not hasattr(self, "class_button"):
+            return
+        name = ""
+        if self.student_workbook is not None:
+            base_name = self.current_class_name or self.student_workbook.active_class
+            name = base_name.strip()
+        text = f"班级：{name}" if name else "班级"
+        self.class_button.setText(text)
+        has_data = self.student_workbook is not None and not self.student_workbook.is_empty()
+        can_select = self.mode == "roll_call" and (has_data or self._student_data_pending_load)
+        self.class_button.setEnabled(can_select)
+        if has_data:
+            self.class_button.setToolTip("选择或新建班级")
+        else:
+            self.class_button.setToolTip("暂无班级数据，点击以尝试加载或创建班级")
+
+    def show_class_selector(self) -> None:
+        if self.mode != "roll_call":
+            return
+        if self._student_data_pending_load:
+            if not self._load_student_data_if_needed():
+                return
+        if self.student_workbook is None:
+            show_quiet_information(self, "暂无学生数据，无法选择班级。")
+            return
+        menu = QMenu(self)
+        current = self.current_class_name or self.student_workbook.active_class
+        for name in self.student_workbook.class_names():
+            action = menu.addAction(name)
+            action.setCheckable(True)
+            action.setChecked(name == current)
+            action.triggered.connect(lambda _checked=False, n=name: self._switch_class(n))
+        menu.addSeparator()
+        create_action = menu.addAction("新建班级...")
+        create_action.triggered.connect(self._create_new_class)
+        pos = self.class_button.mapToGlobal(self.class_button.rect().bottomLeft())
+        menu.exec(pos)
+
+    def _switch_class(self, class_name: str) -> None:
+        if self.student_workbook is None:
+            return
+        if class_name not in self.student_workbook.class_names():
+            return
+        target = class_name.strip()
+        current = self.current_class_name or self.student_workbook.active_class
+        if target == current:
+            return
+        if self._student_data_pending_load:
+            if not self._load_student_data_if_needed():
+                return
+        self._snapshot_current_class()
+        self.student_workbook.set_active_class(target)
+        self.current_class_name = target
+        if PANDAS_AVAILABLE and pd is not None:
+            df = self.student_workbook.get_active_dataframe()
+        else:
+            df = None
+        self._set_student_dataframe(df, propagate=True)
+        self._schedule_save()
+
+    def _create_new_class(self) -> None:
+        if self._student_data_pending_load:
+            if not self._load_student_data_if_needed():
+                return
+        if self.student_workbook is None:
+            self.student_workbook = StudentWorkbook(OrderedDict(), active_class="")
+        if not (PANDAS_AVAILABLE and pd is not None):
+            show_quiet_information(self, "当前环境缺少 pandas，无法创建班级。")
+            return
+        self._snapshot_current_class()
+        suggested = f"班级{len(self.student_workbook.class_names()) + 1}" if self.student_workbook.class_names() else "班级1"
+        name, ok = QInputDialog.getText(
+            self,
+            "新建班级",
+            "请输入班级名称：",
+            QLineEdit.EchoMode.Normal,
+            suggested,
+        )
+        if not ok:
+            return
+        new_name = self.student_workbook.add_class(name)
+        self.current_class_name = new_name
+        self._apply_student_workbook(self.student_workbook, propagate=True)
+        self._schedule_save()
+        self._update_class_button_label()
 
     def _load_student_data_if_needed(self) -> bool:
         if not self._student_data_pending_load:
             return True
         if not (PANDAS_AVAILABLE and OPENPYXL_AVAILABLE):
             return False
-        df = load_student_data(self)
-        if df is None:
+        workbook = load_student_data(self)
+        if workbook is None:
             return False
         self._student_data_pending_load = False
-        self._set_student_dataframe(df, propagate=True)
+        self._apply_student_workbook(workbook, propagate=True)
         encrypted_state, encrypted_password = _get_session_student_encryption()
         self._student_file_encrypted = bool(encrypted_state)
         self._student_password = encrypted_password
         saved = self.settings_manager.load_settings().get("RollCallTimer", {})
         self._restore_group_state(saved)
         self._update_encryption_button()
+        self._update_class_button_label()
         self.display_current_student()
         self._schedule_save()
         return True
@@ -3999,16 +4141,29 @@ class RollCallTimerWindow(QWidget):
         password = self._prompt_new_encryption_password()
         if not password:
             return
-        if self.student_data is None:
-            show_quiet_information(self, "没有可加密的学生数据。")
-            return
+        if self._student_data_pending_load:
+            if not self._load_student_data_if_needed():
+                return
+        if self.student_workbook is None:
+            if self.student_data is None or not isinstance(self.student_data, pd.DataFrame):
+                show_quiet_information(self, "没有可加密的学生数据。")
+                return
+            try:
+                snapshot = self.student_data.copy()
+            except Exception:
+                snapshot = pd.DataFrame(self.student_data)
+            class_name = self.current_class_name or "班级1"
+            self.current_class_name = class_name
+            self.student_workbook = StudentWorkbook(
+                OrderedDict({class_name: snapshot}),
+                active_class=class_name,
+            )
+        else:
+            self._snapshot_current_class()
         try:
-            df = self.student_data.copy()
-        except Exception:
-            df = pd.DataFrame(self.student_data)
-        try:
+            data = self.student_workbook.as_dict()
             _save_student_workbook(
-                df,
+                data,
                 self.STUDENT_FILE,
                 self._encrypted_file_path,
                 encrypted=True,
@@ -4019,6 +4174,7 @@ class RollCallTimerWindow(QWidget):
             self._student_password = password
             self._update_encryption_button()
             self._propagate_student_dataframe()
+            self._update_class_button_label()
             show_quiet_information(self, "已生成加密文件 students.xlsx.enc，并移除明文数据。")
             self._schedule_save()
         except Exception as exc:
@@ -4043,14 +4199,14 @@ class RollCallTimerWindow(QWidget):
             return
         try:
             buffer = io.BytesIO(plain_bytes)
-            df = pd.read_excel(buffer)
-            df = _normalize_student_dataframe(df, drop_incomplete=False)
+            raw_data = pd.read_excel(buffer, sheet_name=None)
+            workbook = StudentWorkbook(OrderedDict(raw_data), active_class="")
         except Exception as exc:
             show_quiet_information(self, f"读取解密后的学生数据失败：{exc}")
             return
         try:
             _save_student_workbook(
-                df,
+                workbook.as_dict(),
                 self.STUDENT_FILE,
                 self._encrypted_file_path,
                 encrypted=False,
@@ -4062,22 +4218,29 @@ class RollCallTimerWindow(QWidget):
         self._student_file_encrypted = False
         self._student_password = None
         _set_session_student_encryption(False, None)
-        self._apply_decrypted_student_data(df)
+        self._apply_decrypted_student_data(workbook)
         self._update_encryption_button()
         show_quiet_information(self, "已成功解密学生数据并恢复 students.xlsx。")
         self._schedule_save()
 
-    def _apply_decrypted_student_data(self, df: PandasDataFrame) -> None:
+    def _apply_decrypted_student_data(self, workbook: StudentWorkbook) -> None:
         if not (PANDAS_AVAILABLE and pd is not None):
             return
-        self._set_student_dataframe(df, propagate=True)
+        self._apply_student_workbook(workbook, propagate=True)
         self.display_current_student()
 
     def _propagate_student_dataframe(self) -> None:
         parent = self.parent()
-        if parent is not None and hasattr(parent, "student_data"):
+        if parent is None:
+            return
+        if hasattr(parent, "student_data"):
             try:
                 setattr(parent, "student_data", self.student_data)
+            except Exception:
+                pass
+        if hasattr(parent, "student_workbook"):
+            try:
+                setattr(parent, "student_workbook", self.student_workbook)
             except Exception:
                 pass
 
@@ -4425,20 +4588,38 @@ class RollCallTimerWindow(QWidget):
     def _persist_student_scores(self) -> None:
         if not (PANDAS_AVAILABLE and OPENPYXL_AVAILABLE):
             return
-        if self.student_data is None:
+        if self._student_data_pending_load:
+            if not self._load_student_data_if_needed():
+                return
+        if self.student_workbook is None:
+            if self.student_data is None or not isinstance(self.student_data, pd.DataFrame):
+                return
+            try:
+                snapshot = self.student_data.copy()
+            except Exception:
+                snapshot = pd.DataFrame(self.student_data)
+            class_name = self.current_class_name or "班级1"
+            self.current_class_name = class_name
+            self.student_workbook = StudentWorkbook(
+                OrderedDict({class_name: snapshot}),
+                active_class=class_name,
+            )
+        else:
+            self._snapshot_current_class()
+        if self.student_workbook is None:
             return
         try:
             with self._score_write_lock:
-                df = self.student_data.copy()
-                df = _normalize_student_dataframe(df, drop_incomplete=False)
+                data = self.student_workbook.as_dict()
                 _save_student_workbook(
-                    df,
+                    data,
                     self.STUDENT_FILE,
                     self._encrypted_file_path,
                     encrypted=self._student_file_encrypted,
                     password=self._student_password,
                 )
             self._score_persist_failed = False
+            self._update_class_button_label()
         except Exception as exc:
             if not self._score_persist_failed:
                 show_quiet_information(self, f"保存成绩失败：{exc}")
@@ -4469,6 +4650,7 @@ class RollCallTimerWindow(QWidget):
         if hasattr(self, "add_score_button"):
             self.add_score_button.setVisible(is_roll)
         self._update_roll_call_controls()
+        self._update_class_button_label()
         if is_roll:
             if self._placeholder_on_show:
                 self.current_student_index = None
@@ -5185,6 +5367,8 @@ class RollCallTimerWindow(QWidget):
             button.setCheckable(True)
             button.setFont(button_font)
             apply_button_style(button, ButtonStyles.TOOLBAR, height=button_height)
+            button.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+            button.setMinimumWidth(button.sizeHint().width())
             button.clicked.connect(lambda _checked=False, name=group: self.on_group_change(name))
             self.group_bar_layout.addWidget(button)
             self.group_button_group.addButton(button)
@@ -5231,6 +5415,11 @@ class RollCallTimerWindow(QWidget):
         self.add_score_button.setEnabled(is_roll and has_student)
         self.list_button.setEnabled(is_roll and has_data)
         self.showcase_button.setEnabled(is_roll and has_data)
+        if hasattr(self, "class_button"):
+            has_workbook = self.student_workbook is not None and not self.student_workbook.is_empty()
+            can_select = is_roll and (has_workbook or self._student_data_pending_load)
+            self.class_button.setVisible(is_roll)
+            self.class_button.setEnabled(can_select)
         if hasattr(self, "encrypt_button"):
             self.encrypt_button.setVisible(is_roll)
             self.encrypt_button.setEnabled(is_roll and has_data)
@@ -5334,6 +5523,7 @@ class RollCallTimerWindow(QWidget):
         sec["show_name"] = bool_to_str(self.show_name)
         sec["speech_enabled"] = bool_to_str(self.speech_enabled)
         sec["speech_voice_id"] = self.selected_voice_id
+        sec["current_class"] = self.current_class_name
         sec["current_group"] = self.current_group_name
         sec["timer_countdown_minutes"] = str(self.timer_countdown_minutes)
         sec["timer_countdown_seconds"] = str(self.timer_countdown_seconds)
@@ -5528,24 +5718,97 @@ def _normalize_student_dataframe(
     return normalized
 
 
-def _write_student_workbook(file_path: str, df: PandasDataFrame) -> None:
-    data = _export_student_workbook_bytes(df)
+def _sanitize_sheet_name(name: str, fallback: str) -> str:
+    invalid = set("\\/:?*[]")
+    cleaned = "".join(ch for ch in str(name) if ch not in invalid).strip()
+    if not cleaned:
+        cleaned = fallback
+    if len(cleaned) > 31:
+        cleaned = cleaned[:31]
+    return cleaned
+
+
+@dataclass
+class StudentWorkbook:
+    """封装多班级学生名单，允许按工作表划分班级。"""
+
+    sheets: "OrderedDict[str, PandasDataFrame]"
+    active_class: str = ""
+
+    def __post_init__(self) -> None:
+        ordered: "OrderedDict[str, PandasDataFrame]" = OrderedDict()
+        if self.sheets:
+            for idx, (name, df) in enumerate(self.sheets.items(), start=1):
+                fallback = f"班级{idx}" if idx > 1 else "班级1"
+                safe_name = _sanitize_sheet_name(name, fallback)
+                try:
+                    normalized = _normalize_student_dataframe(df, drop_incomplete=False)
+                except Exception:
+                    normalized = pd.DataFrame(df)
+                ordered[safe_name] = normalized
+        if not ordered:
+            ordered["班级1"] = _normalize_student_dataframe(
+                pd.DataFrame({"学号": [], "姓名": [], "分组": [], "成绩": []}),
+                drop_incomplete=False,
+            )
+        self.sheets = ordered
+        if not self.active_class or self.active_class not in self.sheets:
+            self.active_class = next(iter(self.sheets))
+
+    def class_names(self) -> List[str]:
+        return list(self.sheets.keys())
+
+    def is_empty(self) -> bool:
+        return not bool(self.sheets)
+
+    def get_active_dataframe(self) -> PandasDataFrame:
+        return self.sheets[self.active_class].copy()
+
+    def set_active_class(self, class_name: str) -> None:
+        name = str(class_name).strip()
+        if name in self.sheets:
+            self.active_class = name
+
+    def update_class(self, class_name: str, df: PandasDataFrame) -> None:
+        try:
+            normalized = _normalize_student_dataframe(df, drop_incomplete=False)
+        except Exception:
+            normalized = pd.DataFrame(df)
+        self.sheets[class_name] = normalized
+        self.active_class = class_name
+
+    def add_class(self, class_name: str) -> str:
+        base_name = str(class_name).strip()
+        if not base_name:
+            base_name = f"班级{len(self.sheets) + 1}"
+        safe_name = _sanitize_sheet_name(base_name, base_name)
+        if safe_name in self.sheets:
+            suffix = 2
+            while f"{safe_name}_{suffix}" in self.sheets:
+                suffix += 1
+            safe_name = f"{safe_name}_{suffix}"
+        empty_df = _normalize_student_dataframe(
+            pd.DataFrame({"学号": [], "姓名": [], "分组": [], "成绩": []}),
+            drop_incomplete=False,
+        )
+        self.sheets[safe_name] = empty_df
+        self.active_class = safe_name
+        return safe_name
+
+    def as_dict(self) -> "OrderedDict[str, PandasDataFrame]":
+        ordered: "OrderedDict[str, PandasDataFrame]" = OrderedDict()
+        for name, df in self.sheets.items():
+            try:
+                ordered[name] = df.copy()
+            except Exception:
+                ordered[name] = pd.DataFrame(df)
+        return ordered
+
+
+def _write_student_workbook(file_path: str, data: Mapping[str, PandasDataFrame]) -> None:
+    payload = _export_student_workbook_bytes(data)
     tmp_dir = os.path.dirname(os.path.abspath(file_path)) or "."
     fd, tmp_path = tempfile.mkstemp(suffix=".xlsx", dir=tmp_dir)
-    try:
-        with os.fdopen(fd, "wb") as tmp_file:
-            tmp_file.write(data)
-        os.replace(tmp_path, file_path)
-    finally:
-        with contextlib.suppress(FileNotFoundError):
-            os.remove(tmp_path)
-
-
-def _write_encrypted_student_workbook(file_path: str, df: PandasDataFrame, password: str) -> None:
-    data = _export_student_workbook_bytes(df)
-    payload = _encrypt_student_bytes(password, data)
-    tmp_dir = os.path.dirname(os.path.abspath(file_path)) or "."
-    fd, tmp_path = tempfile.mkstemp(suffix=".enc", dir=tmp_dir)
     try:
         with os.fdopen(fd, "wb") as tmp_file:
             tmp_file.write(payload)
@@ -5555,64 +5818,53 @@ def _write_encrypted_student_workbook(file_path: str, df: PandasDataFrame, passw
             os.remove(tmp_path)
 
 
-def _export_student_workbook_bytes(df: PandasDataFrame) -> bytes:
+def _write_encrypted_student_workbook(file_path: str, data: Mapping[str, PandasDataFrame], password: str) -> None:
+    payload = _export_student_workbook_bytes(data)
+    encrypted = _encrypt_student_bytes(password, payload)
+    tmp_dir = os.path.dirname(os.path.abspath(file_path)) or "."
+    fd, tmp_path = tempfile.mkstemp(suffix=".enc", dir=tmp_dir)
     try:
-        export_df = _normalize_student_dataframe(df, drop_incomplete=False)
-    except Exception:
-        export_df = df.copy()
+        with os.fdopen(fd, "wb") as tmp_file:
+            tmp_file.write(encrypted)
+        os.replace(tmp_path, file_path)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(tmp_path)
 
-    if not OPENPYXL_AVAILABLE:
-        buffer = io.BytesIO()
-        export_df.to_excel(buffer, index=False)
-        return buffer.getvalue()
 
+def _export_student_workbook_bytes(data: Mapping[str, PandasDataFrame]) -> bytes:
+    normalized: "OrderedDict[str, PandasDataFrame]" = OrderedDict()
+    for idx, (name, df) in enumerate(data.items(), start=1):
+        fallback = f"班级{idx}" if idx > 1 else "班级1"
+        sheet_name = _sanitize_sheet_name(name, fallback)
+        try:
+            normalized_df = _normalize_student_dataframe(df, drop_incomplete=False)
+        except Exception:
+            normalized_df = pd.DataFrame(df)
+        normalized[sheet_name] = normalized_df
+    if not normalized:
+        normalized["班级1"] = _normalize_student_dataframe(
+            pd.DataFrame({"学号": [], "姓名": [], "分组": [], "成绩": []}),
+            drop_incomplete=False,
+        )
+
+    buffer = io.BytesIO()
     try:
-        from openpyxl import Workbook
-        from openpyxl.styles import Font
-    except Exception:
-        buffer = io.BytesIO()
-        export_df.to_excel(buffer, index=False)
-        return buffer.getvalue()
-
-    try:
-        workbook = Workbook()
-        worksheet = workbook.active
-        worksheet.title = "students"
-
-        headers = list(export_df.columns)
-        worksheet.append(headers)
-        header_font = Font(name="等线", size=12, bold=True)
-        body_font = Font(name="等线", size=12)
-        for cell in worksheet[1]:
-            cell.font = header_font
-
-        for row_values in export_df.itertuples(index=False, name=None):
-            normalized_row = []
-            for value in row_values:
-                if pd.isna(value):
-                    normalized_row.append(None)
-                else:
-                    normalized_row.append(value)
-            worksheet.append(tuple(normalized_row))
-
-        for row in worksheet.iter_rows(min_row=2):
-            for cell in row:
-                cell.font = body_font
-                if isinstance(cell.value, str):
-                    cell.value = cell.value.strip()
-
-        buffer = io.BytesIO()
-        workbook.save(buffer)
+        engine = "openpyxl" if OPENPYXL_AVAILABLE else None
+        with pd.ExcelWriter(buffer, engine=engine) as writer:  # type: ignore[call-arg]
+            for sheet_name, df in normalized.items():
+                df.to_excel(writer, sheet_name=sheet_name, index=False)
         buffer.seek(0)
         return buffer.getvalue()
     except Exception:
-        buffer = io.BytesIO()
-        export_df.to_excel(buffer, index=False)
+        buffer.seek(0)
+        first = next(iter(normalized.values()))
+        first.to_excel(buffer, index=False)
         return buffer.getvalue()
 
 
 def _save_student_workbook(
-    df: PandasDataFrame,
+    data: Mapping[str, PandasDataFrame],
     file_path: str,
     encrypted_file_path: str,
     *,
@@ -5622,22 +5874,25 @@ def _save_student_workbook(
     if encrypted:
         if not password:
             raise ValueError("缺少加密密码")
-        _write_encrypted_student_workbook(encrypted_file_path, df, password)
+        _write_encrypted_student_workbook(encrypted_file_path, data, password)
         with contextlib.suppress(FileNotFoundError):
             os.remove(file_path)
     else:
-        _write_student_workbook(file_path, df)
+        _write_student_workbook(file_path, data)
         with contextlib.suppress(FileNotFoundError):
             os.remove(encrypted_file_path)
 
 
-def load_student_data(parent: Optional[QWidget]) -> Optional[PandasDataFrame]:
+def load_student_data(parent: Optional[QWidget]) -> Optional[StudentWorkbook]:
     """从 students.xlsx 读取点名所需的数据，不存在时自动生成模板。"""
+
     if not (PANDAS_AVAILABLE and OPENPYXL_AVAILABLE):
         QMessageBox.warning(parent, "提示", "未安装 pandas/openpyxl，点名功能不可用。")
         return None
+
     file_path = RollCallTimerWindow.STUDENT_FILE
     encrypted_path = getattr(RollCallTimerWindow, "ENCRYPTED_STUDENT_FILE", file_path + ".enc")
+
     if not os.path.exists(file_path) and os.path.exists(encrypted_path):
         attempts = 0
         while attempts < 3:
@@ -5660,35 +5915,37 @@ def load_student_data(parent: Optional[QWidget]) -> Optional[PandasDataFrame]:
                     payload = fh.read()
                 plain_bytes = _decrypt_student_bytes(password, payload)
                 buffer = io.BytesIO(plain_bytes)
-                df = pd.read_excel(buffer)
-                df = _normalize_student_dataframe(df)
+                raw_data = pd.read_excel(buffer, sheet_name=None)
+                workbook = StudentWorkbook(OrderedDict(raw_data), active_class="")
                 _set_session_student_encryption(True, password)
-                return df
+                return workbook
             except Exception as exc:
                 attempts += 1
                 QMessageBox.warning(parent, "提示", f"解密失败：{exc}")
         QMessageBox.critical(parent, "错误", "多次输入密码失败，无法加载学生名单。")
         return None
+
     if not os.path.exists(file_path):
         try:
-            df = pd.DataFrame(
+            template = pd.DataFrame(
                 {"学号": [101, 102, 103], "姓名": ["张三", "李四", "王五"], "分组": ["A", "B", "A"], "成绩": [0, 0, 0]}
             )
-            df = _normalize_student_dataframe(df)
-            _write_student_workbook(file_path, df)
+            workbook = StudentWorkbook(OrderedDict({"班级1": template}), active_class="班级1")
+            _write_student_workbook(file_path, workbook.as_dict())
             show_quiet_information(parent, f"未找到学生名单，已为您创建模板文件：{file_path}")
             _set_session_student_encryption(False, None)
         except Exception as exc:
             QMessageBox.critical(parent, "错误", f"创建模板文件失败：{exc}")
             return None
+
     try:
-        df = pd.read_excel(file_path)
-        df = _normalize_student_dataframe(df)
-        _write_student_workbook(file_path, df)
+        raw_data = pd.read_excel(file_path, sheet_name=None)
+        workbook = StudentWorkbook(OrderedDict(raw_data), active_class="")
+        _write_student_workbook(file_path, workbook.as_dict())
         _set_session_student_encryption(False, None)
         if os.path.exists(encrypted_path):
             show_quiet_information(parent, "检测到同时存在加密文件，将优先使用明文 students.xlsx。")
-        return df
+        return workbook
     except Exception as exc:
         QMessageBox.critical(parent, "错误", f"无法加载学生名单，请检查文件格式。\n错误：{exc}")
         return None
@@ -5809,10 +6066,16 @@ class LauncherBubble(QWidget):
 
 
 class LauncherWindow(QWidget):
-    def __init__(self, settings_manager: SettingsManager, student_data: Optional[PandasDataFrame]) -> None:
+    def __init__(self, settings_manager: SettingsManager, student_workbook: Optional[StudentWorkbook]) -> None:
         super().__init__(None, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         self.settings_manager = settings_manager
-        self.student_data = student_data
+        self.student_workbook: Optional[StudentWorkbook] = student_workbook
+        self.student_data: Optional[PandasDataFrame] = None
+        if PANDAS_AVAILABLE and pd is not None and student_workbook is not None:
+            try:
+                self.student_data = student_workbook.get_active_dataframe()
+            except Exception:
+                self.student_data = pd.DataFrame(columns=["学号", "姓名", "分组", "成绩"])
         self.overlay: Optional[OverlayWindow] = None
         self.roll_call_window: Optional[RollCallTimerWindow] = None
         self._dragging = False; self._drag_offset = QPoint()
@@ -6005,16 +6268,20 @@ class LauncherWindow(QWidget):
             settings = self.settings_manager.load_settings().get("RollCallTimer", {})
             initial_mode = settings.get("mode", "roll_call")
             defer_prompt = initial_mode == "timer"
-            data = self.student_data
-            if data is None and not defer_prompt:
-                data = load_student_data(self)
-                if data is None:
+            if self.student_workbook is None and not defer_prompt:
+                workbook = load_student_data(self)
+                if workbook is None:
                     QMessageBox.warning(self, "提示", "学生数据加载失败，无法打开点名器。")
                     return
-                self.student_data = data
+                self.student_workbook = workbook
+                if PANDAS_AVAILABLE and pd is not None:
+                    try:
+                        self.student_data = workbook.get_active_dataframe()
+                    except Exception:
+                        self.student_data = pd.DataFrame(columns=["学号", "姓名", "分组", "成绩"])
             self.roll_call_window = RollCallTimerWindow(
                 self.settings_manager,
-                self.student_data,
+                self.student_workbook,
                 parent=self,
                 defer_password_prompt=defer_prompt,
             )
@@ -6035,6 +6302,7 @@ class LauncherWindow(QWidget):
         window = self.roll_call_window
         if window is not None:
             try:
+                self.student_workbook = window.student_workbook
                 self.student_data = window.student_data
             except Exception:
                 pass
@@ -6201,11 +6469,11 @@ def main() -> None:
     QToolTip.setFont(QFont("Microsoft YaHei UI", 9))
 
     settings_manager = SettingsManager()
-    student_data = load_student_data(None) if PANDAS_AVAILABLE and not os.path.exists(
+    student_workbook = load_student_data(None) if PANDAS_AVAILABLE and not os.path.exists(
         RollCallTimerWindow.ENCRYPTED_STUDENT_FILE
     ) else None
 
-    window = LauncherWindow(settings_manager, student_data)
+    window = LauncherWindow(settings_manager, student_workbook)
     app.aboutToQuit.connect(window.handle_about_to_quit)
     window.show()
     sys.exit(app.exec())
