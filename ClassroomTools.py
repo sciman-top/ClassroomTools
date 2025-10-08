@@ -4434,29 +4434,37 @@ class RollCallTimerWindow(QWidget):
         can_select = self.mode == "roll_call" and (has_data or self._student_data_pending_load)
         self.class_button.setEnabled(can_select)
         if has_data:
-            self.class_button.setToolTip("选择或新建班级")
+            self.class_button.setToolTip("选择班级")
         else:
-            self.class_button.setToolTip("暂无班级数据，点击以尝试加载或创建班级")
+            self.class_button.setToolTip("暂无学生数据，无法选择班级")
+
+    def _ensure_student_data_ready(self) -> bool:
+        """确保在需要访问学生数据前已经完成懒加载。"""
+
+        if not self._student_data_pending_load:
+            return True
+        return self._load_student_data_if_needed()
 
     def show_class_selector(self) -> None:
         if self.mode != "roll_call":
             return
-        if self._student_data_pending_load:
-            if not self._load_student_data_if_needed():
-                return
-        if self.student_workbook is None:
+        if not self._ensure_student_data_ready():
+            return
+        workbook = self.student_workbook
+        if workbook is None:
             show_quiet_information(self, "暂无学生数据，无法选择班级。")
             return
+        class_names = workbook.class_names()
+        if not class_names:
+            show_quiet_information(self, "暂无班级可供选择。")
+            return
         menu = QMenu(self)
-        current = self.current_class_name or self.student_workbook.active_class
-        for name in self.student_workbook.class_names():
+        current = self.current_class_name or workbook.active_class
+        for name in class_names:
             action = menu.addAction(name)
             action.setCheckable(True)
             action.setChecked(name == current)
             action.triggered.connect(lambda _checked=False, n=name: self._switch_class(n))
-        menu.addSeparator()
-        create_action = menu.addAction("新建班级...")
-        create_action.triggered.connect(self._create_new_class)
         pos = self.class_button.mapToGlobal(self.class_button.rect().bottomLeft())
         menu.exec(pos)
 
@@ -4469,9 +4477,8 @@ class RollCallTimerWindow(QWidget):
         current = self.current_class_name or self.student_workbook.active_class
         if target == current:
             return
-        if self._student_data_pending_load:
-            if not self._load_student_data_if_needed():
-                return
+        if not self._ensure_student_data_ready():
+            return
         self._snapshot_current_class()
         self.student_workbook.set_active_class(target)
         self.current_class_name = target
@@ -4483,9 +4490,8 @@ class RollCallTimerWindow(QWidget):
         self._schedule_save()
 
     def _create_new_class(self) -> None:
-        if self._student_data_pending_load:
-            if not self._load_student_data_if_needed():
-                return
+        if not self._ensure_student_data_ready():
+            return
         if self.student_workbook is None:
             self.student_workbook = StudentWorkbook(OrderedDict(), active_class="")
         if not PANDAS_READY:
@@ -4536,9 +4542,8 @@ class RollCallTimerWindow(QWidget):
         password = self._prompt_new_encryption_password()
         if not password:
             return
-        if self._student_data_pending_load:
-            if not self._load_student_data_if_needed():
-                return
+        if not self._ensure_student_data_ready():
+            return
         if self.student_workbook is None:
             if self.student_data is None or not isinstance(self.student_data, pd.DataFrame):
                 show_quiet_information(self, "没有可加密的学生数据。")
@@ -4983,9 +4988,8 @@ class RollCallTimerWindow(QWidget):
     def _persist_student_scores(self) -> None:
         if not (PANDAS_AVAILABLE and OPENPYXL_AVAILABLE):
             return
-        if self._student_data_pending_load:
-            if not self._load_student_data_if_needed():
-                return
+        if not self._ensure_student_data_ready():
+            return
         if self.student_workbook is None:
             if self.student_data is None or not isinstance(self.student_data, pd.DataFrame):
                 return
@@ -5030,11 +5034,10 @@ class RollCallTimerWindow(QWidget):
     def update_mode_ui(self, force_timer_reset: bool = False) -> None:
         is_roll = self.mode == "roll_call"
         timer_reset_required = force_timer_reset
-        if is_roll and self._student_data_pending_load:
-            if not self._load_student_data_if_needed():
-                self.mode = "timer"
-                is_roll = False
-                timer_reset_required = True
+        if is_roll and not self._ensure_student_data_ready():
+            self.mode = "timer"
+            is_roll = False
+            timer_reset_required = True
         self.title_label.setText("点名" if is_roll else "计时")
         self.mode_button.setText("切换到计时" if is_roll else "切换到点名")
         self.group_label.setVisible(is_roll)
