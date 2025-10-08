@@ -184,6 +184,8 @@ except ImportError:
     pd = None
     PANDAS_AVAILABLE = False
 
+PANDAS_READY = PANDAS_AVAILABLE and pd is not None
+
 try:
     import openpyxl  # noqa: F401
     OPENPYXL_AVAILABLE = True
@@ -3594,12 +3596,12 @@ class RollCallTimerWindow(QWidget):
         self._encrypted_file_path = self.ENCRYPTED_STUDENT_FILE
         self.student_workbook: Optional[StudentWorkbook] = student_workbook
         base_dataframe: Optional[PandasDataFrame] = None
-        if PANDAS_AVAILABLE and pd is not None and self.student_workbook is not None:
+        if PANDAS_READY and self.student_workbook is not None:
             try:
                 base_dataframe = self.student_workbook.get_active_dataframe()
             except Exception:
                 base_dataframe = pd.DataFrame(columns=["学号", "姓名", "分组", "成绩"])
-        if base_dataframe is None and PANDAS_AVAILABLE and pd is not None:
+        if base_dataframe is None and PANDAS_READY:
             base_dataframe = pd.DataFrame(columns=["学号", "姓名", "分组", "成绩"])
         self.student_data = base_dataframe
         self._student_data_pending_load = False
@@ -3608,7 +3610,7 @@ class RollCallTimerWindow(QWidget):
         self._student_password = encrypted_password
         if defer_password_prompt:
             base_empty = True
-            if PANDAS_AVAILABLE and pd is not None and isinstance(self.student_data, pd.DataFrame):
+            if PANDAS_READY and isinstance(self.student_data, pd.DataFrame):
                 base_empty = getattr(self.student_data, "empty", True)
             elif self.student_data is not None:
                 base_empty = False
@@ -3617,7 +3619,7 @@ class RollCallTimerWindow(QWidget):
                 has_encrypted = os.path.exists(self._encrypted_file_path)
                 if has_plain or has_encrypted:
                     self._student_data_pending_load = True
-                    if self.student_data is None and PANDAS_AVAILABLE and pd is not None:
+                    if self.student_data is None and PANDAS_READY:
                         self.student_data = pd.DataFrame(columns=["学号", "姓名", "分组", "成绩"])
         try:
             self._rng = random.SystemRandom()
@@ -3780,18 +3782,13 @@ class RollCallTimerWindow(QWidget):
         control_layout.setContentsMargins(0, 0, 0, 0)
         control_layout.setSpacing(2)
 
-        self.class_button = QPushButton("班级"); _setup_secondary_button(self.class_button)
-        self.class_button.clicked.connect(self.show_class_selector)
-        control_layout.addWidget(self.class_button)
-
         self.showcase_button = QPushButton("展示"); _setup_secondary_button(self.showcase_button)
         self.showcase_button.clicked.connect(self.show_scoreboard)
         control_layout.addWidget(self.showcase_button)
 
-        self.class_button = QPushButton(""); _setup_secondary_button(self.class_button)
+        self.class_button = QPushButton("班级"); _setup_secondary_button(self.class_button)
         self.class_button.clicked.connect(self.show_class_selector)
-        self.class_button.setMinimumWidth(self.class_button.sizeHint().width())
-        control_layout.addWidget(self.class_button)
+        control_layout.insertWidget(control_layout.indexOf(self.showcase_button), self.class_button)
 
         self.encrypt_button = QPushButton(""); _setup_secondary_button(self.encrypt_button)
         self.encrypt_button.clicked.connect(self._on_encrypt_button_clicked)
@@ -3963,7 +3960,7 @@ class RollCallTimerWindow(QWidget):
         return None
 
     def _set_student_dataframe(self, df: Optional[PandasDataFrame], *, propagate: bool = True) -> None:
-        if not (PANDAS_AVAILABLE and pd is not None):
+        if not PANDAS_READY:
             self.student_data = df
             return
         if df is None:
@@ -4002,7 +3999,7 @@ class RollCallTimerWindow(QWidget):
 
     def _apply_student_workbook(self, workbook: StudentWorkbook, *, propagate: bool) -> None:
         self.student_workbook = workbook
-        if not (PANDAS_AVAILABLE and pd is not None):
+        if not PANDAS_READY:
             self.current_class_name = workbook.active_class
             self.student_data = None
             return
@@ -4013,7 +4010,7 @@ class RollCallTimerWindow(QWidget):
         self._set_student_dataframe(df, propagate=propagate)
 
     def _snapshot_current_class(self) -> None:
-        if not (PANDAS_AVAILABLE and pd is not None):
+        if not PANDAS_READY:
             return
         if self.student_workbook is None:
             return
@@ -4097,7 +4094,7 @@ class RollCallTimerWindow(QWidget):
         self._snapshot_current_class()
         self.student_workbook.set_active_class(target)
         self.current_class_name = target
-        if PANDAS_AVAILABLE and pd is not None:
+        if PANDAS_READY:
             df = self.student_workbook.get_active_dataframe()
         else:
             df = None
@@ -4110,7 +4107,7 @@ class RollCallTimerWindow(QWidget):
                 return
         if self.student_workbook is None:
             self.student_workbook = StudentWorkbook(OrderedDict(), active_class="")
-        if not (PANDAS_AVAILABLE and pd is not None):
+        if not PANDAS_READY:
             show_quiet_information(self, "当前环境缺少 pandas，无法创建班级。")
             return
         self._snapshot_current_class()
@@ -4152,8 +4149,8 @@ class RollCallTimerWindow(QWidget):
         return True
 
     def _handle_encrypt_student_file(self) -> None:
-        if not (PANDAS_AVAILABLE and pd is not None):
-            show_quiet_information(self, "当前环境缺少 pandas/openpyxl，无法执行加密。")
+        if not PANDAS_READY:
+            show_quiet_information(self, "当前环境缺少 pandas，无法执行加密。")
             return
         password = self._prompt_new_encryption_password()
         if not password:
@@ -4241,7 +4238,7 @@ class RollCallTimerWindow(QWidget):
         self._schedule_save()
 
     def _apply_decrypted_student_data(self, workbook: StudentWorkbook) -> None:
-        if not (PANDAS_AVAILABLE and pd is not None):
+        if not PANDAS_READY:
             return
         self._apply_student_workbook(workbook, propagate=True)
         self.display_current_student()
@@ -5675,7 +5672,7 @@ def _decrypt_student_bytes(password: str, blob: bytes) -> bytes:
 
 
 def _normalize_text(value: object) -> str:
-    if PANDAS_AVAILABLE and pd is not None:
+    if PANDAS_READY:
         if pd.isna(value):
             return ""
     else:
@@ -5697,7 +5694,7 @@ def _normalize_student_dataframe(
     *,
     drop_incomplete: bool = True,
 ) -> PandasDataFrame:
-    if not (PANDAS_AVAILABLE and pd is not None):
+    if not PANDAS_READY:
         return df.copy()
 
     normalized = df.copy()
@@ -5737,7 +5734,7 @@ def _normalize_student_dataframe(
 
 
 def _empty_student_dataframe() -> PandasDataFrame:
-    if not (PANDAS_AVAILABLE and pd is not None):
+    if not PANDAS_READY:
         raise RuntimeError("Pandas support is required to create student data tables.")
     template = pd.DataFrame({"学号": [], "姓名": [], "分组": [], "成绩": []})
     return _normalize_student_dataframe(template, drop_incomplete=False)
@@ -6104,7 +6101,7 @@ class LauncherWindow(QWidget):
         self.settings_manager = settings_manager
         self.student_workbook: Optional[StudentWorkbook] = student_workbook
         self.student_data: Optional[PandasDataFrame] = None
-        if PANDAS_AVAILABLE and pd is not None and student_workbook is not None:
+        if PANDAS_READY and student_workbook is not None:
             try:
                 self.student_data = student_workbook.get_active_dataframe()
             except Exception:
@@ -6307,7 +6304,7 @@ class LauncherWindow(QWidget):
                     QMessageBox.warning(self, "提示", "学生数据加载失败，无法打开点名器。")
                     return
                 self.student_workbook = workbook
-                if PANDAS_AVAILABLE and pd is not None:
+                if PANDAS_READY:
                     try:
                         self.student_data = workbook.get_active_dataframe()
                     except Exception:
