@@ -3900,6 +3900,10 @@ class RollCallTimerWindow(QWidget):
         self.showcase_button.clicked.connect(self.show_scoreboard)
         control_layout.addWidget(self.showcase_button)
 
+        self.class_button = QPushButton("班级"); _setup_secondary_button(self.class_button)
+        self.class_button.clicked.connect(self.show_class_selector)
+        control_layout.insertWidget(control_layout.indexOf(self.showcase_button), self.class_button)
+
         self.encrypt_button = QPushButton(""); _setup_secondary_button(self.encrypt_button)
         self.encrypt_button.clicked.connect(self._on_encrypt_button_clicked)
         control_layout.addWidget(self.encrypt_button)
