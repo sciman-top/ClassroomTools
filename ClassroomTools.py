@@ -3780,6 +3780,10 @@ class RollCallTimerWindow(QWidget):
         control_layout.setContentsMargins(0, 0, 0, 0)
         control_layout.setSpacing(2)
 
+        self.class_button = QPushButton("班级"); _setup_secondary_button(self.class_button)
+        self.class_button.clicked.connect(self.show_class_selector)
+        control_layout.addWidget(self.class_button)
+
         self.showcase_button = QPushButton("展示"); _setup_secondary_button(self.showcase_button)
         self.showcase_button.clicked.connect(self.show_scoreboard)
         control_layout.addWidget(self.showcase_button)
@@ -4036,8 +4040,18 @@ class RollCallTimerWindow(QWidget):
         if self.student_workbook is not None:
             base_name = self.current_class_name or self.student_workbook.active_class
             name = base_name.strip()
-        text = f"班级：{name}" if name else "班级"
+        text = name or "班级"
         self.class_button.setText(text)
+        metrics = self.class_button.fontMetrics()
+        candidates = [text, "班级"]
+        if self.student_workbook is not None:
+            for candidate in self.student_workbook.class_names():
+                normalized = candidate.strip()
+                if normalized and normalized not in candidates:
+                    candidates.append(normalized)
+        width = max((metrics.horizontalAdvance(c) for c in candidates if c), default=metrics.horizontalAdvance("班级")) + 24
+        if width != self.class_button.minimumWidth():
+            self.class_button.setMinimumWidth(width)
         has_data = self.student_workbook is not None and not self.student_workbook.is_empty()
         can_select = self.mode == "roll_call" and (has_data or self._student_data_pending_load)
         self.class_button.setEnabled(can_select)
