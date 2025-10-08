@@ -1276,7 +1276,7 @@ class PenSettingsDialog(QDialog):
         self.pen_color = QColor(initial_color)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setContentsMargins(10, 8, 10, 18)
         layout.setSpacing(6)
 
         size_layout = QHBoxLayout()
@@ -1324,7 +1324,7 @@ class PenSettingsDialog(QDialog):
         layout.addWidget(buttons)
 
         hint = self.sizeHint()
-        self.setFixedSize(hint.width(), hint.height() + 12)
+        self.setFixedSize(hint.width(), hint.height() + 24)
 
     def _select_color(self, color_hex: str) -> None:
         self.pen_color = QColor(color_hex)
@@ -3784,10 +3784,16 @@ class RollCallTimerWindow(QWidget):
         compact_font = QFont("Microsoft YaHei UI", 9, QFont.Weight.Medium)
         toolbar_height = recommended_control_height(compact_font, extra=10, minimum=34)
 
-        def _setup_secondary_button(button: QPushButton) -> None:
+        def _setup_secondary_button(button: QPushButton, *, lock_width: bool = False) -> None:
             apply_button_style(button, ButtonStyles.TOOLBAR, height=toolbar_height)
-            button.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
             button.setFont(compact_font)
+            if lock_width:
+                hint = button.sizeHint()
+                button.setMinimumWidth(hint.width())
+                button.setMaximumWidth(max(hint.width(), button.minimumSizeHint().width()))
+                button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            else:
+                button.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
 
         control_bar = QWidget()
         control_bar.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
@@ -3795,13 +3801,13 @@ class RollCallTimerWindow(QWidget):
         control_layout.setContentsMargins(0, 0, 0, 0)
         control_layout.setSpacing(1)
 
-        self.class_button = QPushButton("班级"); _setup_secondary_button(self.class_button)
-        self.class_button.clicked.connect(self.show_class_selector)
-        control_layout.addWidget(self.class_button)
-
         self.showcase_button = QPushButton("展示"); _setup_secondary_button(self.showcase_button)
         self.showcase_button.clicked.connect(self.show_scoreboard)
         control_layout.addWidget(self.showcase_button)
+
+        self.class_button = QPushButton("班级"); _setup_secondary_button(self.class_button)
+        self.class_button.clicked.connect(self.show_class_selector)
+        control_layout.addWidget(self.class_button)
 
         self.encrypt_button = QPushButton(""); _setup_secondary_button(self.encrypt_button)
         self.encrypt_button.clicked.connect(self._on_encrypt_button_clicked)
@@ -3854,11 +3860,11 @@ class RollCallTimerWindow(QWidget):
         self._rebuild_group_buttons_ui()
         group_container_layout.addWidget(self.group_bar, 1, Qt.AlignmentFlag.AlignLeft)
 
-        self.list_button = QPushButton("名单"); _setup_secondary_button(self.list_button)
+        self.list_button = QPushButton("名单"); _setup_secondary_button(self.list_button, lock_width=True)
         self.list_button.clicked.connect(self.show_student_selector)
         group_container_layout.addWidget(self.list_button, 0, Qt.AlignmentFlag.AlignLeft)
 
-        self.add_score_button = QPushButton("加分"); _setup_secondary_button(self.add_score_button)
+        self.add_score_button = QPushButton("加分"); _setup_secondary_button(self.add_score_button, lock_width=True)
         self.add_score_button.setEnabled(False)
         self.add_score_button.clicked.connect(self.increment_current_score)
         group_container_layout.addWidget(self.add_score_button, 0, Qt.AlignmentFlag.AlignLeft)
