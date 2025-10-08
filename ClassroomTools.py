@@ -930,8 +930,8 @@ class ButtonStyles:
 
     TOOLBAR = (
         "QPushButton {\n"
-        "    padding: 3px 10px;\n"
-        "    border-radius: 10px;\n"
+        "    padding: 2px 10px;\n"
+        "    border-radius: 8px;\n"
         "    border: 1px solid #c4c8d0;\n"
         "    background-color: #ffffff;\n"
         "    color: #202124;\n"
@@ -948,7 +948,7 @@ class ButtonStyles:
         "QPushButton:pressed {\n"
         "    background-color: #d7e7ff;\n"
         "}\n"
-        "QPushButton:checked {\n"
+        "QPushButton:checked, QPushButton:default {\n"
         "    background-color: #1a73e8;\n"
         "    border-color: #1a73e8;\n"
         "    color: #ffffff;\n"
@@ -957,8 +957,8 @@ class ButtonStyles:
 
     GRID = (
         "QPushButton {\n"
-        "    padding: 6px 12px;\n"
-        "    border-radius: 10px;\n"
+        "    padding: 4px 10px;\n"
+        "    border-radius: 8px;\n"
         "    border: 1px solid #c4c8d0;\n"
         "    background-color: #ffffff;\n"
         "    color: #202124;\n"
@@ -970,12 +970,16 @@ class ButtonStyles:
         "QPushButton:pressed {\n"
         "    background-color: #d7e7ff;\n"
         "}\n"
+        "QPushButton:default {\n"
+        "    border-color: #1a73e8;\n"
+        "    background-color: rgba(26, 115, 232, 0.12);\n"
+        "}\n"
     )
 
     PRIMARY = (
         "QPushButton {\n"
-        "    padding: 6px 20px;\n"
-        "    border-radius: 20px;\n"
+        "    padding: 5px 16px;\n"
+        "    border-radius: 14px;\n"
         "    background-color: #1a73e8;\n"
         "    color: #ffffff;\n"
         "    border: 1px solid #1a73e8;\n"
@@ -991,6 +995,11 @@ class ButtonStyles:
         "    background-color: #aac6ff;\n"
         "    border-color: #aac6ff;\n"
         "    color: rgba(255, 255, 255, 0.8);\n"
+        "}\n"
+        "QPushButton:default {\n"
+        "    background-color: #1a73e8;\n"
+        "    border-color: #1a73e8;\n"
+        "    color: #ffffff;\n"
         "}\n"
     )
 
@@ -1276,8 +1285,8 @@ class PenSettingsDialog(QDialog):
         self.pen_color = QColor(initial_color)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 8, 10, 18)
-        layout.setSpacing(6)
+        layout.setContentsMargins(10, 8, 10, 14)
+        layout.setSpacing(5)
 
         size_layout = QHBoxLayout()
         size_label = QLabel("粗细:")
@@ -1296,7 +1305,7 @@ class PenSettingsDialog(QDialog):
         layout.addWidget(QLabel("颜色:"))
         color_layout = QGridLayout()
         color_layout.setContentsMargins(0, 0, 0, 0)
-        color_layout.setSpacing(6)
+        color_layout.setSpacing(4)
         for index, (color_hex, name) in enumerate(self.COLORS.items()):
             button = QPushButton()
             button.setFixedSize(24, 24)
@@ -1318,13 +1327,14 @@ class PenSettingsDialog(QDialog):
                 QDialogButtonBox.StandardButton.Ok: ButtonStyles.PRIMARY,
                 QDialogButtonBox.StandardButton.Cancel: ButtonStyles.TOOLBAR,
             },
-            extra_padding=10,
-            minimum_height=32,
+            extra_padding=8,
+            minimum_height=30,
+            uniform_width=True,
         )
         layout.addWidget(buttons)
 
         hint = self.sizeHint()
-        self.setFixedSize(hint.width(), hint.height() + 24)
+        self.setFixedSize(hint.width(), hint.height() + 18)
 
     def _select_color(self, color_hex: str) -> None:
         self.pen_color = QColor(color_hex)
@@ -3754,7 +3764,7 @@ class RollCallTimerWindow(QWidget):
         self.setStyleSheet("background-color: #f4f5f7;")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(5)
+        layout.setSpacing(4)
 
         toolbar_layout = QVBoxLayout()
         toolbar_layout.setContentsMargins(0, 0, 0, 0)
@@ -3762,7 +3772,7 @@ class RollCallTimerWindow(QWidget):
 
         top = QHBoxLayout()
         top.setContentsMargins(0, 0, 0, 0)
-        top.setSpacing(3)
+        top.setSpacing(2)
         self.title_label = QLabel("点名"); f = QFont("Microsoft YaHei UI", 10, QFont.Weight.Bold)
         self.title_label.setFont(f); self.title_label.setStyleSheet("color: #202124;")
         self.title_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
@@ -3773,41 +3783,40 @@ class RollCallTimerWindow(QWidget):
         self.mode_button.setFont(mode_font)
         fm = self.mode_button.fontMetrics()
         max_text = max(("切换到计时", "切换到点名"), key=lambda t: fm.horizontalAdvance(t))
-        target_width = fm.horizontalAdvance(max_text) + 28
+        target_width = fm.horizontalAdvance(max_text) + 26
         self.mode_button.setMinimumWidth(target_width)
         self.mode_button.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
-        control_height = recommended_control_height(mode_font, extra=10, minimum=34)
+        compact_font = QFont("Microsoft YaHei UI", 9, QFont.Weight.Medium)
+        toolbar_height = recommended_control_height(compact_font, extra=8, minimum=30)
+        control_height = max(toolbar_height, recommended_control_height(mode_font, extra=8, minimum=30))
         apply_button_style(self.mode_button, ButtonStyles.TOOLBAR, height=control_height)
         self.mode_button.clicked.connect(self.toggle_mode)
         top.addWidget(self.mode_button, 0, Qt.AlignmentFlag.AlignLeft)
-
-        compact_font = QFont("Microsoft YaHei UI", 9, QFont.Weight.Medium)
-        toolbar_height = recommended_control_height(compact_font, extra=10, minimum=34)
 
         def _setup_secondary_button(button: QPushButton, *, lock_width: bool = False) -> None:
             apply_button_style(button, ButtonStyles.TOOLBAR, height=toolbar_height)
             button.setFont(compact_font)
             if lock_width:
-                hint = button.sizeHint()
-                button.setMinimumWidth(hint.width())
-                button.setMaximumWidth(max(hint.width(), button.minimumSizeHint().width()))
+                width = max(button.sizeHint().width(), button.minimumSizeHint().width())
+                button.setFixedWidth(width)
                 button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             else:
-                button.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+                button.setMinimumWidth(0)
+                button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
         control_bar = QWidget()
         control_bar.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         control_layout = QHBoxLayout(control_bar)
         control_layout.setContentsMargins(0, 0, 0, 0)
-        control_layout.setSpacing(1)
-
-        self.showcase_button = QPushButton("展示"); _setup_secondary_button(self.showcase_button)
-        self.showcase_button.clicked.connect(self.show_scoreboard)
-        control_layout.addWidget(self.showcase_button)
+        control_layout.setSpacing(2)
 
         self.class_button = QPushButton("班级"); _setup_secondary_button(self.class_button)
         self.class_button.clicked.connect(self.show_class_selector)
         control_layout.addWidget(self.class_button)
+
+        self.showcase_button = QPushButton("展示"); _setup_secondary_button(self.showcase_button)
+        self.showcase_button.clicked.connect(self.show_scoreboard)
+        control_layout.addWidget(self.showcase_button)
 
         self.encrypt_button = QPushButton(""); _setup_secondary_button(self.encrypt_button)
         self.encrypt_button.clicked.connect(self._on_encrypt_button_clicked)
@@ -3844,7 +3853,7 @@ class RollCallTimerWindow(QWidget):
         group_container.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         group_container_layout = QHBoxLayout(group_container)
         group_container_layout.setContentsMargins(0, 0, 0, 0)
-        group_container_layout.setSpacing(1)
+        group_container_layout.setSpacing(2)
 
         self.group_container = group_container
 
@@ -3911,7 +3920,7 @@ class RollCallTimerWindow(QWidget):
         self.timer_set_button = QPushButton("设定"); self.timer_set_button.clicked.connect(self.set_countdown_time)
         for b in (self.timer_mode_button, self.timer_start_pause_button, self.timer_reset_button, self.timer_set_button):
             b.setFont(compact_font)
-        timer_height = recommended_control_height(compact_font, extra=14, minimum=36)
+        timer_height = max(toolbar_height, recommended_control_height(compact_font, extra=10, minimum=toolbar_height))
         for b in (self.timer_mode_button, self.timer_start_pause_button, self.timer_reset_button, self.timer_set_button):
             apply_button_style(b, ButtonStyles.TOOLBAR, height=timer_height)
             b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
