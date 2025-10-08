@@ -3891,6 +3891,7 @@ class RollCallTimerWindow(QWidget):
         existing_class_button = getattr(self, "class_button", None)
         if isinstance(existing_class_button, QPushButton):
             _recycle_button(existing_class_button)
+        # 仅保留一个班级切换按钮，并将其固定在“重置”按钮左侧。
         self.class_button = QPushButton("班级"); _setup_secondary_button(self.class_button)
         self.class_button.clicked.connect(self.show_class_selector)
         control_layout.addWidget(self.class_button)
@@ -3903,10 +3904,6 @@ class RollCallTimerWindow(QWidget):
         self.showcase_button = QPushButton("展示"); _setup_secondary_button(self.showcase_button)
         self.showcase_button.clicked.connect(self.show_scoreboard)
         control_layout.addWidget(self.showcase_button)
-
-        self.class_button = QPushButton("班级"); _setup_secondary_button(self.class_button)
-        self.class_button.clicked.connect(self.show_class_selector)
-        control_layout.insertWidget(control_layout.indexOf(self.showcase_button), self.class_button)
 
         self.encrypt_button = QPushButton(""); _setup_secondary_button(self.encrypt_button)
         self.encrypt_button.clicked.connect(self._on_encrypt_button_clicked)
