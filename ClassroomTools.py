@@ -3878,14 +3878,23 @@ class RollCallTimerWindow(QWidget):
         control_layout.setContentsMargins(0, 0, 0, 0)
         control_layout.setSpacing(2)
 
-        self.class_button = QPushButton("班级"); _setup_secondary_button(self.class_button)
-        self.class_button.clicked.connect(self.show_class_selector)
-        control_layout.addWidget(self.class_button)
-
         self.reset_button = QPushButton("重置"); _setup_secondary_button(self.reset_button)
         self.reset_button.clicked.connect(self.reset_roll_call_pools)
         _lock_button_width(self.reset_button)
         control_layout.addWidget(self.reset_button)
+
+        if hasattr(self, "class_button") and isinstance(self.class_button, QPushButton):
+            try:
+                self.class_button.deleteLater()
+            except Exception:
+                pass
+        self.class_button = QPushButton("班级"); _setup_secondary_button(self.class_button)
+        self.class_button.clicked.connect(self.show_class_selector)
+        reset_index = control_layout.indexOf(self.reset_button)
+        if reset_index == -1:
+            control_layout.addWidget(self.class_button)
+        else:
+            control_layout.insertWidget(reset_index, self.class_button)
 
         self.showcase_button = QPushButton("展示"); _setup_secondary_button(self.showcase_button)
         self.showcase_button.clicked.connect(self.show_scoreboard)
@@ -4092,7 +4101,7 @@ class RollCallTimerWindow(QWidget):
         self.current_student_index = None
         self._pending_passive_student = None
         self._restore_active_class_state()
-        self._snapshot_current_class()
+        self._store_active_class_state()
         self._update_class_button_label()
         if propagate:
             self._propagate_student_dataframe()
@@ -4100,6 +4109,7 @@ class RollCallTimerWindow(QWidget):
 
     def _apply_student_workbook(self, workbook: StudentWorkbook, *, propagate: bool) -> None:
         self.student_workbook = workbook
+        self._prune_orphan_class_states()
         if not PANDAS_READY:
             self.current_class_name = workbook.active_class
             self.student_data = None
@@ -4227,6 +4237,7 @@ class RollCallTimerWindow(QWidget):
     def _store_active_class_state(self, class_name: Optional[str] = None) -> None:
         if not PANDAS_READY:
             return
+        self._prune_orphan_class_states()
         target = (class_name or self._resolve_active_class_name()).strip()
         if not target:
             return
@@ -4234,6 +4245,24 @@ class RollCallTimerWindow(QWidget):
         if snapshot is None:
             return
         self._class_roll_states[target] = snapshot
+
+    def _prune_orphan_class_states(self) -> None:
+        if not self._class_roll_states:
+            return
+        workbook = self.student_workbook
+        if workbook is None:
+            return
+        try:
+            valid = {str(name).strip() for name in workbook.class_names() if str(name).strip()}
+        except Exception:
+            valid = set()
+        if not valid:
+            self._class_roll_states.clear()
+            return
+        for stored_name in list(self._class_roll_states.keys()):
+            trimmed = str(stored_name).strip()
+            if not trimmed or trimmed not in valid:
+                self._class_roll_states.pop(stored_name, None)
 
     def _encode_class_states(self) -> str:
         payload = {name: state.to_json() for name, state in self._class_roll_states.items()}
@@ -4375,132 +4404,6 @@ class RollCallTimerWindow(QWidget):
         self._pending_passive_student = _valid_index(snapshot.pending_student)
 
         self._store_active_class_state(self._resolve_active_class_name())
-
-    def _update_class_button_label(self) -> None:
-        if not hasattr(self, "class_button"):
-            return
-        name = ""
-        if self.student_workbook is not None:
-            base_name = self.current_class_name or self.student_workbook.active_class
-            name = base_name.strip()
-        text = name or "班级"
-        self.class_button.setText(text)
-        metrics = self.class_button.fontMetrics()
-        baseline = metrics.horizontalAdvance("班级")
-        active_width = metrics.horizontalAdvance(text)
-        minimum = max(baseline, active_width) + 24
-        if self.class_button.minimumWidth() != minimum:
-            self.class_button.setMinimumWidth(minimum)
-        has_data = self.student_workbook is not None and not self.student_workbook.is_empty()
-        can_select = self.mode == "roll_call" and (has_data or self._student_data_pending_load)
-        self.class_button.setEnabled(can_select)
-        if has_data:
-            self.class_button.setToolTip("选择或新建班级")
-        else:
-            self.class_button.setToolTip("暂无班级数据，点击以尝试加载或创建班级")
-
-    def show_class_selector(self) -> None:
-        if self.mode != "roll_call":
-            return
-        if self._student_data_pending_load:
-            if not self._load_student_data_if_needed():
-                return
-        if self.student_workbook is None:
-            show_quiet_information(self, "暂无学生数据，无法选择班级。")
-            return
-        menu = QMenu(self)
-        current = self.current_class_name or self.student_workbook.active_class
-        for name in self.student_workbook.class_names():
-            action = menu.addAction(name)
-            action.setCheckable(True)
-            action.setChecked(name == current)
-            action.triggered.connect(lambda _checked=False, n=name: self._switch_class(n))
-        menu.addSeparator()
-        create_action = menu.addAction("新建班级...")
-        create_action.triggered.connect(self._create_new_class)
-        pos = self.class_button.mapToGlobal(self.class_button.rect().bottomLeft())
-        menu.exec(pos)
-
-    def _switch_class(self, class_name: str) -> None:
-        if self.student_workbook is None:
-            return
-        if class_name not in self.student_workbook.class_names():
-            return
-        target = class_name.strip()
-        current = self.current_class_name or self.student_workbook.active_class
-        if target == current:
-            return
-        if self._student_data_pending_load:
-            if not self._load_student_data_if_needed():
-                return
-        self._snapshot_current_class()
-        self.student_workbook.set_active_class(target)
-        self.current_class_name = target
-        if PANDAS_READY:
-            df = self.student_workbook.get_active_dataframe()
-        else:
-            df = None
-        self._set_student_dataframe(df, propagate=True)
-        self._schedule_save()
-
-    def _create_new_class(self) -> None:
-        if self._student_data_pending_load:
-            if not self._load_student_data_if_needed():
-                return
-        if self.student_workbook is None:
-            self.student_workbook = StudentWorkbook(OrderedDict(), active_class="")
-        if not PANDAS_READY:
-            show_quiet_information(self, "当前环境缺少 pandas，无法创建班级。")
-            return
-        self._snapshot_current_class()
-        suggested = f"班级{len(self.student_workbook.class_names()) + 1}" if self.student_workbook.class_names() else "班级1"
-        name, ok = QInputDialog.getText(
-            self,
-            "新建班级",
-            "请输入班级名称：",
-            QLineEdit.EchoMode.Normal,
-            suggested,
-        )
-        if not ok:
-            return
-        new_name = self.student_workbook.add_class(name)
-        self.current_class_name = new_name
-        self._apply_student_workbook(self.student_workbook, propagate=True)
-        self._schedule_save()
-        self._update_class_button_label()
-
-    def _apply_student_workbook(self, workbook: StudentWorkbook, *, propagate: bool) -> None:
-        self.student_workbook = workbook
-        if not PANDAS_READY:
-            self.current_class_name = workbook.active_class
-            self.student_data = None
-            return
-        if self.current_class_name:
-            workbook.set_active_class(self.current_class_name)
-        self.current_class_name = workbook.active_class
-        df = workbook.get_active_dataframe()
-        self._set_student_dataframe(df, propagate=propagate)
-
-    def _snapshot_current_class(self) -> None:
-        if not PANDAS_READY:
-            return
-        if self.student_workbook is None:
-            return
-        if self.student_data is None or not isinstance(self.student_data, pd.DataFrame):
-            return
-        class_name = (self.current_class_name or self.student_workbook.active_class or "").strip()
-        if not class_name:
-            available = self.student_workbook.class_names()
-            class_name = available[0] if available else self.student_workbook.active_class
-        if class_name not in self.student_workbook.class_names():
-            class_name = self.student_workbook.active_class
-        try:
-            snapshot = self.student_data.copy()
-        except Exception:
-            snapshot = pd.DataFrame(self.student_data)
-        self.student_workbook.update_class(class_name, snapshot)
-        self.student_workbook.set_active_class(class_name)
-        self.current_class_name = class_name
 
     def _update_class_button_label(self) -> None:
         if not hasattr(self, "class_button"):
@@ -5525,6 +5428,7 @@ class RollCallTimerWindow(QWidget):
                         restored_states[key] = state
 
         self._class_roll_states = restored_states
+        self._prune_orphan_class_states()
 
         active_class = self._resolve_active_class_name()
         snapshot = self._class_roll_states.get(active_class)
@@ -5969,6 +5873,7 @@ class RollCallTimerWindow(QWidget):
         sec["timer_font_size"] = str(self.last_timer_font_size)
         sec["scoreboard_order"] = self.scoreboard_order
         sec["students_encrypted"] = bool_to_str(self._student_file_encrypted)
+        self._prune_orphan_class_states()
         if not self._student_data_pending_load:
             self._store_active_class_state()
         sec["class_states"] = self._encode_class_states()
