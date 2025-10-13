@@ -1728,6 +1728,9 @@ class _PresentationForwarder:
 
     _SMTO_ABORTIFHUNG = 0x0002
     _MAX_CHILD_FORWARDS = 32
+    _INPUT_KEYBOARD = 1
+    _KEYEVENTF_EXTENDEDKEY = 0x0001
+    _KEYEVENTF_KEYUP = 0x0002
 
     if _USER32 is not None:
 
@@ -1743,10 +1746,32 @@ class _PresentationForwarder:
                 ("hwndCaret", wintypes.HWND),
                 ("rcCaret", wintypes.RECT),
             ]
+
+        class _KeyboardInput(ctypes.Structure):
+            _fields_ = [
+                ("wVk", wintypes.WORD),
+                ("wScan", wintypes.WORD),
+                ("dwFlags", wintypes.DWORD),
+                ("time", wintypes.DWORD),
+                ("dwExtraInfo", wintypes.ULONG_PTR),
+            ]
+
+        class _InputUnion(ctypes.Union):
+            _fields_ = [("ki", _KeyboardInput)]
+
+        class _Input(ctypes.Structure):
+            _anonymous_ = ("data",)
+            _fields_ = [
+                ("type", wintypes.DWORD),
+                ("data", _InputUnion),
+            ]
     else:
 
         class _GuiThreadInfo(ctypes.Structure):  # type: ignore[misc,override]
             _fields_: List[Tuple[str, Any]] = []
+
+        _KeyboardInput = None  # type: ignore[assignment]
+        _Input = None  # type: ignore[assignment]
 
     _KNOWN_PRESENTATION_CLASSES: Set[str] = (
         {
@@ -1899,15 +1924,49 @@ class _PresentationForwarder:
         is_press: bool,
         update_cache: bool,
     ) -> bool:
-        if win32con is None:
+        delivered = False
+        if win32con is not None:
+            message = win32con.WM_KEYDOWN if is_press else win32con.WM_KEYUP
+            l_param = self._build_key_lparam(vk_code, event, is_press)
+            delivered = self._deliver_key_message(hwnd, message, vk_code, l_param)
+            if delivered and update_cache:
+                self._last_target_hwnd = hwnd
+        if delivered:
+            return True
+        return self._send_key_via_sendinput(vk_code, is_press)
+
+    def _send_key_via_sendinput(self, vk_code: int, is_press: bool) -> bool:
+        if _USER32 is None or not hasattr(self, "_KeyboardInput"):
             return False
-        message = win32con.WM_KEYDOWN if is_press else win32con.WM_KEYUP
-        l_param = self._build_key_lparam(vk_code, event, is_press)
-        if not self._deliver_key_message(hwnd, message, vk_code, l_param):
-            return False
-        if update_cache:
-            self._last_target_hwnd = hwnd
-        return True
+        scan_code = self._map_virtual_key(vk_code)
+        flags = 0
+        if vk_code in self._EXTENDED_KEY_CODES:
+            flags |= self._KEYEVENTF_EXTENDEDKEY
+        if not is_press:
+            flags |= self._KEYEVENTF_KEYUP
+        keyboard = self._KeyboardInput()
+        keyboard.wVk = ctypes.c_ushort(vk_code).value
+        keyboard.wScan = ctypes.c_ushort(scan_code).value
+        keyboard.dwFlags = ctypes.c_uint(flags).value
+        keyboard.time = 0
+        keyboard.dwExtraInfo = 0
+        input_record = self._Input()
+        input_record.type = self._INPUT_KEYBOARD
+        input_record.ki = keyboard
+        try:
+            sent = int(_USER32.SendInput(1, ctypes.byref(input_record), ctypes.sizeof(input_record)))
+        except Exception:
+            sent = 0
+        return bool(sent)
+
+    def _map_virtual_key(self, vk_code: int) -> int:
+        map_vk = getattr(win32api, "MapVirtualKey", None) if win32api is not None else None
+        if callable(map_vk):
+            try:
+                return int(map_vk(vk_code, 0)) & 0xFFFF
+            except Exception:
+                return 0
+        return 0
 
     def _iter_key_targets(self, target: int) -> Iterable[Tuple[int, bool]]:
         seen: Set[int] = set()
@@ -1943,13 +2002,7 @@ class _PresentationForwarder:
             except Exception:
                 repeat_count = 1
         l_param = repeat_count & 0xFFFF
-        map_vk = getattr(win32api, "MapVirtualKey", None) if win32api is not None else None
-        scan_code = 0
-        if callable(map_vk):
-            try:
-                scan_code = int(map_vk(vk_code, 0))
-            except Exception:
-                scan_code = 0
+        scan_code = self._map_virtual_key(vk_code)
         l_param |= (scan_code & 0xFF) << 16
         if vk_code in self._EXTENDED_KEY_CODES:
             l_param |= 1 << 24
@@ -2598,74 +2651,6 @@ class OverlayWindow(QWidget):
         width_diff = abs(width - o_width)
         height_diff = abs(height - o_height)
         return width >= 400 and height >= 300 and width_diff <= 64 and height_diff <= 64
-
-    def _forward_wheel_event(self, event) -> bool:
-        if (
-            self.mode == "cursor"
-            or self.whiteboard_active
-            or win32api is None
-            or win32con is None
-            or win32gui is None
-        ):
-            return False
-        delta = int(event.angleDelta().y())
-        if delta == 0:
-            return False
-        target = self._resolve_presentation_target()
-        if not target:
-            return False
-        modifiers = event.modifiers()
-        keys = 0
-        if modifiers & Qt.KeyboardModifier.ShiftModifier:
-            keys |= win32con.MK_SHIFT
-        if modifiers & Qt.KeyboardModifier.ControlModifier:
-            keys |= win32con.MK_CONTROL
-        buttons = event.buttons()
-        if buttons & Qt.MouseButton.LeftButton:
-            keys |= win32con.MK_LBUTTON
-        if buttons & Qt.MouseButton.RightButton:
-            keys |= win32con.MK_RBUTTON
-        if buttons & Qt.MouseButton.MiddleButton:
-            keys |= win32con.MK_MBUTTON
-        delta_word = ctypes.c_short(delta).value & 0xFFFF
-        w_param = (ctypes.c_ushort(keys).value & 0xFFFF) | (delta_word << 16)
-        global_pos = event.globalPosition().toPoint()
-        x_word = ctypes.c_short(global_pos.x()).value & 0xFFFF
-        y_word = ctypes.c_short(global_pos.y()).value & 0xFFFF
-        l_param = x_word | (y_word << 16)
-        try:
-            return bool(win32api.PostMessage(target, win32con.WM_MOUSEWHEEL, w_param, l_param))
-        except Exception:
-            return False
-
-    def _handle_navigation_key(self, event: QKeyEvent, *, is_press: bool) -> bool:
-        if (
-            self.mode == "cursor"
-            or self.whiteboard_active
-            or win32api is None
-            or win32con is None
-            or win32gui is None
-        ):
-            return False
-        vk_code = self._KEY_FORWARD_MAP.get(event.key())
-        if vk_code is None:
-            return False
-        target = self._resolve_presentation_target()
-        if not target:
-            return False
-        try:
-            return self._post_key_event(target, vk_code, event, is_press=is_press)
-        except Exception:
-            return False
-
-    def _post_key_event(self, hwnd: int, vk_code: int, event: QKeyEvent, *, is_press: bool) -> bool:
-        if win32api is None or win32con is None:
-            return False
-        message = win32con.WM_KEYDOWN if is_press else win32con.WM_KEYUP
-        repeat_flag = 0x40000000 if event.isAutoRepeat() else 0
-        transition_flag = 0 if is_press else 0xC0000000
-        l_param = repeat_flag | transition_flag | 1
-        return bool(win32api.PostMessage(hwnd, message, vk_code, l_param))
 
     def _update_visibility_for_mode(self, *, initial: bool = False) -> None:
         passthrough = (self.mode == "cursor") and (not self.whiteboard_active)
