@@ -138,6 +138,13 @@ def _prepare_windows_tts_environment() -> None:
         pass
 
 
+# 兼容早期 Python 版本缺失的 ULONG_PTR 定义，供 Win32 输入结构体使用。
+if not hasattr(wintypes, "ULONG_PTR"):
+    if ctypes.sizeof(ctypes.c_void_p) == ctypes.sizeof(ctypes.c_ulonglong):
+        wintypes.ULONG_PTR = ctypes.c_ulonglong  # type: ignore[attr-defined]
+    else:
+        wintypes.ULONG_PTR = ctypes.c_ulong  # type: ignore[attr-defined]
+
 _prepare_windows_tts_environment()
 
 # ---------- 图标 ----------
