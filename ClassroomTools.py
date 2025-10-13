@@ -1755,29 +1755,35 @@ class _PresentationForwarder:
             ]
 
         class _KeyboardInput(ctypes.Structure):
-            _fields_ = [
-                ("wVk", wintypes.WORD),
-                ("wScan", wintypes.WORD),
-                ("dwFlags", wintypes.DWORD),
-                ("time", wintypes.DWORD),
-                ("dwExtraInfo", wintypes.ULONG_PTR),
-            ]
+            pass
+
+        _KeyboardInput._fields_ = [
+            ("wVk", wintypes.WORD),
+            ("wScan", wintypes.WORD),
+            ("dwFlags", wintypes.DWORD),
+            ("time", wintypes.DWORD),
+            ("dwExtraInfo", wintypes.ULONG_PTR),
+        ]
 
         class _InputUnion(ctypes.Union):
-            _fields_ = [("ki", _KeyboardInput)]
+            pass
+
+        _InputUnion._fields_ = [("ki", _KeyboardInput)]
 
         class _Input(ctypes.Structure):
             _anonymous_ = ("data",)
-            _fields_ = [
-                ("type", wintypes.DWORD),
-                ("data", _InputUnion),
-            ]
+
+        _Input._fields_ = [
+            ("type", wintypes.DWORD),
+            ("data", _InputUnion),
+        ]
     else:
 
         class _GuiThreadInfo(ctypes.Structure):  # type: ignore[misc,override]
             _fields_: List[Tuple[str, Any]] = []
 
         _KeyboardInput = None  # type: ignore[assignment]
+        _InputUnion = None  # type: ignore[assignment]
         _Input = None  # type: ignore[assignment]
 
     _KNOWN_PRESENTATION_CLASSES: Set[str] = (
