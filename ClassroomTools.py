@@ -5,6 +5,7 @@ import base64
 import configparser
 import contextlib
 import ctypes
+from ctypes import wintypes
 import importlib
 import io
 import json
@@ -43,14 +44,20 @@ if sys.platform == "win32":
         import win32api
         import win32con
         import win32gui
+        try:
+            _USER32 = ctypes.windll.user32  # type: ignore[attr-defined]
+        except Exception:  # pragma: no cover - 某些环境可能限制 Win32 API
+            _USER32 = None
     except ImportError:  # pragma: no cover - 环境可能缺少 pywin32
         win32api = None  # type: ignore[assignment]
         win32con = None  # type: ignore[assignment]
         win32gui = None  # type: ignore[assignment]
+        _USER32 = None  # type: ignore[assignment]
 else:
     win32api = None  # type: ignore[assignment]
     win32con = None  # type: ignore[assignment]
     win32gui = None  # type: ignore[assignment]
+    _USER32 = None  # type: ignore[assignment]
 
 from PyQt6.QtCore import (
     QByteArray,
@@ -1717,7 +1724,10 @@ class FloatingToolbar(QWidget):
 class _PresentationForwarder:
     """在绘图模式下将特定输入事件转发给下层演示窗口。"""
 
-    __slots__ = ("overlay", "_last_target_hwnd")
+    __slots__ = ("overlay", "_last_target_hwnd", "_child_buffer")
+
+    _SMTO_ABORTIFHUNG = 0x0002
+    _MAX_CHILD_FORWARDS = 16
 
     _KNOWN_PRESENTATION_CLASSES: Set[str] = (
         {
@@ -1748,6 +1758,9 @@ class _PresentationForwarder:
             int(Qt.Key.Key_Down): win32con.VK_DOWN,
             int(Qt.Key.Key_Left): win32con.VK_LEFT,
             int(Qt.Key.Key_Right): win32con.VK_RIGHT,
+            int(Qt.Key.Key_Space): win32con.VK_SPACE,
+            int(Qt.Key.Key_Return): win32con.VK_RETURN,
+            int(Qt.Key.Key_Enter): win32con.VK_RETURN,
         }
         if win32con is not None
         else {}
@@ -1770,6 +1783,7 @@ class _PresentationForwarder:
     def __init__(self, overlay: "OverlayWindow") -> None:
         self.overlay = overlay
         self._last_target_hwnd: Optional[int] = None
+        self._child_buffer: List[int] = []
 
     def clear_cached_target(self) -> None:
         self._last_target_hwnd = None
@@ -1805,13 +1819,15 @@ class _PresentationForwarder:
         if not self._can_forward():
             self.clear_cached_target()
             return False
-        vk_code = self._KEY_FORWARD_MAP.get(event.key())
+        vk_code = self._resolve_vk_code(event)
         if vk_code is None:
             return False
         target = self._resolve_presentation_target()
         if not target:
             return False
-        return self._post_key_event(target, vk_code, event, is_press=is_press)
+        if self._send_key_to_window(target, vk_code, event, is_press=is_press, update_cache=True):
+            return True
+        return self._forward_key_to_children(target, vk_code, event, is_press)
 
     # ---- 内部工具方法 ----
     def _can_forward(self) -> bool:
@@ -1839,27 +1855,127 @@ class _PresentationForwarder:
             keys |= win32con.MK_MBUTTON
         return keys
 
-    def _post_key_event(self, hwnd: int, vk_code: int, event: QKeyEvent, *, is_press: bool) -> bool:
-        if win32api is None or win32con is None:
+    def _resolve_vk_code(self, event: QKeyEvent) -> Optional[int]:
+        native_getter = getattr(event, "nativeVirtualKey", None)
+        vk_code = 0
+        if callable(native_getter):
+            try:
+                vk_code = int(native_getter())
+            except Exception:
+                vk_code = 0
+        if vk_code:
+            return vk_code
+        vk_code = self._KEY_FORWARD_MAP.get(event.key(), 0)
+        return vk_code or None
+
+    def _send_key_to_window(
+        self,
+        hwnd: int,
+        vk_code: int,
+        event: QKeyEvent,
+        *,
+        is_press: bool,
+        update_cache: bool,
+    ) -> bool:
+        if win32con is None:
             return False
-        repeat_count = max(1, int(getattr(event, "count", lambda: 1)()))
+        message = win32con.WM_KEYDOWN if is_press else win32con.WM_KEYUP
+        l_param = self._build_key_lparam(vk_code, event, is_press)
+        if not self._deliver_key_message(hwnd, message, vk_code, l_param):
+            return False
+        if update_cache:
+            self._last_target_hwnd = hwnd
+        return True
+
+    def _forward_key_to_children(
+        self, hwnd: int, vk_code: int, event: QKeyEvent, is_press: bool
+    ) -> bool:
+        if win32gui is None:
+            return False
+        buffer = self._child_buffer
+        buffer.clear()
+
+        def _collector(child_hwnd: int, acc: List[int]) -> bool:
+            acc.append(child_hwnd)
+            return len(acc) < self._MAX_CHILD_FORWARDS
+
+        try:
+            win32gui.EnumChildWindows(hwnd, _collector, buffer)
+        except Exception:
+            buffer.clear()
+            return False
+        forwarded = False
+        for child in buffer:
+            try:
+                if not win32gui.IsWindow(child) or not win32gui.IsWindowVisible(child):
+                    continue
+            except Exception:
+                continue
+            if self._send_key_to_window(child, vk_code, event, is_press=is_press, update_cache=False):
+                forwarded = True
+                break
+        buffer.clear()
+        return forwarded
+
+    def _build_key_lparam(self, vk_code: int, event: QKeyEvent, is_press: bool) -> int:
+        repeat_getter = getattr(event, "count", None)
+        repeat_count = 1
+        if callable(repeat_getter):
+            try:
+                repeat_count = max(1, int(repeat_getter()))
+            except Exception:
+                repeat_count = 1
         l_param = repeat_count & 0xFFFF
-        map_vk = getattr(win32api, "MapVirtualKey", None)
-        scan_code = int(map_vk(vk_code, 0)) if callable(map_vk) else 0
+        map_vk = getattr(win32api, "MapVirtualKey", None) if win32api is not None else None
+        scan_code = 0
+        if callable(map_vk):
+            try:
+                scan_code = int(map_vk(vk_code, 0))
+            except Exception:
+                scan_code = 0
         l_param |= (scan_code & 0xFF) << 16
         if vk_code in self._EXTENDED_KEY_CODES:
             l_param |= 1 << 24
+        auto_repeat_getter = getattr(event, "isAutoRepeat", None)
+        is_auto_repeat = False
+        if callable(auto_repeat_getter):
+            try:
+                is_auto_repeat = bool(auto_repeat_getter())
+            except Exception:
+                is_auto_repeat = False
         if is_press:
-            if event.isAutoRepeat():
+            if is_auto_repeat:
                 l_param |= 1 << 30
         else:
             l_param |= 1 << 30
             l_param |= 1 << 31
-        message = win32con.WM_KEYDOWN if is_press else win32con.WM_KEYUP
-        try:
-            return bool(win32api.PostMessage(hwnd, message, vk_code, l_param))
-        except Exception:
+        return l_param & 0xFFFFFFFF
+
+    def _deliver_key_message(self, hwnd: int, message: int, vk_code: int, l_param: int) -> bool:
+        delivered = False
+        if win32api is not None:
+            try:
+                delivered = bool(win32api.PostMessage(hwnd, message, vk_code, l_param))
+            except Exception:
+                delivered = False
+        if delivered:
+            return True
+        if _USER32 is None:
             return False
+        result = ctypes.c_size_t()
+        try:
+            sent = _USER32.SendMessageTimeoutW(
+                hwnd,
+                message,
+                wintypes.WPARAM(vk_code),
+                wintypes.LPARAM(l_param),
+                self._SMTO_ABORTIFHUNG,
+                30,
+                ctypes.byref(result),
+            )
+        except Exception:
+            sent = 0
+        return bool(sent)
 
     def _overlay_rect_tuple(self) -> Optional[Tuple[int, int, int, int]]:
         rect = self.overlay.geometry()
