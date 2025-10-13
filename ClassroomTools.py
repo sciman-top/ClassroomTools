@@ -2776,13 +2776,13 @@ class OverlayWindow(QWidget):
             return
         if e.key() == Qt.Key.Key_Escape:
             self.set_mode("cursor"); return
-        super().keyPressEvent(e)
+        e.ignore()
 
     def keyReleaseEvent(self, e: QKeyEvent) -> None:
         if self._forwarder and self._forwarder.forward_key(e, is_press=False):
             e.accept()
             return
-        super().keyReleaseEvent(e)
+        e.ignore()
 
     def _draw_brush_line(self, cur: QPointF) -> Optional[QRectF]:
         now = time.time()
