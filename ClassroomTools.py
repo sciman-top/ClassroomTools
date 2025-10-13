@@ -5,6 +5,7 @@ import base64
 import configparser
 import contextlib
 import ctypes
+from ctypes import wintypes
 import importlib
 import io
 import json
@@ -38,6 +39,26 @@ from typing import (
     Union,
 )
 
+if sys.platform == "win32":
+    try:
+        import win32api
+        import win32con
+        import win32gui
+        try:
+            _USER32 = ctypes.windll.user32  # type: ignore[attr-defined]
+        except Exception:  # pragma: no cover - 某些环境可能限制 Win32 API
+            _USER32 = None
+    except ImportError:  # pragma: no cover - 环境可能缺少 pywin32
+        win32api = None  # type: ignore[assignment]
+        win32con = None  # type: ignore[assignment]
+        win32gui = None  # type: ignore[assignment]
+        _USER32 = None  # type: ignore[assignment]
+else:
+    win32api = None  # type: ignore[assignment]
+    win32con = None  # type: ignore[assignment]
+    win32gui = None  # type: ignore[assignment]
+    _USER32 = None  # type: ignore[assignment]
+
 from PyQt6.QtCore import (
     QByteArray,
     QPoint,
@@ -67,6 +88,7 @@ from PyQt6.QtGui import (
     QKeyEvent,
     QResizeEvent,
     QScreen,
+    QWheelEvent,
 )
 from PyQt6.QtWidgets import (
     QApplication,
@@ -1697,7 +1719,486 @@ class FloatingToolbar(QWidget):
 
 
 # ---------- 叠加层（画笔/白板） ----------
+
+
+class _PresentationForwarder:
+    """在绘图模式下将特定输入事件转发给下层演示窗口。"""
+
+    __slots__ = ("overlay", "_last_target_hwnd", "_child_buffer")
+
+    _SMTO_ABORTIFHUNG = 0x0002
+    _MAX_CHILD_FORWARDS = 32
+
+    if _USER32 is not None:
+
+        class _GuiThreadInfo(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", wintypes.DWORD),
+                ("flags", wintypes.DWORD),
+                ("hwndActive", wintypes.HWND),
+                ("hwndFocus", wintypes.HWND),
+                ("hwndCapture", wintypes.HWND),
+                ("hwndMenuOwner", wintypes.HWND),
+                ("hwndMoveSize", wintypes.HWND),
+                ("hwndCaret", wintypes.HWND),
+                ("rcCaret", wintypes.RECT),
+            ]
+    else:
+
+        class _GuiThreadInfo(ctypes.Structure):  # type: ignore[misc,override]
+            _fields_: List[Tuple[str, Any]] = []
+
+    _KNOWN_PRESENTATION_CLASSES: Set[str] = (
+        {
+            "screenclass",
+            "pptframeclass",
+            "pptviewwndclass",
+            "powerpntframeclass",
+            "powerpointframeclass",
+            "opusapp",
+            "acrobatsdiwindow",
+            "kwppframeclass",
+            "kwppmainframe",
+            "kwpsframeclass",
+            "wpsframeclass",
+            "wpsmainframe",
+        }
+        if win32gui is not None
+        else set()
+    )
+    _KNOWN_PRESENTATION_PREFIXES: Tuple[str, ...] = (
+        ("kwpp", "kwps", "wpsframe", "wpsmain") if win32gui is not None else tuple()
+    )
+    _KEY_FORWARD_MAP: Dict[int, int] = (
+        {
+            int(Qt.Key.Key_PageUp): win32con.VK_PRIOR,
+            int(Qt.Key.Key_PageDown): win32con.VK_NEXT,
+            int(Qt.Key.Key_Up): win32con.VK_UP,
+            int(Qt.Key.Key_Down): win32con.VK_DOWN,
+            int(Qt.Key.Key_Left): win32con.VK_LEFT,
+            int(Qt.Key.Key_Right): win32con.VK_RIGHT,
+            int(Qt.Key.Key_Space): win32con.VK_SPACE,
+            int(Qt.Key.Key_Return): win32con.VK_RETURN,
+            int(Qt.Key.Key_Enter): win32con.VK_RETURN,
+        }
+        if win32con is not None
+        else {}
+    )
+    _EXTENDED_KEY_CODES: Set[int] = (
+        {
+            win32con.VK_UP,
+            win32con.VK_DOWN,
+            win32con.VK_LEFT,
+            win32con.VK_RIGHT,
+        }
+        if win32con is not None
+        else set()
+    )
+
+    @staticmethod
+    def is_supported() -> bool:
+        return bool(win32api and win32con and win32gui)
+
+    def __init__(self, overlay: "OverlayWindow") -> None:
+        self.overlay = overlay
+        self._last_target_hwnd: Optional[int] = None
+        self._child_buffer: List[int] = []
+
+    def clear_cached_target(self) -> None:
+        self._last_target_hwnd = None
+
+    # ---- 公共接口 ----
+    def forward_wheel(self, event: QWheelEvent) -> bool:
+        if not self._can_forward():
+            self.clear_cached_target()
+            return False
+        delta_vec = event.angleDelta()
+        delta = int(delta_vec.y() or delta_vec.x())
+        if delta == 0:
+            pixel_vec = event.pixelDelta()
+            delta = int(pixel_vec.y() or pixel_vec.x())
+        if delta == 0:
+            return False
+        target = self._resolve_presentation_target()
+        if not target:
+            return False
+        keys = self._translate_mouse_modifiers(event)
+        delta_word = ctypes.c_short(delta).value & 0xFFFF
+        w_param = (ctypes.c_ushort(keys).value & 0xFFFF) | (delta_word << 16)
+        global_pos = event.globalPosition().toPoint()
+        x_word = ctypes.c_short(global_pos.x()).value & 0xFFFF
+        y_word = ctypes.c_short(global_pos.y()).value & 0xFFFF
+        l_param = x_word | (y_word << 16)
+        try:
+            return bool(win32api.PostMessage(target, win32con.WM_MOUSEWHEEL, w_param, l_param))
+        except Exception:
+            return False
+
+    def forward_key(self, event: QKeyEvent, *, is_press: bool) -> bool:
+        if not self._can_forward():
+            self.clear_cached_target()
+            return False
+        vk_code = self._resolve_vk_code(event)
+        if vk_code is None:
+            return False
+        target = self._resolve_presentation_target()
+        if not target:
+            return False
+        for hwnd, update_cache in self._iter_key_targets(target):
+            if self._send_key_to_window(
+                hwnd, vk_code, event, is_press=is_press, update_cache=update_cache
+            ):
+                return True
+        return False
+
+    # ---- 内部工具方法 ----
+    def _can_forward(self) -> bool:
+        if not self.is_supported():
+            return False
+        if getattr(self.overlay, "mode", "cursor") == "cursor":
+            return False
+        if getattr(self.overlay, "whiteboard_active", False):
+            return False
+        return True
+
+    def _translate_mouse_modifiers(self, event: QWheelEvent) -> int:
+        keys = 0
+        modifiers = event.modifiers()
+        if modifiers & Qt.KeyboardModifier.ShiftModifier:
+            keys |= win32con.MK_SHIFT
+        if modifiers & Qt.KeyboardModifier.ControlModifier:
+            keys |= win32con.MK_CONTROL
+        buttons = event.buttons()
+        if buttons & Qt.MouseButton.LeftButton:
+            keys |= win32con.MK_LBUTTON
+        if buttons & Qt.MouseButton.RightButton:
+            keys |= win32con.MK_RBUTTON
+        if buttons & Qt.MouseButton.MiddleButton:
+            keys |= win32con.MK_MBUTTON
+        return keys
+
+    def _resolve_vk_code(self, event: QKeyEvent) -> Optional[int]:
+        native_getter = getattr(event, "nativeVirtualKey", None)
+        vk_code = 0
+        if callable(native_getter):
+            try:
+                vk_code = int(native_getter())
+            except Exception:
+                vk_code = 0
+        if vk_code:
+            return vk_code
+        vk_code = self._KEY_FORWARD_MAP.get(event.key(), 0)
+        return vk_code or None
+
+    def _send_key_to_window(
+        self,
+        hwnd: int,
+        vk_code: int,
+        event: QKeyEvent,
+        *,
+        is_press: bool,
+        update_cache: bool,
+    ) -> bool:
+        if win32con is None:
+            return False
+        message = win32con.WM_KEYDOWN if is_press else win32con.WM_KEYUP
+        l_param = self._build_key_lparam(vk_code, event, is_press)
+        if not self._deliver_key_message(hwnd, message, vk_code, l_param):
+            return False
+        if update_cache:
+            self._last_target_hwnd = hwnd
+        return True
+
+    def _iter_key_targets(self, target: int) -> Iterable[Tuple[int, bool]]:
+        seen: Set[int] = set()
+
+        def _push(
+            hwnd: int,
+            *,
+            cache: bool,
+            require_visible: bool,
+        ) -> Iterable[Tuple[int, bool]]:
+            if hwnd in seen:
+                return ()
+            if not self._is_keyboard_target(hwnd, require_visible=require_visible):
+                return ()
+            seen.add(hwnd)
+            return ((hwnd, cache),)
+
+        for candidate in _push(target, cache=True, require_visible=True):
+            yield candidate
+        for focus_hwnd in self._gather_thread_focus_handles(target):
+            for candidate in _push(focus_hwnd, cache=False, require_visible=False):
+                yield candidate
+        for child_hwnd in self._collect_descendant_windows(target):
+            for candidate in _push(child_hwnd, cache=False, require_visible=False):
+                yield candidate
+
+    def _build_key_lparam(self, vk_code: int, event: QKeyEvent, is_press: bool) -> int:
+        repeat_getter = getattr(event, "count", None)
+        repeat_count = 1
+        if callable(repeat_getter):
+            try:
+                repeat_count = max(1, int(repeat_getter()))
+            except Exception:
+                repeat_count = 1
+        l_param = repeat_count & 0xFFFF
+        map_vk = getattr(win32api, "MapVirtualKey", None) if win32api is not None else None
+        scan_code = 0
+        if callable(map_vk):
+            try:
+                scan_code = int(map_vk(vk_code, 0))
+            except Exception:
+                scan_code = 0
+        l_param |= (scan_code & 0xFF) << 16
+        if vk_code in self._EXTENDED_KEY_CODES:
+            l_param |= 1 << 24
+        auto_repeat_getter = getattr(event, "isAutoRepeat", None)
+        is_auto_repeat = False
+        if callable(auto_repeat_getter):
+            try:
+                is_auto_repeat = bool(auto_repeat_getter())
+            except Exception:
+                is_auto_repeat = False
+        if is_press:
+            if is_auto_repeat:
+                l_param |= 1 << 30
+        else:
+            l_param |= 1 << 30
+            l_param |= 1 << 31
+        return l_param & 0xFFFFFFFF
+
+    def _deliver_key_message(self, hwnd: int, message: int, vk_code: int, l_param: int) -> bool:
+        delivered = False
+        if win32api is not None:
+            try:
+                delivered = bool(win32api.PostMessage(hwnd, message, vk_code, l_param))
+            except Exception:
+                delivered = False
+        if delivered:
+            return True
+        if _USER32 is None:
+            return False
+        result = ctypes.c_size_t()
+        try:
+            sent = _USER32.SendMessageTimeoutW(
+                hwnd,
+                message,
+                wintypes.WPARAM(vk_code),
+                wintypes.LPARAM(l_param),
+                self._SMTO_ABORTIFHUNG,
+                30,
+                ctypes.byref(result),
+            )
+        except Exception:
+            sent = 0
+        return bool(sent)
+
+    def _is_overlay_window(self, hwnd: int) -> bool:
+        try:
+            overlay_hwnd = int(self.overlay.winId()) if self.overlay.winId() else 0
+        except Exception:
+            overlay_hwnd = 0
+        return hwnd != 0 and hwnd == overlay_hwnd
+
+    def _is_keyboard_target(self, hwnd: int, *, require_visible: bool) -> bool:
+        if hwnd == 0 or self._is_overlay_window(hwnd):
+            return False
+        if win32gui is None:
+            return False
+        try:
+            if not win32gui.IsWindow(hwnd):
+                return False
+            if require_visible and not win32gui.IsWindowVisible(hwnd):
+                return False
+        except Exception:
+            return False
+        return True
+
+    def _gather_thread_focus_handles(self, target: int) -> Iterable[int]:
+        if _USER32 is None:
+            return ()
+        info = self._GuiThreadInfo()
+        pid = wintypes.DWORD()
+        try:
+            thread_id = _USER32.GetWindowThreadProcessId(
+                wintypes.HWND(target), ctypes.byref(pid)
+            )
+        except Exception:
+            return ()
+        if not thread_id:
+            return ()
+        info.cbSize = ctypes.sizeof(info)
+        try:
+            ok = bool(_USER32.GetGUIThreadInfo(thread_id, ctypes.byref(info)))
+        except Exception:
+            ok = False
+        if not ok:
+            return ()
+        handles = (
+            info.hwndFocus,
+            info.hwndActive,
+            info.hwndCapture,
+            info.hwndMenuOwner,
+            info.hwndCaret,
+        )
+        return tuple(int(h) for h in handles if h)
+
+    def _collect_descendant_windows(self, root: int) -> Iterable[int]:
+        if win32gui is None:
+            return ()
+        queue: deque[int] = deque([root])
+        discovered: Set[int] = {root}
+        results: List[int] = []
+        buffer = self._child_buffer
+        while queue and len(results) < self._MAX_CHILD_FORWARDS:
+            parent = queue.popleft()
+            buffer.clear()
+
+            def _collector(child_hwnd: int, acc: List[int]) -> bool:
+                if child_hwnd not in discovered:
+                    acc.append(child_hwnd)
+                return len(acc) < self._MAX_CHILD_FORWARDS
+
+            try:
+                win32gui.EnumChildWindows(parent, _collector, buffer)
+            except Exception:
+                continue
+            snapshot = list(buffer)
+            buffer.clear()
+            for child in snapshot:
+                if child in discovered:
+                    continue
+                discovered.add(child)
+                results.append(child)
+                if len(results) >= self._MAX_CHILD_FORWARDS:
+                    break
+                queue.append(child)
+        return tuple(results)
+
+    def _overlay_rect_tuple(self) -> Optional[Tuple[int, int, int, int]]:
+        rect = self.overlay.geometry()
+        if rect.isNull():
+            return None
+        left = rect.left()
+        top = rect.top()
+        right = left + rect.width()
+        bottom = top + rect.height()
+        return left, top, right, bottom
+
+    def _rect_intersects_overlay(self, rect: Tuple[int, int, int, int]) -> bool:
+        overlay_rect = self._overlay_rect_tuple()
+        if overlay_rect is None:
+            return False
+        left, top, right, bottom = rect
+        o_left, o_top, o_right, o_bottom = overlay_rect
+        return not (right <= o_left or left >= o_right or bottom <= o_top or top >= o_bottom)
+
+    def _is_target_window_valid(self, hwnd: int) -> bool:
+        if win32gui is None:
+            return False
+        try:
+            if hwnd == 0:
+                return False
+            if hwnd == int(self.overlay.winId()):
+                return False
+            if not win32gui.IsWindow(hwnd) or not win32gui.IsWindowVisible(hwnd):
+                return False
+            if win32gui.IsIconic(hwnd):
+                return False
+            rect = win32gui.GetWindowRect(hwnd)
+        except Exception:
+            return False
+        if not rect:
+            return False
+        return self._rect_intersects_overlay(rect)
+
+    def _is_candidate_window(self, hwnd: int) -> bool:
+        if win32gui is None:
+            return False
+        try:
+            class_name = win32gui.GetClassName(hwnd)
+        except Exception:
+            class_name = ""
+        class_name = class_name.strip().lower()
+        if not class_name:
+            return False
+        if class_name in self._KNOWN_PRESENTATION_CLASSES:
+            return True
+        if any(class_name.startswith(prefix) for prefix in self._KNOWN_PRESENTATION_PREFIXES):
+            return True
+        try:
+            rect = win32gui.GetWindowRect(hwnd)
+        except Exception:
+            return False
+        if not rect:
+            return False
+        left, top, right, bottom = rect
+        width = max(0, right - left)
+        height = max(0, bottom - top)
+        overlay_rect = self._overlay_rect_tuple()
+        if overlay_rect is None:
+            return False
+        o_width = overlay_rect[2] - overlay_rect[0]
+        o_height = overlay_rect[3] - overlay_rect[1]
+        if o_width <= 0 or o_height <= 0:
+            return False
+        width_diff = abs(width - o_width)
+        height_diff = abs(height - o_height)
+        return width >= 400 and height >= 300 and width_diff <= 64 and height_diff <= 64
+
+    def _detect_presentation_window(self) -> Optional[int]:
+        if win32gui is None:
+            return None
+        overlay_hwnd = int(self.overlay.winId()) if self.overlay.winId() else 0
+        try:
+            foreground = win32gui.GetForegroundWindow()
+        except Exception:
+            foreground = 0
+        if foreground and foreground != overlay_hwnd and self._is_candidate_window(foreground):
+            return foreground
+
+        candidates: List[int] = []
+
+        def _enum_callback(hwnd: int, acc: List[int]) -> bool:
+            if hwnd == overlay_hwnd:
+                return True
+            try:
+                if not win32gui.IsWindowVisible(hwnd) or win32gui.IsIconic(hwnd):
+                    return True
+                rect = win32gui.GetWindowRect(hwnd)
+            except Exception:
+                return True
+            if not rect or not self._rect_intersects_overlay(rect):
+                return True
+            acc.append(hwnd)
+            return True
+
+        try:
+            win32gui.EnumWindows(_enum_callback, candidates)
+        except Exception:
+            return None
+        for hwnd in candidates:
+            if self._is_candidate_window(hwnd):
+                return hwnd
+        return None
+
+    def _resolve_presentation_target(self) -> Optional[int]:
+        if win32gui is None:
+            return None
+        hwnd = self._last_target_hwnd
+        if hwnd and self._is_target_window_valid(hwnd):
+            return hwnd
+        hwnd = self._detect_presentation_window()
+        if hwnd and self._is_target_window_valid(hwnd):
+            self._last_target_hwnd = hwnd
+            return hwnd
+        self._last_target_hwnd = None
+        return None
+
+
 class OverlayWindow(QWidget):
+
     def __init__(self, settings_manager: SettingsManager) -> None:
         super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -1749,6 +2250,9 @@ class OverlayWindow(QWidget):
         self._eraser_stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
         self._eraser_stroker.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         self._eraser_stroker_width = 0.0
+        self._forwarder: Optional[_PresentationForwarder] = (
+            _PresentationForwarder(self) if _PresentationForwarder.is_supported() else None
+        )
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)
 
@@ -1840,6 +2344,8 @@ class OverlayWindow(QWidget):
                 self.last_board_color = c
                 self.whiteboard_color = c
                 self.whiteboard_active = True
+                if self._forwarder:
+                    self._forwarder.clear_cached_target()
                 self.toolbar.update_whiteboard_button_state(True)
                 self._update_visibility_for_mode(initial=False)
                 self.raise_toolbar()
@@ -1848,6 +2354,8 @@ class OverlayWindow(QWidget):
     def toggle_whiteboard(self) -> None:
         self.whiteboard_active = not self.whiteboard_active
         self.whiteboard_color = self.last_board_color if self.whiteboard_active else QColor(0, 0, 0, 0)
+        if self._forwarder and self.whiteboard_active:
+            self._forwarder.clear_cached_target()
         self._update_visibility_for_mode(initial=False)
         self.raise_toolbar()
         self.toolbar.update_whiteboard_button_state(self.whiteboard_active)
@@ -1865,6 +2373,8 @@ class OverlayWindow(QWidget):
             self._last_preview_bounds = None
         if self.mode != "eraser":
             self._eraser_last_point = None
+        if self._forwarder and mode == "cursor":
+            self._forwarder.clear_cached_target()
         if self.mode in {"brush", "shape"} and not self._restoring_tool:
             self._update_last_tool_snapshot()
         self._update_visibility_for_mode(initial=initial)
@@ -2061,6 +2571,12 @@ class OverlayWindow(QWidget):
         self.settings_manager.save_settings(settings)
 
     # ---- 画图事件 ----
+    def wheelEvent(self, e) -> None:
+        if self._forwarder and self._forwarder.forward_wheel(e):
+            e.accept()
+            return
+        super().wheelEvent(e)
+
     def mousePressEvent(self, e) -> None:
         if e.button() == Qt.MouseButton.LeftButton and self.mode != "cursor":
             self._push_history()
@@ -2124,9 +2640,18 @@ class OverlayWindow(QWidget):
         super().mouseReleaseEvent(e)
 
     def keyPressEvent(self, e: QKeyEvent) -> None:
+        if self._forwarder and self._forwarder.forward_key(e, is_press=True):
+            e.accept()
+            return
         if e.key() == Qt.Key.Key_Escape:
             self.set_mode("cursor"); return
         super().keyPressEvent(e)
+
+    def keyReleaseEvent(self, e: QKeyEvent) -> None:
+        if self._forwarder and self._forwarder.forward_key(e, is_press=False):
+            e.accept()
+            return
+        super().keyReleaseEvent(e)
 
     def _draw_brush_line(self, cur: QPointF) -> Optional[QRectF]:
         now = time.time()
