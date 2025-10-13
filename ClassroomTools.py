@@ -1735,6 +1735,9 @@ class _PresentationForwarder:
 
     _SMTO_ABORTIFHUNG = 0x0002
     _MAX_CHILD_FORWARDS = 32
+    _INPUT_KEYBOARD = 1
+    _KEYEVENTF_EXTENDEDKEY = 0x0001
+    _KEYEVENTF_KEYUP = 0x0002
 
     if _USER32 is not None:
 
@@ -1755,6 +1758,10 @@ class _PresentationForwarder:
 
         class _GuiThreadInfo(ctypes.Structure):  # type: ignore[misc,override]
             _fields_: List[Tuple[str, Any]] = []
+
+        _KeyboardInput = None  # type: ignore[assignment]
+        _InputUnion = None  # type: ignore[assignment]
+        _Input = None  # type: ignore[assignment]
 
     _KNOWN_PRESENTATION_CLASSES: Set[str] = (
         {
