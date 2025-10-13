@@ -1754,29 +1754,6 @@ class _PresentationForwarder:
                 ("rcCaret", wintypes.RECT),
             ]
 
-        class _KeyboardInput(ctypes.Structure):
-            pass
-
-        _KeyboardInput._fields_ = [
-            ("wVk", wintypes.WORD),
-            ("wScan", wintypes.WORD),
-            ("dwFlags", wintypes.DWORD),
-            ("time", wintypes.DWORD),
-            ("dwExtraInfo", wintypes.ULONG_PTR),
-        ]
-
-        class _InputUnion(ctypes.Union):
-            pass
-
-        _InputUnion._fields_ = [("ki", _KeyboardInput)]
-
-        class _Input(ctypes.Structure):
-            _anonymous_ = ("data",)
-
-        _Input._fields_ = [
-            ("type", wintypes.DWORD),
-            ("data", _InputUnion),
-        ]
     else:
 
         class _GuiThreadInfo(ctypes.Structure):  # type: ignore[misc,override]
@@ -1944,33 +1921,7 @@ class _PresentationForwarder:
             delivered = self._deliver_key_message(hwnd, message, vk_code, l_param)
             if delivered and update_cache:
                 self._last_target_hwnd = hwnd
-        if delivered:
-            return True
-        return self._send_key_via_sendinput(vk_code, is_press)
-
-    def _send_key_via_sendinput(self, vk_code: int, is_press: bool) -> bool:
-        if _USER32 is None or not hasattr(self, "_KeyboardInput"):
-            return False
-        scan_code = self._map_virtual_key(vk_code)
-        flags = 0
-        if vk_code in self._EXTENDED_KEY_CODES:
-            flags |= self._KEYEVENTF_EXTENDEDKEY
-        if not is_press:
-            flags |= self._KEYEVENTF_KEYUP
-        keyboard = self._KeyboardInput()
-        keyboard.wVk = ctypes.c_ushort(vk_code).value
-        keyboard.wScan = ctypes.c_ushort(scan_code).value
-        keyboard.dwFlags = ctypes.c_uint(flags).value
-        keyboard.time = 0
-        keyboard.dwExtraInfo = 0
-        input_record = self._Input()
-        input_record.type = self._INPUT_KEYBOARD
-        input_record.ki = keyboard
-        try:
-            sent = int(_USER32.SendInput(1, ctypes.byref(input_record), ctypes.sizeof(input_record)))
-        except Exception:
-            sent = 0
-        return bool(sent)
+        return delivered
 
     def _map_virtual_key(self, vk_code: int) -> int:
         map_vk = getattr(win32api, "MapVirtualKey", None) if win32api is not None else None
@@ -1997,11 +1948,11 @@ class _PresentationForwarder:
             seen.add(hwnd)
             return ((hwnd, cache),)
 
-        for candidate in _push(target, cache=True, require_visible=True):
-            yield candidate
         for focus_hwnd in self._gather_thread_focus_handles(target):
             for candidate in _push(focus_hwnd, cache=False, require_visible=False):
                 yield candidate
+        for candidate in _push(target, cache=True, require_visible=True):
+            yield candidate
         for child_hwnd in self._collect_descendant_windows(target):
             for candidate in _push(child_hwnd, cache=False, require_visible=False):
                 yield candidate
