@@ -1727,7 +1727,26 @@ class _PresentationForwarder:
     __slots__ = ("overlay", "_last_target_hwnd", "_child_buffer")
 
     _SMTO_ABORTIFHUNG = 0x0002
-    _MAX_CHILD_FORWARDS = 16
+    _MAX_CHILD_FORWARDS = 32
+
+    if _USER32 is not None:
+
+        class _GuiThreadInfo(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", wintypes.DWORD),
+                ("flags", wintypes.DWORD),
+                ("hwndActive", wintypes.HWND),
+                ("hwndFocus", wintypes.HWND),
+                ("hwndCapture", wintypes.HWND),
+                ("hwndMenuOwner", wintypes.HWND),
+                ("hwndMoveSize", wintypes.HWND),
+                ("hwndCaret", wintypes.HWND),
+                ("rcCaret", wintypes.RECT),
+            ]
+    else:
+
+        class _GuiThreadInfo(ctypes.Structure):  # type: ignore[misc,override]
+            _fields_: List[Tuple[str, Any]] = []
 
     _KNOWN_PRESENTATION_CLASSES: Set[str] = (
         {
@@ -1825,9 +1844,12 @@ class _PresentationForwarder:
         target = self._resolve_presentation_target()
         if not target:
             return False
-        if self._send_key_to_window(target, vk_code, event, is_press=is_press, update_cache=True):
-            return True
-        return self._forward_key_to_children(target, vk_code, event, is_press)
+        for hwnd, update_cache in self._iter_key_targets(target):
+            if self._send_key_to_window(
+                hwnd, vk_code, event, is_press=is_press, update_cache=update_cache
+            ):
+                return True
+        return False
 
     # ---- 内部工具方法 ----
     def _can_forward(self) -> bool:
@@ -1887,35 +1909,30 @@ class _PresentationForwarder:
             self._last_target_hwnd = hwnd
         return True
 
-    def _forward_key_to_children(
-        self, hwnd: int, vk_code: int, event: QKeyEvent, is_press: bool
-    ) -> bool:
-        if win32gui is None:
-            return False
-        buffer = self._child_buffer
-        buffer.clear()
+    def _iter_key_targets(self, target: int) -> Iterable[Tuple[int, bool]]:
+        seen: Set[int] = set()
 
-        def _collector(child_hwnd: int, acc: List[int]) -> bool:
-            acc.append(child_hwnd)
-            return len(acc) < self._MAX_CHILD_FORWARDS
+        def _push(
+            hwnd: int,
+            *,
+            cache: bool,
+            require_visible: bool,
+        ) -> Iterable[Tuple[int, bool]]:
+            if hwnd in seen:
+                return ()
+            if not self._is_keyboard_target(hwnd, require_visible=require_visible):
+                return ()
+            seen.add(hwnd)
+            return ((hwnd, cache),)
 
-        try:
-            win32gui.EnumChildWindows(hwnd, _collector, buffer)
-        except Exception:
-            buffer.clear()
-            return False
-        forwarded = False
-        for child in buffer:
-            try:
-                if not win32gui.IsWindow(child) or not win32gui.IsWindowVisible(child):
-                    continue
-            except Exception:
-                continue
-            if self._send_key_to_window(child, vk_code, event, is_press=is_press, update_cache=False):
-                forwarded = True
-                break
-        buffer.clear()
-        return forwarded
+        for candidate in _push(target, cache=True, require_visible=True):
+            yield candidate
+        for focus_hwnd in self._gather_thread_focus_handles(target):
+            for candidate in _push(focus_hwnd, cache=False, require_visible=False):
+                yield candidate
+        for child_hwnd in self._collect_descendant_windows(target):
+            for candidate in _push(child_hwnd, cache=False, require_visible=False):
+                yield candidate
 
     def _build_key_lparam(self, vk_code: int, event: QKeyEvent, is_press: bool) -> int:
         repeat_getter = getattr(event, "count", None)
@@ -1976,6 +1993,88 @@ class _PresentationForwarder:
         except Exception:
             sent = 0
         return bool(sent)
+
+    def _is_overlay_window(self, hwnd: int) -> bool:
+        try:
+            overlay_hwnd = int(self.overlay.winId()) if self.overlay.winId() else 0
+        except Exception:
+            overlay_hwnd = 0
+        return hwnd != 0 and hwnd == overlay_hwnd
+
+    def _is_keyboard_target(self, hwnd: int, *, require_visible: bool) -> bool:
+        if hwnd == 0 or self._is_overlay_window(hwnd):
+            return False
+        if win32gui is None:
+            return False
+        try:
+            if not win32gui.IsWindow(hwnd):
+                return False
+            if require_visible and not win32gui.IsWindowVisible(hwnd):
+                return False
+        except Exception:
+            return False
+        return True
+
+    def _gather_thread_focus_handles(self, target: int) -> Iterable[int]:
+        if _USER32 is None:
+            return ()
+        info = self._GuiThreadInfo()
+        pid = wintypes.DWORD()
+        try:
+            thread_id = _USER32.GetWindowThreadProcessId(
+                wintypes.HWND(target), ctypes.byref(pid)
+            )
+        except Exception:
+            return ()
+        if not thread_id:
+            return ()
+        info.cbSize = ctypes.sizeof(info)
+        try:
+            ok = bool(_USER32.GetGUIThreadInfo(thread_id, ctypes.byref(info)))
+        except Exception:
+            ok = False
+        if not ok:
+            return ()
+        handles = (
+            info.hwndFocus,
+            info.hwndActive,
+            info.hwndCapture,
+            info.hwndMenuOwner,
+            info.hwndCaret,
+        )
+        return tuple(int(h) for h in handles if h)
+
+    def _collect_descendant_windows(self, root: int) -> Iterable[int]:
+        if win32gui is None:
+            return ()
+        queue: deque[int] = deque([root])
+        discovered: Set[int] = {root}
+        results: List[int] = []
+        buffer = self._child_buffer
+        while queue and len(results) < self._MAX_CHILD_FORWARDS:
+            parent = queue.popleft()
+            buffer.clear()
+
+            def _collector(child_hwnd: int, acc: List[int]) -> bool:
+                if child_hwnd not in discovered:
+                    acc.append(child_hwnd)
+                return len(acc) < self._MAX_CHILD_FORWARDS
+
+            try:
+                win32gui.EnumChildWindows(parent, _collector, buffer)
+            except Exception:
+                continue
+            snapshot = list(buffer)
+            buffer.clear()
+            for child in snapshot:
+                if child in discovered:
+                    continue
+                discovered.add(child)
+                results.append(child)
+                if len(results) >= self._MAX_CHILD_FORWARDS:
+                    break
+                queue.append(child)
+        return tuple(results)
 
     def _overlay_rect_tuple(self) -> Optional[Tuple[int, int, int, int]]:
         rect = self.overlay.geometry()
