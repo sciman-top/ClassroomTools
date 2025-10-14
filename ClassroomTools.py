@@ -5,6 +5,7 @@ import base64
 import configparser
 import contextlib
 import ctypes
+from ctypes import wintypes
 import importlib
 import io
 import json
@@ -65,6 +66,7 @@ from PyQt6.QtGui import (
     QPen,
     QPixmap,
     QKeyEvent,
+    QWheelEvent,
     QResizeEvent,
     QScreen,
 )
@@ -117,6 +119,158 @@ def _prepare_windows_tts_environment() -> None:
 
 
 _prepare_windows_tts_environment()
+
+# ---------- 系统输入模拟 ----------
+
+IS_WINDOWS = sys.platform == "win32"
+
+_NAVIGATION_KEY_MAP = {
+    Qt.Key.Key_PageDown: 0x22,
+    Qt.Key.Key_PageUp: 0x21,
+    Qt.Key.Key_Down: 0x28,
+    Qt.Key.Key_Up: 0x26,
+    Qt.Key.Key_Left: 0x25,
+    Qt.Key.Key_Right: 0x27,
+}
+
+if IS_WINDOWS:
+    _INPUT_MOUSE = 0
+    _INPUT_KEYBOARD = 1
+    _KEYEVENTF_KEYUP = 0x0002
+    _MOUSEEVENTF_WHEEL = 0x0800
+    _MAPVK_VK_TO_VSC = 0
+    _WHEEL_DELTA = 120
+    _USER32 = ctypes.windll.user32
+
+    if hasattr(wintypes, "ULONG_PTR"):
+        _ULONG_PTR = wintypes.ULONG_PTR
+    else:  # pragma: no cover - compatibility for older Python on Windows
+        _ULONG_PTR = ctypes.c_ulonglong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_ulong
+
+    class _MOUSEINPUT(ctypes.Structure):
+        _fields_ = [
+            ("dx", wintypes.LONG),
+            ("dy", wintypes.LONG),
+            ("mouseData", wintypes.DWORD),
+            ("dwFlags", wintypes.DWORD),
+            ("time", wintypes.DWORD),
+            ("dwExtraInfo", _ULONG_PTR),
+        ]
+
+    class _KEYBDINPUT(ctypes.Structure):
+        _fields_ = [
+            ("wVk", wintypes.WORD),
+            ("wScan", wintypes.WORD),
+            ("dwFlags", wintypes.DWORD),
+            ("time", wintypes.DWORD),
+            ("dwExtraInfo", _ULONG_PTR),
+        ]
+
+    class _INPUT_UNION(ctypes.Union):
+        _fields_ = [
+            ("mi", _MOUSEINPUT),
+            ("ki", _KEYBDINPUT),
+        ]
+
+    class _INPUT(ctypes.Structure):
+        _fields_ = [
+            ("type", wintypes.DWORD),
+            ("value", _INPUT_UNION),
+        ]
+
+    class SystemInputSimulator:
+        """发送键盘/鼠标指令到系统，便于控制课件翻页。"""
+
+        _KEY_MAP = _NAVIGATION_KEY_MAP
+
+        @staticmethod
+        def _build_keyboard_input(vk: int, flags: int) -> _INPUT:
+            scan_code = _USER32.MapVirtualKeyW(vk, _MAPVK_VK_TO_VSC)
+            return _INPUT(
+                type=_INPUT_KEYBOARD,
+                value=_INPUT_UNION(
+                    ki=_KEYBDINPUT(
+                        vk,
+                        scan_code,
+                        flags,
+                        0,
+                        _ULONG_PTR(0),
+                    )
+                ),
+            )
+
+        @staticmethod
+        def _build_wheel_input(delta: int) -> _INPUT:
+            return _INPUT(
+                type=_INPUT_MOUSE,
+                value=_INPUT_UNION(
+                    mi=_MOUSEINPUT(
+                        0,
+                        0,
+                        delta,
+                        _MOUSEEVENTF_WHEEL,
+                        0,
+                        _ULONG_PTR(0),
+                    )
+                ),
+            )
+
+        @staticmethod
+        def _send_inputs(inputs: List[_INPUT]) -> bool:
+            if not inputs:
+                return False
+            array_type = _INPUT * len(inputs)
+            try:
+                sent = _USER32.SendInput(
+                    len(inputs),
+                    array_type(*inputs),
+                    ctypes.sizeof(_INPUT),
+                )
+            except Exception:
+                return False
+            return sent == len(inputs)
+
+        @staticmethod
+        def _normalize_wheel_delta(value: int) -> List[int]:
+            if value == 0:
+                return []
+            step_value = _WHEEL_DELTA if value > 0 else -_WHEEL_DELTA
+            count = max(1, math.ceil(abs(value) / _WHEEL_DELTA))
+            return [step_value] * count
+
+        @classmethod
+        def send_navigation_key(cls, key: int) -> bool:
+            vk = cls._KEY_MAP.get(key)
+            if vk is None:
+                return False
+            inputs = [
+                cls._build_keyboard_input(vk, 0),
+                cls._build_keyboard_input(vk, _KEYEVENTF_KEYUP),
+            ]
+            return cls._send_inputs(inputs)
+
+        @classmethod
+        def send_wheel(cls, delta: int) -> bool:
+            steps = cls._normalize_wheel_delta(delta)
+            if not steps:
+                return False
+            inputs = [cls._build_wheel_input(step) for step in steps]
+            return cls._send_inputs(inputs)
+
+else:
+
+    class SystemInputSimulator:
+        """非 Windows 平台下不做任何系统输入模拟。"""
+
+        _KEY_MAP = _NAVIGATION_KEY_MAP
+
+        @classmethod
+        def send_navigation_key(cls, key: int) -> bool:
+            return False
+
+        @classmethod
+        def send_wheel(cls, delta: int) -> bool:
+            return False
 
 # ---------- 图标 ----------
 class IconManager:
@@ -2124,9 +2278,21 @@ class OverlayWindow(QWidget):
         super().mouseReleaseEvent(e)
 
     def keyPressEvent(self, e: QKeyEvent) -> None:
-        if e.key() == Qt.Key.Key_Escape:
-            self.set_mode("cursor"); return
+        key = e.key()
+        if key == Qt.Key.Key_Escape:
+            self.set_mode("cursor")
+            return
+        if SystemInputSimulator.send_navigation_key(key):
+            e.accept()
+            return
         super().keyPressEvent(e)
+
+    def wheelEvent(self, e: QWheelEvent) -> None:
+        delta = e.angleDelta().y()
+        if SystemInputSimulator.send_wheel(delta):
+            e.accept()
+            return
+        super().wheelEvent(e)
 
     def _draw_brush_line(self, cur: QPointF) -> Optional[QRectF]:
         now = time.time()
