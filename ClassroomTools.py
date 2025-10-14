@@ -43,18 +43,17 @@ from typing import (
 logger = logging.getLogger(__name__)
 
 if sys.platform == "win32":
-    try:
+    try:  # pragma: no cover - Windows 专用依赖
         import win32api
         import win32con
         import win32gui
-        try:
-            _USER32 = ctypes.windll.user32  # type: ignore[attr-defined]
-        except Exception:  # pragma: no cover - 某些环境可能限制 Win32 API
-            _USER32 = None
-    except ImportError:  # pragma: no cover - 环境可能缺少 pywin32
+    except ImportError:  # pragma: no cover - 部分环境未安装 pywin32
         win32api = None  # type: ignore[assignment]
         win32con = None  # type: ignore[assignment]
         win32gui = None  # type: ignore[assignment]
+    try:
+        _USER32 = ctypes.windll.user32  # type: ignore[attr-defined]
+    except Exception:  # pragma: no cover - 某些环境可能限制 Win32 API
         _USER32 = None  # type: ignore[assignment]
 else:
     win32api = None  # type: ignore[assignment]
@@ -2792,31 +2791,34 @@ class OverlayWindow(QWidget):
             return
         prev_mode = self.mode
         prev_shape = self.current_shape if prev_mode == "shape" else None
-        had_keyboard_grab = self._keyboard_grabbed
-        if had_keyboard_grab:
-            self._release_keyboard_capture()
-        try:
-            success = False
-            if self._forwarder is not None:
-                if not self._forwarder.focus_presentation_window():
-                    self._forwarder.clear_cached_target()
-                success = self._forwarder.send_virtual_key(vk_code)
-                if not success:
-                    self._forwarder.clear_cached_target()
+        if prev_mode in {"brush", "shape"}:
+            self._update_last_tool_snapshot()
+        with self._temporarily_release_keyboard() as had_keyboard_grab:
+            success = self._dispatch_virtual_key(vk_code)
+        if not success:
+            return
+        if not had_keyboard_grab:
+            self._ensure_keyboard_capture()
+        if prev_mode != "cursor":
+            self._restore_last_tool(
+                prev_mode if prev_mode in {"brush", "shape", "eraser"} else None,
+                shape_type=prev_shape,
+            )
+        self.raise_toolbar()
+
+    def _dispatch_virtual_key(self, vk_code: int) -> bool:
+        if vk_code == 0:
+            return False
+        success = False
+        if self._forwarder is not None:
+            if not self._forwarder.focus_presentation_window():
+                self._forwarder.clear_cached_target()
+            success = self._forwarder.send_virtual_key(vk_code)
             if not success:
-                success = self._fallback_send_virtual_key(vk_code)
-        finally:
-            if had_keyboard_grab:
-                self._ensure_keyboard_capture()
-        if success:
-            if not had_keyboard_grab:
-                self._ensure_keyboard_capture()
-            if prev_mode != "cursor":
-                self._restore_last_tool(
-                    prev_mode if prev_mode in {"brush", "shape", "eraser"} else None,
-                    shape_type=prev_shape,
-                )
-            self.raise_toolbar()
+                self._forwarder.clear_cached_target()
+        if not success:
+            success = self._fallback_send_virtual_key(vk_code)
+        return success
 
     def _fallback_send_virtual_key(self, vk_code: int) -> bool:
         if vk_code == 0 or _USER32 is None:
@@ -2914,6 +2916,17 @@ class OverlayWindow(QWidget):
         except Exception:
             pass
         self._keyboard_grabbed = False
+
+    @contextlib.contextmanager
+    def _temporarily_release_keyboard(self):
+        had_keyboard_grab = self._keyboard_grabbed
+        if had_keyboard_grab:
+            self._release_keyboard_capture()
+        try:
+            yield had_keyboard_grab
+        finally:
+            if had_keyboard_grab:
+                self._ensure_keyboard_capture()
 
     def _overlay_rect_tuple(self) -> Optional[Tuple[int, int, int, int]]:
         rect = self.geometry()
