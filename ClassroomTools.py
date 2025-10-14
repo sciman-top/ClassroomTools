@@ -5,7 +5,6 @@ import base64
 import configparser
 import contextlib
 import ctypes
-from ctypes import wintypes
 import importlib
 import io
 import json
@@ -66,7 +65,6 @@ from PyQt6.QtGui import (
     QPen,
     QPixmap,
     QKeyEvent,
-    QWheelEvent,
     QResizeEvent,
     QScreen,
 )
@@ -119,246 +117,6 @@ def _prepare_windows_tts_environment() -> None:
 
 
 _prepare_windows_tts_environment()
-
-# ---------- 系统输入模拟 ----------
-
-IS_WINDOWS = sys.platform == "win32"
-
-_NAVIGATION_KEY_MAP = {
-    Qt.Key.Key_PageDown: 0x22,
-    Qt.Key.Key_PageUp: 0x21,
-    Qt.Key.Key_Down: 0x28,
-    Qt.Key.Key_Up: 0x26,
-    Qt.Key.Key_Left: 0x25,
-    Qt.Key.Key_Right: 0x27,
-}
-
-if IS_WINDOWS:
-    _INPUT_MOUSE = 0
-    _INPUT_KEYBOARD = 1
-    _KEYEVENTF_KEYUP = 0x0002
-    _MOUSEEVENTF_WHEEL = 0x0800
-    _MAPVK_VK_TO_VSC = 0
-    _WHEEL_DELTA = 120
-    _USER32 = ctypes.windll.user32
-    _KERNEL32 = ctypes.windll.kernel32
-
-    if hasattr(wintypes, "ULONG_PTR"):
-        _ULONG_PTR = wintypes.ULONG_PTR
-    else:  # pragma: no cover - compatibility for older Python on Windows
-        _ULONG_PTR = ctypes.c_ulonglong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_ulong
-
-    class _MOUSEINPUT(ctypes.Structure):
-        _fields_ = [
-            ("dx", wintypes.LONG),
-            ("dy", wintypes.LONG),
-            ("mouseData", wintypes.DWORD),
-            ("dwFlags", wintypes.DWORD),
-            ("time", wintypes.DWORD),
-            ("dwExtraInfo", _ULONG_PTR),
-        ]
-
-    class _KEYBDINPUT(ctypes.Structure):
-        _fields_ = [
-            ("wVk", wintypes.WORD),
-            ("wScan", wintypes.WORD),
-            ("dwFlags", wintypes.DWORD),
-            ("time", wintypes.DWORD),
-            ("dwExtraInfo", _ULONG_PTR),
-        ]
-
-    class _INPUT_UNION(ctypes.Union):
-        _fields_ = [
-            ("mi", _MOUSEINPUT),
-            ("ki", _KEYBDINPUT),
-        ]
-
-    class _INPUT(ctypes.Structure):
-        _fields_ = [
-            ("type", wintypes.DWORD),
-            ("value", _INPUT_UNION),
-        ]
-
-    class SystemInputSimulator:
-        """发送键盘/鼠标指令到系统，便于控制课件翻页。"""
-
-        _KEY_MAP = _NAVIGATION_KEY_MAP
-        _overlay_hwnd: int = 0
-        _target_hwnd: int = 0
-
-        @staticmethod
-        def _normalize_hwnd(hwnd: Optional[int]) -> int:
-            if hwnd is None:
-                return 0
-            try:
-                value = int(hwnd)
-            except (TypeError, ValueError):
-                return 0
-            return value if value > 0 else 0
-
-        @classmethod
-        def register_overlay_hwnd(cls, hwnd: Optional[int]) -> None:
-            cls._overlay_hwnd = cls._normalize_hwnd(hwnd)
-
-        @classmethod
-        def prepare_overlay_focus(cls, overlay_hwnd: Optional[int]) -> None:
-            cls.register_overlay_hwnd(overlay_hwnd)
-            foreground = _USER32.GetForegroundWindow()
-            if foreground and foreground != cls._overlay_hwnd:
-                cls._target_hwnd = foreground
-
-        @classmethod
-        def clear_target_window(cls) -> None:
-            cls._target_hwnd = 0
-
-        @staticmethod
-        def _is_window(hwnd: int) -> bool:
-            return bool(hwnd) and bool(_USER32.IsWindow(hwnd))
-
-        @classmethod
-        def _activate_window(cls, hwnd: int) -> bool:
-            if not cls._is_window(hwnd):
-                return False
-            current = _USER32.GetForegroundWindow()
-            if current == hwnd:
-                return True
-            current_thread = _KERNEL32.GetCurrentThreadId()
-            target_thread = _USER32.GetWindowThreadProcessId(hwnd, None)
-            attached_threads: List[int] = []
-            attached_set: Set[int] = set()
-            if current:
-                fg_thread = _USER32.GetWindowThreadProcessId(current, None)
-                if fg_thread and fg_thread != current_thread:
-                    if _USER32.AttachThreadInput(current_thread, fg_thread, True):
-                        attached_threads.append(fg_thread)
-                        attached_set.add(fg_thread)
-            if target_thread and target_thread != current_thread and target_thread not in attached_set:
-                if _USER32.AttachThreadInput(current_thread, target_thread, True):
-                    attached_threads.append(target_thread)
-                    attached_set.add(target_thread)
-            result = bool(_USER32.SetForegroundWindow(hwnd))
-            while attached_threads:
-                thread_id = attached_threads.pop()
-                _USER32.AttachThreadInput(current_thread, thread_id, False)
-            return result
-
-        @classmethod
-        def _dispatch_inputs(cls, inputs: List[_INPUT]) -> bool:
-            if not inputs:
-                return False
-            target_hwnd = cls._target_hwnd if cls._is_window(cls._target_hwnd) else 0
-            overlay_hwnd = cls._overlay_hwnd if cls._is_window(cls._overlay_hwnd) else 0
-            activated_target = False
-            if target_hwnd:
-                activated_target = cls._activate_window(target_hwnd)
-                if not activated_target:
-                    cls._target_hwnd = 0
-                    return False
-            success = cls._send_inputs(inputs)
-            if activated_target and overlay_hwnd:
-                cls._activate_window(overlay_hwnd)
-            return success if activated_target else False
-
-        @staticmethod
-        def _build_keyboard_input(vk: int, flags: int) -> _INPUT:
-            scan_code = _USER32.MapVirtualKeyW(vk, _MAPVK_VK_TO_VSC)
-            return _INPUT(
-                type=_INPUT_KEYBOARD,
-                value=_INPUT_UNION(
-                    ki=_KEYBDINPUT(
-                        vk,
-                        scan_code,
-                        flags,
-                        0,
-                        _ULONG_PTR(0),
-                    )
-                ),
-            )
-
-        @staticmethod
-        def _build_wheel_input(delta: int) -> _INPUT:
-            return _INPUT(
-                type=_INPUT_MOUSE,
-                value=_INPUT_UNION(
-                    mi=_MOUSEINPUT(
-                        0,
-                        0,
-                        delta,
-                        _MOUSEEVENTF_WHEEL,
-                        0,
-                        _ULONG_PTR(0),
-                    )
-                ),
-            )
-
-        @staticmethod
-        def _send_inputs(inputs: List[_INPUT]) -> bool:
-            if not inputs:
-                return False
-            array_type = _INPUT * len(inputs)
-            try:
-                sent = _USER32.SendInput(
-                    len(inputs),
-                    array_type(*inputs),
-                    ctypes.sizeof(_INPUT),
-                )
-            except Exception:
-                return False
-            return sent == len(inputs)
-
-        @staticmethod
-        def _normalize_wheel_delta(value: int) -> List[int]:
-            if value == 0:
-                return []
-            step_value = _WHEEL_DELTA if value > 0 else -_WHEEL_DELTA
-            count = max(1, math.ceil(abs(value) / _WHEEL_DELTA))
-            return [step_value] * count
-
-        @classmethod
-        def send_navigation_key(cls, key: int) -> bool:
-            vk = cls._KEY_MAP.get(key)
-            if vk is None:
-                return False
-            inputs = [
-                cls._build_keyboard_input(vk, 0),
-                cls._build_keyboard_input(vk, _KEYEVENTF_KEYUP),
-            ]
-            return cls._dispatch_inputs(inputs)
-
-        @classmethod
-        def send_wheel(cls, delta: int) -> bool:
-            steps = cls._normalize_wheel_delta(delta)
-            if not steps:
-                return False
-            inputs = [cls._build_wheel_input(step) for step in steps]
-            return cls._dispatch_inputs(inputs)
-
-else:
-
-    class SystemInputSimulator:
-        """非 Windows 平台下不做任何系统输入模拟。"""
-
-        _KEY_MAP = _NAVIGATION_KEY_MAP
-
-        @classmethod
-        def register_overlay_hwnd(cls, hwnd: Optional[int]) -> None:
-            return None
-
-        @classmethod
-        def prepare_overlay_focus(cls, overlay_hwnd: Optional[int]) -> None:
-            return None
-
-        @classmethod
-        def clear_target_window(cls) -> None:
-            return None
-
-        @classmethod
-        def send_navigation_key(cls, key: int) -> bool:
-            return False
-
-        @classmethod
-        def send_wheel(cls, delta: int) -> bool:
-            return False
 
 # ---------- 图标 ----------
 class IconManager:
@@ -1993,8 +1751,6 @@ class OverlayWindow(QWidget):
         self._eraser_stroker_width = 0.0
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)
-        if IS_WINDOWS:
-            SystemInputSimulator.register_overlay_hwnd(int(self.winId()))
 
         self._build_scene()
         self.history: List[QPixmap] = []
@@ -2063,8 +1819,6 @@ class OverlayWindow(QWidget):
         self.set_mode(self.mode, self.current_shape)
 
     def hide_overlay(self) -> None:
-        if IS_WINDOWS:
-            SystemInputSimulator.clear_target_window()
         self.hide(); self.toolbar.hide()
         self.save_settings(); self.save_window_position()
 
@@ -2227,13 +1981,9 @@ class OverlayWindow(QWidget):
         if initial:
             return
         if not passthrough:
-            if IS_WINDOWS:
-                SystemInputSimulator.prepare_overlay_focus(int(self.winId()))
             self.show(); self.raise_()
             self.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
         else:
-            if IS_WINDOWS:
-                SystemInputSimulator.clear_target_window()
             if not self.isVisible():
                 self.show()
 
@@ -2374,21 +2124,9 @@ class OverlayWindow(QWidget):
         super().mouseReleaseEvent(e)
 
     def keyPressEvent(self, e: QKeyEvent) -> None:
-        key = e.key()
-        if key == Qt.Key.Key_Escape:
-            self.set_mode("cursor")
-            return
-        if SystemInputSimulator.send_navigation_key(key):
-            e.accept()
-            return
+        if e.key() == Qt.Key.Key_Escape:
+            self.set_mode("cursor"); return
         super().keyPressEvent(e)
-
-    def wheelEvent(self, e: QWheelEvent) -> None:
-        delta = e.angleDelta().y()
-        if SystemInputSimulator.send_wheel(delta):
-            e.accept()
-            return
-        super().wheelEvent(e)
 
     def _draw_brush_line(self, cur: QPointF) -> Optional[QRectF]:
         now = time.time()
