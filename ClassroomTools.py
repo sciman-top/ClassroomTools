@@ -142,6 +142,11 @@ if IS_WINDOWS:
     _WHEEL_DELTA = 120
     _USER32 = ctypes.windll.user32
 
+    if hasattr(wintypes, "ULONG_PTR"):
+        _ULONG_PTR = wintypes.ULONG_PTR
+    else:  # pragma: no cover - compatibility for older Python on Windows
+        _ULONG_PTR = ctypes.c_ulonglong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_ulong
+
     class _MOUSEINPUT(ctypes.Structure):
         _fields_ = [
             ("dx", wintypes.LONG),
@@ -149,7 +154,7 @@ if IS_WINDOWS:
             ("mouseData", wintypes.DWORD),
             ("dwFlags", wintypes.DWORD),
             ("time", wintypes.DWORD),
-            ("dwExtraInfo", wintypes.ULONG_PTR),
+            ("dwExtraInfo", _ULONG_PTR),
         ]
 
     class _KEYBDINPUT(ctypes.Structure):
@@ -158,7 +163,7 @@ if IS_WINDOWS:
             ("wScan", wintypes.WORD),
             ("dwFlags", wintypes.DWORD),
             ("time", wintypes.DWORD),
-            ("dwExtraInfo", wintypes.ULONG_PTR),
+            ("dwExtraInfo", _ULONG_PTR),
         ]
 
     class _INPUT_UNION(ctypes.Union):
@@ -189,7 +194,7 @@ if IS_WINDOWS:
                         scan_code,
                         flags,
                         0,
-                        wintypes.ULONG_PTR(0),
+                        _ULONG_PTR(0),
                     )
                 ),
             )
@@ -205,7 +210,7 @@ if IS_WINDOWS:
                         delta,
                         _MOUSEEVENTF_WHEEL,
                         0,
-                        wintypes.ULONG_PTR(0),
+                        _ULONG_PTR(0),
                     )
                 ),
             )
