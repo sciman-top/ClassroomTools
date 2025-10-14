@@ -5,6 +5,7 @@ import base64
 import configparser
 import contextlib
 import ctypes
+from ctypes import wintypes as _wintypes  # type: ignore[attr-defined]
 import importlib
 import io
 import json
@@ -38,6 +39,9 @@ from typing import (
     Union,
 )
 
+if sys.platform != "win32":
+    _wintypes = None  # type: ignore[assignment]
+
 from PyQt6.QtCore import (
     QByteArray,
     QPoint,
@@ -65,6 +69,7 @@ from PyQt6.QtGui import (
     QPen,
     QPixmap,
     QKeyEvent,
+    QWheelEvent,
     QResizeEvent,
     QScreen,
 )
@@ -1697,6 +1702,257 @@ class FloatingToolbar(QWidget):
 
 
 # ---------- 叠加层（画笔/白板） ----------
+if _wintypes is not None:
+
+    class _MONITORINFO(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", _wintypes.DWORD),
+            ("rcMonitor", _wintypes.RECT),
+            ("rcWork", _wintypes.RECT),
+            ("dwFlags", _wintypes.DWORD),
+        ]
+
+
+class PresentationController:
+    """Forward wheel and navigation keys to fullscreen presentation windows."""
+
+    _SUPPORTED_PROCESSES = {"powerpnt.exe", "wpp.exe"}
+    _EXTENDED_KEYS = {0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28}
+    _KEY_MAPPING = {
+        Qt.Key.Key_PageUp: 0x21,
+        Qt.Key.Key_PageDown: 0x22,
+        Qt.Key.Key_Left: 0x25,
+        Qt.Key.Key_Up: 0x26,
+        Qt.Key.Key_Right: 0x27,
+        Qt.Key.Key_Down: 0x28,
+    }
+
+    def __init__(self) -> None:
+        self._available = sys.platform == "win32" and _wintypes is not None
+        self._user32 = ctypes.windll.user32 if self._available else None
+        self._kernel32 = ctypes.windll.kernel32 if self._available else None
+        self._psapi = ctypes.windll.psapi if self._available else None
+        self._target_hwnd: int = 0
+        self._target_pid: int = 0
+        self._target_process: str = ""
+
+    # ---- Target discovery -------------------------------------------------
+    def capture_active_presentation(self) -> bool:
+        if not self._available:
+            return False
+        hwnd = int(self._user32.GetForegroundWindow())
+        pid = _wintypes.DWORD()
+        if hwnd:
+            self._user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            process = self._get_process_name(pid.value)
+            if self._is_supported_process(process) and self._is_fullscreen_window(hwnd):
+                self._set_target(hwnd, pid.value, process)
+                return True
+        hwnd, pid_value, process = self._find_any_fullscreen_presentation()
+        if hwnd:
+            self._set_target(hwnd, pid_value, process)
+            return True
+        self.clear_target()
+        return False
+
+    def ensure_target(self) -> bool:
+        if not self._available:
+            return False
+        if self._target_hwnd and self._user32.IsWindow(self._target_hwnd):
+            return True
+        if self._target_pid:
+            hwnd = self._find_fullscreen_window_for_pid(self._target_pid)
+            if hwnd:
+                self._target_hwnd = hwnd
+                return True
+        hwnd, pid_value, process = self._find_any_fullscreen_presentation()
+        if hwnd:
+            self._set_target(hwnd, pid_value, process)
+            return True
+        self.clear_target()
+        return False
+
+    def clear_target(self) -> None:
+        self._target_hwnd = 0
+        self._target_pid = 0
+        self._target_process = ""
+
+    # ---- Event handling ---------------------------------------------------
+    def handle_wheel_event(self, event: QWheelEvent) -> bool:
+        if not self._available:
+            return False
+        delta = event.angleDelta().y()
+        if not delta:
+            delta = event.pixelDelta().y()
+        if delta == 0:
+            return False
+        vk_code = 0x21 if delta > 0 else 0x22
+        if not self.ensure_target():
+            return False
+        if self._send_virtual_key(vk_code):
+            event.accept()
+            return True
+        return False
+
+    def handle_key_event(self, event: QKeyEvent) -> bool:
+        if not self._available:
+            return False
+        if event.isAutoRepeat():
+            return False
+        if event.modifiers() not in (Qt.KeyboardModifier.NoModifier, Qt.KeyboardModifier.KeypadModifier):
+            return False
+        vk_code = self._KEY_MAPPING.get(event.key())
+        if vk_code is None:
+            return False
+        if not self.ensure_target():
+            return False
+        if self._send_virtual_key(vk_code):
+            event.accept()
+            return True
+        return False
+
+    # ---- Internal helpers -------------------------------------------------
+    def _set_target(self, hwnd: int, pid: int, process: str) -> None:
+        self._target_hwnd = hwnd
+        self._target_pid = pid
+        self._target_process = process
+
+    def _is_supported_process(self, name: str) -> bool:
+        return name.lower() in self._SUPPORTED_PROCESSES
+
+    def _find_fullscreen_window_for_pid(self, pid: int) -> int:
+        result = {"hwnd": 0}
+
+        if not self._available:
+            return 0
+
+        @ctypes.WINFUNCTYPE(ctypes.c_bool, _wintypes.HWND, _wintypes.LPARAM)
+        def enum_callback(hwnd, _lparam):
+            if not self._is_candidate_window(hwnd):
+                return True
+            current_pid = _wintypes.DWORD()
+            self._user32.GetWindowThreadProcessId(hwnd, ctypes.byref(current_pid))
+            if current_pid.value != pid:
+                return True
+            if self._is_fullscreen_window(hwnd):
+                result["hwnd"] = int(hwnd)
+                return False
+            return True
+
+        self._user32.EnumWindows(enum_callback, 0)
+        return result["hwnd"]
+
+    def _find_any_fullscreen_presentation(self) -> Tuple[int, int, str]:
+        if not self._available:
+            return 0, 0, ""
+        result = {"hwnd": 0, "pid": 0, "process": ""}
+
+        @ctypes.WINFUNCTYPE(ctypes.c_bool, _wintypes.HWND, _wintypes.LPARAM)
+        def enum_callback(hwnd, _lparam):
+            if not self._is_candidate_window(hwnd):
+                return True
+            pid = _wintypes.DWORD()
+            self._user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            process = self._get_process_name(pid.value)
+            if not self._is_supported_process(process):
+                return True
+            if not self._is_fullscreen_window(hwnd):
+                return True
+            result["hwnd"] = int(hwnd)
+            result["pid"] = pid.value
+            result["process"] = process
+            return False
+
+        self._user32.EnumWindows(enum_callback, 0)
+        return result["hwnd"], result["pid"], result["process"]
+
+    def _is_candidate_window(self, hwnd: int) -> bool:
+        if not self._available:
+            return False
+        if not self._user32.IsWindowVisible(hwnd):
+            return False
+        style = self._user32.GetWindowLongW(hwnd, -16)
+        WS_DISABLED = 0x08000000
+        WS_EX_TOOLWINDOW = 0x00000080
+        ex_style = self._user32.GetWindowLongW(hwnd, -20)
+        if style & WS_DISABLED:
+            return False
+        if ex_style & WS_EX_TOOLWINDOW:
+            return False
+        return True
+
+    def _is_fullscreen_window(self, hwnd: int) -> bool:
+        if not self._available:
+            return False
+        rect = _wintypes.RECT()
+        if not self._user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            return False
+        width = rect.right - rect.left
+        height = rect.bottom - rect.top
+        if width <= 0 or height <= 0:
+            return False
+        MONITOR_DEFAULTTONEAREST = 2
+        monitor = self._user32.MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)
+        if monitor:
+            info = _MONITORINFO()
+            info.cbSize = ctypes.sizeof(_MONITORINFO)
+            if self._user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+                monitor_width = info.rcMonitor.right - info.rcMonitor.left
+                monitor_height = info.rcMonitor.bottom - info.rcMonitor.top
+                if (
+                    abs(width - monitor_width) <= 4
+                    and abs(height - monitor_height) <= 4
+                ):
+                    return True
+        screen_w = self._user32.GetSystemMetrics(0)
+        screen_h = self._user32.GetSystemMetrics(1)
+        return width >= screen_w - 4 and height >= screen_h - 4
+
+    def _get_process_name(self, pid: int) -> str:
+        if not self._available or pid <= 0:
+            return ""
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        PROCESS_VM_READ = 0x0010
+        access = PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ
+        handle = self._kernel32.OpenProcess(access, False, pid)
+        if not handle:
+            return ""
+        try:
+            buffer_length = 32768
+            buffer = ctypes.create_unicode_buffer(buffer_length)
+            size = _wintypes.DWORD(buffer_length)
+            process_name = ""
+            query_full = getattr(self._kernel32, "QueryFullProcessImageNameW", None)
+            if query_full:
+                if query_full(handle, 0, buffer, ctypes.byref(size)):
+                    process_name = buffer.value[: size.value]
+            if not process_name and self._psapi:
+                if self._psapi.GetModuleFileNameExW(handle, None, buffer, buffer_length):
+                    process_name = buffer.value
+            return os.path.basename(process_name).lower()
+        finally:
+            self._kernel32.CloseHandle(handle)
+
+    def _send_virtual_key(self, vk_code: int) -> bool:
+        if not self._available or not self._target_hwnd:
+            return False
+        if not self._user32.IsWindow(self._target_hwnd):
+            return False
+        scan_code = self._user32.MapVirtualKeyW(vk_code, 0)
+        lparam_down = 1 | (scan_code << 16)
+        lparam_up = 1 | (scan_code << 16) | (1 << 30) | (1 << 31)
+        if vk_code in self._EXTENDED_KEYS:
+            extended_flag = 1 << 24
+            lparam_down |= extended_flag
+            lparam_up |= extended_flag
+        WM_KEYDOWN = 0x0100
+        WM_KEYUP = 0x0101
+        if not self._user32.PostMessageW(self._target_hwnd, WM_KEYDOWN, vk_code, lparam_down):
+            return False
+        self._user32.PostMessageW(self._target_hwnd, WM_KEYUP, vk_code, lparam_up)
+        return True
+
+
 class OverlayWindow(QWidget):
     def __init__(self, settings_manager: SettingsManager) -> None:
         super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
@@ -1749,6 +2005,7 @@ class OverlayWindow(QWidget):
         self._eraser_stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
         self._eraser_stroker.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         self._eraser_stroker_width = 0.0
+        self.presentation_controller = PresentationController()
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)
 
@@ -1815,11 +2072,12 @@ class OverlayWindow(QWidget):
         self._brush_shadow_pen.setWidthF(width * 1.25)
 
     def show_overlay(self) -> None:
+        self.presentation_controller.capture_active_presentation()
         self.show(); self.toolbar.show(); self.raise_toolbar()
         self.set_mode(self.mode, self.current_shape)
 
     def hide_overlay(self) -> None:
-        self.hide(); self.toolbar.hide()
+        self.hide(); self.toolbar.hide(); self.presentation_controller.clear_target()
         self.save_settings(); self.save_window_position()
 
     def open_pen_settings(self) -> None:
@@ -2126,7 +2384,14 @@ class OverlayWindow(QWidget):
     def keyPressEvent(self, e: QKeyEvent) -> None:
         if e.key() == Qt.Key.Key_Escape:
             self.set_mode("cursor"); return
+        if self.presentation_controller.handle_key_event(e):
+            return
         super().keyPressEvent(e)
+
+    def wheelEvent(self, e: QWheelEvent) -> None:
+        if self.presentation_controller.handle_wheel_event(e):
+            return
+        super().wheelEvent(e)
 
     def _draw_brush_line(self, cur: QPointF) -> Optional[QRectF]:
         now = time.time()
