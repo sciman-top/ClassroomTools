@@ -141,6 +141,7 @@ if IS_WINDOWS:
     _MAPVK_VK_TO_VSC = 0
     _WHEEL_DELTA = 120
     _USER32 = ctypes.windll.user32
+    _KERNEL32 = ctypes.windll.kernel32
 
     if hasattr(wintypes, "ULONG_PTR"):
         _ULONG_PTR = wintypes.ULONG_PTR
@@ -182,6 +183,81 @@ if IS_WINDOWS:
         """发送键盘/鼠标指令到系统，便于控制课件翻页。"""
 
         _KEY_MAP = _NAVIGATION_KEY_MAP
+        _overlay_hwnd: int = 0
+        _target_hwnd: int = 0
+
+        @staticmethod
+        def _normalize_hwnd(hwnd: Optional[int]) -> int:
+            if hwnd is None:
+                return 0
+            try:
+                value = int(hwnd)
+            except (TypeError, ValueError):
+                return 0
+            return value if value > 0 else 0
+
+        @classmethod
+        def register_overlay_hwnd(cls, hwnd: Optional[int]) -> None:
+            cls._overlay_hwnd = cls._normalize_hwnd(hwnd)
+
+        @classmethod
+        def prepare_overlay_focus(cls, overlay_hwnd: Optional[int]) -> None:
+            cls.register_overlay_hwnd(overlay_hwnd)
+            foreground = _USER32.GetForegroundWindow()
+            if foreground and foreground != cls._overlay_hwnd:
+                cls._target_hwnd = foreground
+
+        @classmethod
+        def clear_target_window(cls) -> None:
+            cls._target_hwnd = 0
+
+        @staticmethod
+        def _is_window(hwnd: int) -> bool:
+            return bool(hwnd) and bool(_USER32.IsWindow(hwnd))
+
+        @classmethod
+        def _activate_window(cls, hwnd: int) -> bool:
+            if not cls._is_window(hwnd):
+                return False
+            current = _USER32.GetForegroundWindow()
+            if current == hwnd:
+                return True
+            current_thread = _KERNEL32.GetCurrentThreadId()
+            target_thread = _USER32.GetWindowThreadProcessId(hwnd, None)
+            attached_threads: List[int] = []
+            attached_set: Set[int] = set()
+            if current:
+                fg_thread = _USER32.GetWindowThreadProcessId(current, None)
+                if fg_thread and fg_thread != current_thread:
+                    if _USER32.AttachThreadInput(current_thread, fg_thread, True):
+                        attached_threads.append(fg_thread)
+                        attached_set.add(fg_thread)
+            if target_thread and target_thread != current_thread and target_thread not in attached_set:
+                if _USER32.AttachThreadInput(current_thread, target_thread, True):
+                    attached_threads.append(target_thread)
+                    attached_set.add(target_thread)
+            result = bool(_USER32.SetForegroundWindow(hwnd))
+            while attached_threads:
+                thread_id = attached_threads.pop()
+                _USER32.AttachThreadInput(current_thread, thread_id, False)
+            return result
+
+        @classmethod
+        def _dispatch_inputs(cls, inputs: List[_INPUT]) -> bool:
+            if not inputs:
+                return False
+            target_hwnd = cls._target_hwnd if cls._is_window(cls._target_hwnd) else 0
+            overlay_hwnd = cls._overlay_hwnd if cls._is_window(cls._overlay_hwnd) else 0
+            activated_target = False
+            if target_hwnd:
+                activated_target = cls._activate_window(target_hwnd)
+                if not activated_target:
+                    cls._target_hwnd = 0
+                    return False
+            success = cls._send_inputs(inputs)
+            if activated_target and overlay_hwnd:
+                cls._activate_window(overlay_hwnd)
+            return success if activated_target else False
 
         @staticmethod
         def _build_keyboard_input(vk: int, flags: int) -> _INPUT:
@@ -247,7 +323,7 @@ if IS_WINDOWS:
                 cls._build_keyboard_input(vk, 0),
                 cls._build_keyboard_input(vk, _KEYEVENTF_KEYUP),
             ]
-            return cls._send_inputs(inputs)
+            return cls._dispatch_inputs(inputs)
 
         @classmethod
         def send_wheel(cls, delta: int) -> bool:
@@ -255,7 +331,7 @@ if IS_WINDOWS:
             if not steps:
                 return False
             inputs = [cls._build_wheel_input(step) for step in steps]
-            return cls._send_inputs(inputs)
+            return cls._dispatch_inputs(inputs)
 
 else:
 
@@ -263,6 +339,18 @@ else:
         """非 Windows 平台下不做任何系统输入模拟。"""
 
         _KEY_MAP = _NAVIGATION_KEY_MAP
+
+        @classmethod
+        def register_overlay_hwnd(cls, hwnd: Optional[int]) -> None:
+            return None
+
+        @classmethod
+        def prepare_overlay_focus(cls, overlay_hwnd: Optional[int]) -> None:
+            return None
+
+        @classmethod
+        def clear_target_window(cls) -> None:
+            return None
 
         @classmethod
         def send_navigation_key(cls, key: int) -> bool:
@@ -1905,6 +1993,8 @@ class OverlayWindow(QWidget):
         self._eraser_stroker_width = 0.0
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)
+        if IS_WINDOWS:
+            SystemInputSimulator.register_overlay_hwnd(int(self.winId()))
 
         self._build_scene()
         self.history: List[QPixmap] = []
@@ -1973,6 +2063,8 @@ class OverlayWindow(QWidget):
         self.set_mode(self.mode, self.current_shape)
 
     def hide_overlay(self) -> None:
+        if IS_WINDOWS:
+            SystemInputSimulator.clear_target_window()
         self.hide(); self.toolbar.hide()
         self.save_settings(); self.save_window_position()
 
@@ -2135,9 +2227,13 @@ class OverlayWindow(QWidget):
         if initial:
             return
         if not passthrough:
+            if IS_WINDOWS:
+                SystemInputSimulator.prepare_overlay_focus(int(self.winId()))
             self.show(); self.raise_()
             self.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
         else:
+            if IS_WINDOWS:
+                SystemInputSimulator.clear_target_window()
             if not self.isVisible():
                 self.show()
 
