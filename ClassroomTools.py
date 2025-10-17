@@ -65,9 +65,12 @@ VK_UP = getattr(win32con, "VK_UP", 0x26)
 VK_DOWN = getattr(win32con, "VK_DOWN", 0x28)
 VK_LEFT = getattr(win32con, "VK_LEFT", 0x25)
 VK_RIGHT = getattr(win32con, "VK_RIGHT", 0x27)
+VK_PRIOR = getattr(win32con, "VK_PRIOR", 0x21)
+VK_NEXT = getattr(win32con, "VK_NEXT", 0x22)
 KEYEVENTF_EXTENDEDKEY = getattr(win32con, "KEYEVENTF_EXTENDEDKEY", 0x0001)
 KEYEVENTF_KEYUP = getattr(win32con, "KEYEVENTF_KEYUP", 0x0002)
 _NAVIGATION_EXTENDED_KEYS = {VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT}
+WHEEL_DELTA = getattr(win32con, "WHEEL_DELTA", 120)
 
 if _USER32 is not None:
     _WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
@@ -213,6 +216,7 @@ from PyQt6.QtGui import (
     QResizeEvent,
     QScreen,
     QWheelEvent,
+    QAction,
 )
 from PyQt6.QtWidgets import (
     QApplication,
@@ -1216,6 +1220,8 @@ class SettingsManager:
                 "geometry": "480x280+180+180",
                 "show_id": "True",
                 "show_name": "True",
+                "show_photo": "False",
+                "photo_duration_seconds": "0",
                 "speech_enabled": "False",
                 "speech_voice_id": "",
                 "current_group": "全部",
@@ -1786,8 +1792,10 @@ class FloatingToolbar(QWidget):
         for color_hex, button in zip([c for c, _ in brush_configs], brush_buttons):
             button.clicked.connect(lambda _checked, c=color_hex: self.overlay.use_brush_color(c))
         self.btn_shape.clicked.connect(self._select_shape)
-        self.btn_slide_down.clicked.connect(self.overlay.go_to_next_slide)
-        self.btn_slide_up.clicked.connect(self.overlay.go_to_previous_slide)
+        self.btn_slide_down.pressed.connect(lambda: self.overlay.handle_navigation_button_press("down"))
+        self.btn_slide_down.released.connect(self.overlay.handle_navigation_button_release)
+        self.btn_slide_up.pressed.connect(lambda: self.overlay.handle_navigation_button_press("up"))
+        self.btn_slide_up.released.connect(self.overlay.handle_navigation_button_release)
         self.btn_undo.clicked.connect(self.overlay.undo_last_action)
         self.btn_eraser.clicked.connect(self.overlay.toggle_eraser_mode)
         self.btn_clear_all.clicked.connect(self.overlay.clear_all)
@@ -1869,6 +1877,10 @@ class FloatingToolbar(QWidget):
         self.overlay.raise_toolbar()
         super().enterEvent(event)
 
+    def leaveEvent(self, event) -> None:
+        super().leaveEvent(event)
+        QTimer.singleShot(0, self.overlay.on_toolbar_mouse_leave)
+
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
         ensure_widget_within_screen(self)
@@ -1880,10 +1892,19 @@ class FloatingToolbar(QWidget):
 class _PresentationForwarder:
     """在绘图模式下将特定输入事件转发给下层演示窗口。"""
 
-    __slots__ = ("overlay", "_last_target_hwnd", "_child_buffer")
+    __slots__ = (
+        "overlay",
+        "_last_target_hwnd",
+        "_last_target_role",
+        "_last_detected_role",
+        "_child_buffer",
+        "_self_pid",
+        "_injecting_wheel",
+    )
 
     _SMTO_ABORTIFHUNG = 0x0002
     _MAX_CHILD_FORWARDS = 32
+    _INPUT_MOUSE = 0
     _INPUT_KEYBOARD = 1
     _KEYEVENTF_EXTENDEDKEY = 0x0001
     _KEYEVENTF_KEYUP = 0x0002
@@ -1921,10 +1942,24 @@ class _PresentationForwarder:
                     ]
                 },
             )
+            _MouseInput = type(
+                "_MouseInput",
+                (ctypes.Structure,),
+                {
+                    "_fields_": [
+                        ("dx", wintypes.LONG),
+                        ("dy", wintypes.LONG),
+                        ("mouseData", wintypes.DWORD),
+                        ("dwFlags", wintypes.DWORD),
+                        ("time", wintypes.DWORD),
+                        ("dwExtraInfo", wintypes.ULONG_PTR),
+                    ]
+                },
+            )
             _InputUnion = type(
                 "_InputUnion",
                 (ctypes.Union,),
-                {"_fields_": [("ki", _KeyboardInput)]},
+                {"_fields_": [("ki", _KeyboardInput), ("mi", _MouseInput)]},
             )
             _Input = type(
                 "_Input",
@@ -1947,29 +1982,37 @@ class _PresentationForwarder:
             _fields_: List[Tuple[str, Any]] = []
 
         _KeyboardInput = None  # type: ignore[assignment]
+        _MouseInput = None  # type: ignore[assignment]
         _InputUnion = None  # type: ignore[assignment]
         _Input = None  # type: ignore[assignment]
 
+    _SLIDESHOW_PRIORITY_CLASSES: Set[str] = {"screenclass"}
+    _SLIDESHOW_SECONDARY_CLASSES: Set[str] = {
+        "pptviewwndclass",
+        "kwppshowframeclass",
+        "kwppshowframe",
+        "kwppshowwndclass",
+        "kwpsshowframe",
+    }
+    _SLIDESHOW_PREFIXES: Tuple[str, ...] = ("kwppshow", "kwpsshow", "pptslideshow", "mspptslideshow")
+    _DOCUMENT_WINDOW_CLASSES: Set[str] = {
+        "opusapp",
+        "kwpsmainframe",
+        "kwpsframeclass",
+        "wpsframeclass",
+        "wpsmainframe",
+        "wpsframewindow",
+    }
+    _DOCUMENT_WINDOW_PREFIXES: Tuple[str, ...] = ("opusapp", "kwps", "wpsframe", "wpsmain")
     _KNOWN_PRESENTATION_CLASSES: Set[str] = (
-        {
-            "screenclass",
-            "pptframeclass",
-            "pptviewwndclass",
-            "powerpntframeclass",
-            "powerpointframeclass",
-            "opusapp",
-            "acrobatsdiwindow",
-            "kwppframeclass",
-            "kwppmainframe",
-            "kwpsframeclass",
-            "wpsframeclass",
-            "wpsmainframe",
-        }
+        _SLIDESHOW_PRIORITY_CLASSES
+        | _SLIDESHOW_SECONDARY_CLASSES
+        | _DOCUMENT_WINDOW_CLASSES
         if win32gui is not None
         else set()
     )
     _KNOWN_PRESENTATION_PREFIXES: Tuple[str, ...] = (
-        ("kwpp", "kwps", "wpsframe", "wpsmain") if win32gui is not None else tuple()
+        _SLIDESHOW_PREFIXES + _DOCUMENT_WINDOW_PREFIXES if win32gui is not None else tuple()
     )
     _KEY_FORWARD_MAP: Dict[int, int] = (
         {
@@ -1982,6 +2025,16 @@ class _PresentationForwarder:
             int(Qt.Key.Key_Space): win32con.VK_SPACE,
             int(Qt.Key.Key_Return): win32con.VK_RETURN,
             int(Qt.Key.Key_Enter): win32con.VK_RETURN,
+        }
+        if win32con is not None
+        else {}
+    )
+    _DOCUMENT_NAVIGATION_KEYS: Dict[int, int] = (
+        {
+            VK_UP: WHEEL_DELTA,
+            VK_PRIOR: WHEEL_DELTA,
+            VK_DOWN: -WHEEL_DELTA,
+            VK_NEXT: -WHEEL_DELTA,
         }
         if win32con is not None
         else {}
@@ -2004,7 +2057,11 @@ class _PresentationForwarder:
     def __init__(self, overlay: "OverlayWindow") -> None:
         self.overlay = overlay
         self._last_target_hwnd: Optional[int] = None
+        self._last_target_role: Optional[str] = None
+        self._last_detected_role: Optional[str] = None
         self._child_buffer: List[int] = []
+        self._self_pid = os.getpid()
+        self._injecting_wheel = False
 
     def _log_debug(self, message: str, *args: Any) -> None:
         if logger.isEnabledFor(logging.DEBUG):
@@ -2012,6 +2069,85 @@ class _PresentationForwarder:
 
     def clear_cached_target(self) -> None:
         self._last_target_hwnd = None
+        self._last_target_role = None
+        self._last_detected_role = None
+
+    def _window_class_name(self, hwnd: int) -> str:
+        if hwnd == 0:
+            return ""
+        if win32gui is not None:
+            try:
+                return win32gui.GetClassName(hwnd).strip().lower()
+            except Exception:
+                return ""
+        return _user32_window_class_name(hwnd)
+
+    def _is_slideshow_class(self, class_name: str) -> bool:
+        if not class_name:
+            return False
+        if class_name in self._SLIDESHOW_PRIORITY_CLASSES:
+            return True
+        if class_name in self._SLIDESHOW_SECONDARY_CLASSES:
+            return True
+        if any(class_name.startswith(prefix) for prefix in self._SLIDESHOW_PREFIXES):
+            return True
+        return False
+
+    def _is_document_class(self, class_name: str) -> bool:
+        if not class_name:
+            return False
+        if class_name in self._DOCUMENT_WINDOW_CLASSES:
+            return True
+        return any(class_name.startswith(prefix) for prefix in self._DOCUMENT_WINDOW_PREFIXES)
+
+    def _classify_role_from_class_name(self, class_name: str) -> Optional[str]:
+        if not class_name:
+            return None
+        if self._is_slideshow_class(class_name):
+            return "slideshow"
+        if self._is_document_class(class_name):
+            return "document"
+        return None
+
+    def _should_refresh_cached_target(self, hwnd: int) -> bool:
+        if self._last_target_role == "document":
+            return True
+        class_name = self._window_class_name(hwnd)
+        return not self._is_slideshow_class(class_name)
+
+    def _set_cached_target(self, hwnd: int, role: Optional[str]) -> None:
+        self._last_target_hwnd = hwnd
+        resolved_role = role or self._classify_role_from_class_name(self._window_class_name(hwnd))
+        self._last_target_role = resolved_role
+        self._last_detected_role = resolved_role
+
+    def get_presentation_target(self) -> Optional[int]:
+        hwnd = self._resolve_presentation_target()
+        if hwnd:
+            return hwnd
+        return self._detect_presentation_window()
+
+    def bring_target_to_foreground(self, hwnd: int) -> bool:
+        if hwnd == 0:
+            return False
+        activated = False
+        attach_pair = self._attach_to_target_thread(hwnd)
+        try:
+            activated = self._activate_window_for_input(hwnd)
+            if win32gui is not None:
+                try:
+                    win32gui.SetForegroundWindow(hwnd)
+                    activated = True
+                except Exception:
+                    pass
+        finally:
+            self._detach_from_target_thread(attach_pair)
+        if activated:
+            role = self._last_target_role or self._classify_role_from_class_name(
+                self._window_class_name(hwnd)
+            )
+            self._set_cached_target(hwnd, role)
+        return activated
 
     # ---- 公共接口 ----
     def focus_presentation_window(self) -> bool:
@@ -2028,12 +2164,18 @@ class _PresentationForwarder:
         finally:
             self._detach_from_target_thread(attach_pair)
         if activated:
-            self._last_target_hwnd = target
+            self._set_cached_target(
+                target,
+                self._last_detected_role or self._classify_role_from_class_name(self._window_class_name(target)),
+            )
         return activated
 
     def forward_wheel(self, event: QWheelEvent) -> bool:
         if not self._can_forward():
             self.clear_cached_target()
+            return False
+        if self._injecting_wheel:
+            self._injecting_wheel = False
             return False
         delta_vec = event.angleDelta()
         delta = int(delta_vec.y() or delta_vec.x())
@@ -2044,7 +2186,22 @@ class _PresentationForwarder:
             return False
         target = self._resolve_presentation_target()
         if not target:
+            self.clear_cached_target()
             return False
+        role = self._last_target_role or self._classify_role_from_class_name(
+            self._window_class_name(target)
+        )
+        if role == "document":
+            modifiers = self._translate_mouse_modifiers(event) if win32con is not None else 0
+            delivered = self._send_document_wheel(
+                target,
+                delta,
+                modifiers=modifiers,
+                source_event=event,
+            )
+            if not delivered:
+                self.clear_cached_target()
+            return delivered
         keys = self._translate_mouse_modifiers(event)
         delta_word = ctypes.c_short(delta).value & 0xFFFF
         w_param = (ctypes.c_ushort(keys).value & 0xFFFF) | (delta_word << 16)
@@ -2052,10 +2209,22 @@ class _PresentationForwarder:
         x_word = ctypes.c_short(global_pos.x()).value & 0xFFFF
         y_word = ctypes.c_short(global_pos.y()).value & 0xFFFF
         l_param = x_word | (y_word << 16)
-        try:
-            return bool(win32api.PostMessage(target, win32con.WM_MOUSEWHEEL, w_param, l_param))
-        except Exception:
-            return False
+        with self._keyboard_capture_guard():
+            focus_ok = self.bring_target_to_foreground(target)
+            if not focus_ok:
+                focus_ok = self._activate_window_for_input(target)
+            try:
+                delivered = bool(win32api.PostMessage(target, win32con.WM_MOUSEWHEEL, w_param, l_param))
+            except Exception:
+                delivered = False
+            if not delivered and focus_ok:
+                try:
+                    delivered = bool(win32api.PostMessage(target, win32con.WM_MOUSEWHEEL, w_param, l_param))
+                except Exception:
+                    delivered = False
+        if not delivered:
+            self.clear_cached_target()
+        return delivered
 
     def forward_key(self, event: QKeyEvent, *, is_press: bool) -> bool:
         if not self._can_forward():
@@ -2067,7 +2236,21 @@ class _PresentationForwarder:
         target = self._resolve_presentation_target()
         if not target:
             self._log_debug("forward_key: target window not found for key=%s", event.key())
+            self.clear_cached_target()
             return False
+        role = self._last_target_role or self._classify_role_from_class_name(
+            self._window_class_name(target)
+        )
+        if role == "document":
+            delta = self._document_nav_delta(vk_code)
+            if delta:
+                if not is_press:
+                    return True
+                delivered = self._send_document_wheel(target, delta)
+                if delivered:
+                    return True
+                self.clear_cached_target()
+                return False
         for hwnd, update_cache in self._iter_key_targets(target):
             if self._send_key_to_window(
                 hwnd, vk_code, event, is_press=is_press, update_cache=update_cache
@@ -2080,6 +2263,7 @@ class _PresentationForwarder:
                 )
                 return True
         self._log_debug("forward_key: delivery failed for key=%s", vk_code)
+        self.clear_cached_target()
         return False
 
     def send_virtual_key(self, vk_code: int) -> bool:
@@ -2091,6 +2275,16 @@ class _PresentationForwarder:
         if not target:
             self._log_debug("send_virtual_key: target not found vk=%s", vk_code)
             return False
+        role = self._last_target_role or self._classify_role_from_class_name(
+            self._window_class_name(target)
+        )
+        if role == "document":
+            delta = self._document_nav_delta(vk_code)
+            if delta:
+                success = self._send_document_wheel(target, delta)
+                if not success:
+                    self.clear_cached_target()
+                return success
         press = release = False
         with self._keyboard_capture_guard():
             attach_pair = self._attach_to_target_thread(target)
@@ -2104,7 +2298,7 @@ class _PresentationForwarder:
                 self._detach_from_target_thread(attach_pair)
         success = press and release
         if success:
-            self._last_target_hwnd = target
+            self._set_cached_target(target, role)
         else:
             self._log_debug(
                 "send_virtual_key: send input failed vk=%s press=%s release=%s",
@@ -2113,6 +2307,23 @@ class _PresentationForwarder:
                 release,
             )
         return success
+
+    def get_last_target_role(self) -> Optional[str]:
+        return self._last_target_role
+
+    def send_document_scroll_for_vk(self, vk_code: int) -> bool:
+        delta = self._document_nav_delta(vk_code)
+        if not delta:
+            return False
+        target = self._resolve_presentation_target()
+        if not target:
+            return False
+        role = self._last_target_role or self._classify_role_from_class_name(
+            self._window_class_name(target)
+        )
+        if role != "document":
+            return False
+        return self._send_document_wheel(target, delta)
 
     # ---- 内部工具方法 ----
     def _can_forward(self) -> bool:
@@ -2223,7 +2434,11 @@ class _PresentationForwarder:
             if callable(capture):
                 def _restore_focus() -> None:
                     try:
-                        capture()
+                        if getattr(self.overlay, "mode", "") != "cursor":
+                            capture()
+                        else:
+                            if getattr(self.overlay, "_keyboard_grabbed", False):
+                                self.overlay._release_keyboard_capture()
                     except Exception:
                         return
                     try:
@@ -2355,6 +2570,101 @@ class _PresentationForwarder:
             sent = 0
         return bool(sent)
 
+    def _send_wheel_input(self, delta: int) -> bool:
+        if (
+            _USER32 is None
+            or self._Input is None
+            or getattr(self, "_MouseInput", None) is None
+            or self._MouseInput is None
+        ):
+            return False
+        mouse_input = self._MouseInput()
+        mouse_input.dx = 0
+        mouse_input.dy = 0
+        try:
+            mouse_input.mouseData = ctypes.c_int(delta).value & 0xFFFFFFFF
+        except Exception:
+            mouse_input.mouseData = ctypes.c_int(delta).value
+        mouse_input.dwFlags = getattr(win32con, "MOUSEEVENTF_WHEEL", 0x0800)
+        mouse_input.time = 0
+        try:
+            mouse_input.dwExtraInfo = 0
+        except Exception:
+            pass
+        input_record = self._Input()
+        input_record.type = self._INPUT_MOUSE
+        try:
+            input_record.data.mi = mouse_input
+        except Exception:
+            return False
+        try:
+            sent = int(_USER32.SendInput(1, ctypes.byref(input_record), ctypes.sizeof(self._Input)))
+        except Exception:
+            sent = 0
+        return bool(sent)
+
+    def _get_cursor_pos(self) -> Optional[Tuple[int, int]]:
+        if win32api is not None:
+            try:
+                pos = win32api.GetCursorPos()
+                if isinstance(pos, tuple) and len(pos) == 2:
+                    return int(pos[0]), int(pos[1])
+            except Exception:
+                pass
+        if _USER32 is not None:
+            pt = wintypes.POINT()
+            try:
+                if _USER32.GetCursorPos(ctypes.byref(pt)):
+                    return int(pt.x), int(pt.y)
+            except Exception:
+                pass
+        return None
+
+    def _set_cursor_pos(self, point: Tuple[int, int]) -> bool:
+        x, y = point
+        if win32api is not None:
+            try:
+                win32api.SetCursorPos((int(x), int(y)))
+                return True
+            except Exception:
+                pass
+        if _USER32 is not None:
+            try:
+                return bool(_USER32.SetCursorPos(int(x), int(y)))
+            except Exception:
+                return False
+        return False
+
+    def _set_overlay_passthrough(self, enable: bool) -> bool:
+        overlay = getattr(self, "overlay", None)
+        if overlay is None:
+            return False
+        method = getattr(overlay, "_apply_input_passthrough", None)
+        if not callable(method):
+            return False
+        try:
+            method(enable)
+        except Exception:
+            return False
+        return True
+
+    def _restore_overlay_interaction(self) -> None:
+        overlay = getattr(self, "overlay", None)
+        if overlay is None:
+            return
+        try:
+            overlay._apply_input_passthrough(False)
+        except Exception:
+            pass
+        try:
+            overlay._ensure_keyboard_capture()
+        except Exception:
+            pass
+        try:
+            QApplication.processEvents()
+        except Exception:
+            pass
+
     def _map_virtual_key(self, vk_code: int) -> int:
         map_vk = getattr(win32api, "MapVirtualKey", None) if win32api is not None else None
         if callable(map_vk):
@@ -2388,6 +2698,27 @@ class _PresentationForwarder:
         for child_hwnd in self._collect_descendant_windows(target):
             for candidate in _push(child_hwnd, cache=False, require_visible=False):
                 yield candidate
+    
+    def _iter_wheel_targets(self, target: int) -> Iterable[int]:
+        seen: Set[int] = set()
+
+        for focus_hwnd in self._gather_thread_focus_handles(target):
+            if focus_hwnd in seen:
+                continue
+            if self._is_keyboard_target(focus_hwnd, require_visible=False):
+                seen.add(focus_hwnd)
+                yield focus_hwnd
+
+        if self._is_keyboard_target(target, require_visible=True) and target not in seen:
+            seen.add(target)
+            yield target
+
+        for child_hwnd in self._collect_descendant_windows(target):
+            if child_hwnd in seen:
+                continue
+            if self._is_keyboard_target(child_hwnd, require_visible=False):
+                seen.add(child_hwnd)
+                yield child_hwnd
 
     def _build_key_lparam(self, vk_code: int, event: QKeyEvent, is_press: bool) -> int:
         repeat_getter = getattr(event, "count", None)
@@ -2546,6 +2877,8 @@ class _PresentationForwarder:
     def _fallback_is_target_window_valid(self, hwnd: int) -> bool:
         if _USER32 is None or hwnd == 0:
             return False
+        if self._belongs_to_current_process(hwnd):
+            return False
         overlay_hwnd = int(self.overlay.winId()) if self.overlay.winId() else 0
         if hwnd == overlay_hwnd:
             return False
@@ -2561,16 +2894,18 @@ class _PresentationForwarder:
     def _fallback_is_candidate_window(self, hwnd: int) -> bool:
         if _USER32 is None or hwnd == 0:
             return False
+        if self._belongs_to_current_process(hwnd):
+            return False
         class_name = _user32_window_class_name(hwnd)
-        if not class_name:
-            return False
-        if class_name in self._KNOWN_PRESENTATION_CLASSES:
-            return True
-        if any(class_name.startswith(prefix) for prefix in self._KNOWN_PRESENTATION_PREFIXES):
-            return True
         rect = _user32_window_rect(hwnd)
-        if not rect:
+        if not class_name or not rect:
             return False
+        class_name = class_name.strip().lower()
+        role = self._classify_role_from_class_name(class_name)
+        if role == "slideshow":
+            return True
+        if role == "document":
+            return self._is_document_window_valid(hwnd, rect=rect, index=0, foreground=None)
         left, top, right, bottom = rect
         width = max(0, right - left)
         height = max(0, bottom - top)
@@ -2585,44 +2920,445 @@ class _PresentationForwarder:
         height_diff = abs(height - o_height)
         return width >= 400 and height >= 300 and width_diff <= 64 and height_diff <= 64
 
-    def _fallback_detect_presentation_window_user32(self) -> Optional[int]:
-        if _USER32 is None:
-            return None
-        overlay_hwnd = int(self.overlay.winId()) if self.overlay.winId() else 0
-        foreground = _user32_get_foreground_window()
-        if foreground and foreground != overlay_hwnd and self._fallback_is_candidate_window(foreground):
-            return foreground
-        if _WNDENUMPROC is None:
-            return None
-        candidates: List[int] = []
-
-        def _enum_callback(hwnd: int, _l_param: int) -> int:
-            if hwnd == overlay_hwnd:
-                return True
-            if not _user32_is_window_visible(hwnd) or _user32_is_window_iconic(hwnd):
-                return True
-            rect = _user32_window_rect(hwnd)
-            if not rect or not self._rect_intersects_overlay(rect):
-                return True
-            candidates.append(int(hwnd))
-            return True
-
-        enum_proc = _WNDENUMPROC(_enum_callback)
+    def _get_window_styles(self, hwnd: int) -> Tuple[Optional[int], Optional[int]]:
+        style: Optional[int] = None
+        ex_style: Optional[int] = None
         try:
-            _USER32.EnumWindows(enum_proc, 0)
+            if win32gui is not None:
+                style = int(win32gui.GetWindowLong(hwnd, getattr(win32con, "GWL_STYLE", -16)))
+                ex_style = int(win32gui.GetWindowLong(hwnd, getattr(win32con, "GWL_EXSTYLE", -20)))
+            elif _USER32 is not None:
+                gwl_style = getattr(win32con, "GWL_STYLE", -16)
+                gwl_exstyle = getattr(win32con, "GWL_EXSTYLE", -20)
+                style = int(_USER32.GetWindowLongW(wintypes.HWND(hwnd), gwl_style))
+                ex_style = int(_USER32.GetWindowLongW(wintypes.HWND(hwnd), gwl_exstyle))
         except Exception:
+            style = style if isinstance(style, int) else None
+            ex_style = ex_style if isinstance(ex_style, int) else None
+        return style, ex_style
+
+    def _has_window_caption(self, hwnd: int) -> Optional[bool]:
+        style, _ = self._get_window_styles(hwnd)
+        if style is None:
             return None
-        for hwnd in candidates:
-            if self._fallback_is_candidate_window(hwnd):
-                return hwnd
-        return None
+        caption_flag = getattr(win32con, "WS_CAPTION", 0x00C00000)
+        return bool(style & caption_flag)
+
+    def _is_topmost_window(self, hwnd: int) -> Optional[bool]:
+        _, ex_style = self._get_window_styles(hwnd)
+        if ex_style is None:
+            return None
+        topmost_flag = getattr(win32con, "WS_EX_TOPMOST", 0x00000008)
+        return bool(ex_style & topmost_flag)
+
+    def _get_window_rect_generic(self, hwnd: int) -> Optional[Tuple[int, int, int, int]]:
+        if win32gui is not None:
+            try:
+                rect = win32gui.GetWindowRect(hwnd)
+                if rect:
+                    return int(rect[0]), int(rect[1]), int(rect[2]), int(rect[3])
+            except Exception:
+                pass
+        return _user32_window_rect(hwnd)
+
+    def _candidate_score(
+        self,
+        hwnd: int,
+        *,
+        class_name: Optional[str] = None,
+        rect: Optional[Tuple[int, int, int, int]] = None,
+    ) -> int:
+        if rect is None:
+            rect = self._get_window_rect_generic(hwnd)
+        if rect is None:
+            return -1
+        left, top, right, bottom = rect
+        width = max(0, right - left)
+        height = max(0, bottom - top)
+        if width == 0 or height == 0:
+            return -1
+        if class_name is None:
+            if win32gui is not None:
+                try:
+                    class_name = win32gui.GetClassName(hwnd)
+                except Exception:
+                    class_name = ""
+            if not class_name:
+                class_name = _user32_window_class_name(hwnd)
+        class_name = (class_name or "").strip().lower()
+
+        score = 0
+        if class_name in self._SLIDESHOW_PRIORITY_CLASSES:
+            score += 400
+        elif self._is_slideshow_class(class_name):
+            if class_name in self._SLIDESHOW_SECONDARY_CLASSES:
+                score += 240
+            else:
+                score += 200
+        elif class_name in self._DOCUMENT_WINDOW_CLASSES:
+            score += 120
+
+        has_caption = self._has_window_caption(hwnd)
+        if has_caption is False:
+            score += 160
+        elif has_caption is True:
+            score -= 40
+
+        is_topmost = self._is_topmost_window(hwnd)
+        if is_topmost:
+            score += 40
+
+        overlay_rect = self._overlay_rect_tuple()
+        if overlay_rect is not None:
+            o_width = max(0, overlay_rect[2] - overlay_rect[0])
+            o_height = max(0, overlay_rect[3] - overlay_rect[1])
+            if o_width > 0 and o_height > 0:
+                width_diff = abs(width - o_width)
+                height_diff = abs(height - o_height)
+                size_penalty = min(width_diff + height_diff, 800)
+                score += max(0, 220 - size_penalty // 2)
+                area = width * height
+                overlay_area = o_width * o_height
+                if overlay_area > 0:
+                    ratio = min(area, overlay_area) / max(area, overlay_area)
+                    score += int(ratio * 120)
+                overlap_x = max(0, min(right, overlay_rect[2]) - max(left, overlay_rect[0]))
+                overlap_y = max(0, min(bottom, overlay_rect[3]) - max(top, overlay_rect[1]))
+                overlap_area = overlap_x * overlap_y
+                if overlap_area > 0 and area > 0:
+                    score += int((overlap_area / area) * 140)
+
+        return score
+
+    def _is_top_level_candidate(self, hwnd: int) -> bool:
+        if hwnd == 0:
+            return False
+        if win32gui is not None:
+            try:
+                if not win32gui.IsWindow(hwnd) or not win32gui.IsWindowVisible(hwnd):
+                    return False
+                if win32gui.IsIconic(hwnd):
+                    return False
+            except Exception:
+                return False
+            return True
+        if _USER32 is None:
+            return False
+        if not _user32_is_window(hwnd):
+            return False
+        if not _user32_is_window_visible(hwnd):
+            return False
+        if _user32_is_window_iconic(hwnd):
+            return False
+        return True
+
+    def _gather_target_candidates(self) -> List[Tuple[int, str, str, Tuple[int, int, int, int]]]:
+        overlay_hwnd = int(self.overlay.winId()) if self.overlay.winId() else 0
+        results: List[Tuple[int, str, str, Tuple[int, int, int, int]]] = []
+        seen: Set[int] = set()
+
+        def _append(hwnd: int) -> None:
+            if hwnd in seen or hwnd == 0:
+                return
+            seen.add(hwnd)
+            if hwnd == overlay_hwnd:
+                return
+            if self._belongs_to_current_process(hwnd):
+                return
+            if not self._is_top_level_candidate(hwnd):
+                return
+            rect = self._get_window_rect_generic(hwnd)
+            if not rect or not self._rect_intersects_overlay(rect):
+                return
+            class_name = self._window_class_name(hwnd)
+            role = self._classify_role_from_class_name(class_name)
+            if role is None:
+                return
+            results.append((hwnd, role, class_name, rect))
+
+        if win32gui is not None:
+            def _enum(hwnd: int, _unused) -> bool:
+                _append(hwnd)
+                return True
+
+            try:
+                win32gui.EnumWindows(_enum, None)
+            except Exception:
+                pass
+        elif _USER32 is not None and _WNDENUMPROC is not None:
+            def _enum(hwnd: int, _l_param: int) -> int:
+                _append(int(hwnd))
+                return True
+
+            try:
+                _USER32.EnumWindows(_WNDENUMPROC(_enum), 0)
+            except Exception:
+                pass
+        return results
+
+    def _is_document_window_valid(
+        self,
+        self_hwnd: int,
+        *,
+        rect: Tuple[int, int, int, int],
+        index: int,
+        foreground: Optional[int],
+    ) -> bool:
+        hwnd = self_hwnd
+        if not self._is_target_window_valid(hwnd):
+            return False
+        if foreground:
+            foreground_top = self._top_level_hwnd(foreground)
+            if foreground_top == 0:
+                foreground_top = foreground
+            if self._top_level_hwnd(hwnd) != foreground_top:
+                return False
+        elif index != 0:
+            return False
+        if not self._is_window_maximized(hwnd):
+            return False
+        left, top, right, bottom = rect
+        width = max(0, right - left)
+        height = max(0, bottom - top)
+        if width < 400 or height < 300:
+            return False
+        return True
+
+    def _document_candidate_score(
+        self,
+        hwnd: int,
+        rect: Tuple[int, int, int, int],
+        index: int,
+    ) -> int:
+        if index != 0:
+            return -1
+        left, top, right, bottom = rect
+        width = max(0, right - left)
+        height = max(0, bottom - top)
+        overlay_rect = self._overlay_rect_tuple()
+        score = 320
+        if overlay_rect is not None:
+            o_width = max(0, overlay_rect[2] - overlay_rect[0])
+            o_height = max(0, overlay_rect[3] - overlay_rect[1])
+            if o_width > 0 and o_height > 0:
+                width_diff = abs(width - o_width)
+                height_diff = abs(height - o_height)
+                size_penalty = min(width_diff + height_diff, 800)
+                score += max(0, 240 - size_penalty // 2)
+                area = width * height
+                overlay_area = o_width * o_height
+                if overlay_area > 0 and area > 0:
+                    ratio = min(area, overlay_area) / max(area, overlay_area)
+                    score += int(ratio * 80)
+        return score
+
+    def _belongs_to_current_process(self, hwnd: int) -> bool:
+        if _USER32 is None or hwnd == 0:
+            return False
+        pid = wintypes.DWORD()
+        try:
+            _USER32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(pid))
+        except Exception:
+            return False
+        return int(pid.value) == self._self_pid
+
+    def _next_window_in_z_order(self, hwnd: int) -> int:
+        if hwnd == 0:
+            return 0
+        if win32gui is not None:
+            command = getattr(win32con, "GW_HWNDNEXT", 2) if win32con is not None else 2
+            try:
+                nxt = win32gui.GetWindow(hwnd, command)
+                if nxt:
+                    return int(nxt)
+            except Exception:
+                pass
+        if _USER32 is not None:
+            command = getattr(win32con, "GW_HWNDNEXT", 2) if win32con is not None else 2
+            try:
+                nxt = _USER32.GetWindow(wintypes.HWND(hwnd), command)
+                if nxt:
+                    return int(nxt)
+            except Exception:
+                pass
+        return 0
+
+    def _effective_foreground_window(self) -> int:
+        overlay_hwnd = int(self.overlay.winId()) if self.overlay.winId() else 0
+        foreground = 0
+        if win32gui is not None:
+            try:
+                fg = win32gui.GetForegroundWindow()
+                if fg:
+                    foreground = int(fg)
+            except Exception:
+                foreground = 0
+        if not foreground:
+            foreground = _user32_get_foreground_window()
+        visited: Set[int] = set()
+        hwnd = foreground
+        while hwnd and hwnd not in visited:
+            visited.add(hwnd)
+            top = self._top_level_hwnd(hwnd)
+            if top == overlay_hwnd or self._belongs_to_current_process(top):
+                hwnd = self._next_window_in_z_order(top)
+                continue
+            if self._is_top_level_candidate(top):
+                return top
+            hwnd = self._next_window_in_z_order(top)
+        return 0
+
+    def _is_window_maximized(self, hwnd: int) -> bool:
+        if win32gui is not None:
+            try:
+                if win32gui.IsZoomed(hwnd):
+                    return True
+            except Exception:
+                pass
+            try:
+                placement = win32gui.GetWindowPlacement(hwnd)
+                if placement and placement[1] == getattr(win32con, "SW_SHOWMAXIMIZED", 3):
+                    return True
+            except Exception:
+                pass
+        if _USER32 is not None:
+            try:
+                if _USER32.IsZoomed(wintypes.HWND(hwnd)):
+                    return True
+            except Exception:
+                pass
+        return False
+
+    def _document_nav_delta(self, vk_code: int) -> int:
+        return self._DOCUMENT_NAVIGATION_KEYS.get(vk_code, 0)
+
+    def _get_default_wheel_point(self, hwnd: int) -> Optional[Tuple[int, int]]:
+        rect = self._get_window_rect_generic(hwnd)
+        if not rect:
+            return None
+        left, top, right, bottom = rect
+        width = max(0, right - left)
+        height = max(0, bottom - top)
+        return left + width // 2, top + height // 2
+
+    def _send_wheel_message(
+        self,
+        hwnd: int,
+        delta: int,
+        *,
+        modifiers: int = 0,
+        point: Optional[Tuple[int, int]] = None,
+    ) -> bool:
+        if hwnd == 0:
+            return False
+        if point is None:
+            point = self._get_default_wheel_point(hwnd)
+            if point is None:
+                return False
+        x, y = point
+        delta_word = ctypes.c_short(delta).value & 0xFFFF
+        w_param = (ctypes.c_ushort(modifiers).value & 0xFFFF) | (delta_word << 16)
+        x_word = ctypes.c_short(int(x)).value & 0xFFFF
+        y_word = ctypes.c_short(int(y)).value & 0xFFFF
+        l_param = x_word | (y_word << 16)
+        delivered = False
+        if win32api is not None and win32con is not None:
+            try:
+                delivered = bool(win32api.PostMessage(hwnd, win32con.WM_MOUSEWHEEL, w_param, l_param))
+            except Exception:
+                delivered = False
+        if not delivered and _USER32 is not None and win32con is not None:
+            result = ctypes.c_size_t()
+            try:
+                sent = _USER32.SendMessageTimeoutW(
+                    hwnd,
+                    win32con.WM_MOUSEWHEEL,
+                    wintypes.WPARAM(w_param),
+                    wintypes.LPARAM(l_param),
+                    self._SMTO_ABORTIFHUNG,
+                    30,
+                    ctypes.byref(result),
+                )
+                delivered = bool(sent)
+            except Exception:
+                delivered = False
+        return delivered
+
+    def _send_document_wheel(
+        self,
+        hwnd: int,
+        delta: int,
+        *,
+        modifiers: int = 0,
+        source_event: Optional[QWheelEvent] = None,
+    ) -> bool:
+        if hwnd == 0:
+            return False
+        point: Optional[Tuple[int, int]] = None
+        if source_event is not None:
+            try:
+                global_pos = source_event.globalPosition().toPoint()
+                point = (int(global_pos.x()), int(global_pos.y()))
+            except Exception:
+                point = None
+        if point is None:
+            point = self._get_default_wheel_point(hwnd)
+        delivered = False
+        passthrough_applied = False
+        original_cursor: Optional[Tuple[int, int]] = None
+        with self._keyboard_capture_guard():
+            focus_ok = self.bring_target_to_foreground(hwnd)
+            if not focus_ok:
+                focus_ok = self._activate_window_for_input(hwnd)
+            attach_pair = self._attach_to_target_thread(hwnd)
+            try:
+                injected = False
+                if focus_ok:
+                    original_cursor = self._get_cursor_pos()
+                    passthrough_applied = self._set_overlay_passthrough(True)
+                    if passthrough_applied:
+                        QApplication.processEvents()
+                    if point is not None:
+                        self._set_cursor_pos(point)
+                    self._injecting_wheel = True
+                    try:
+                        injected = self._send_wheel_input(delta)
+                        if injected:
+                            delivered = True
+                    finally:
+                        if not injected:
+                            self._injecting_wheel = False
+                if not delivered:
+                    for candidate in self._iter_wheel_targets(hwnd):
+                        delivered = self._send_wheel_message(candidate, delta, modifiers=modifiers, point=point)
+                        if delivered:
+                            break
+                if not delivered and point is not None:
+                    delivered = self._send_wheel_message(hwnd, delta, modifiers=modifiers, point=point)
+            finally:
+                self._detach_from_target_thread(attach_pair)
+        if passthrough_applied:
+            self._restore_overlay_interaction()
+        if original_cursor is not None:
+            self._set_cursor_pos(original_cursor)
+        self._injecting_wheel = False
+        if delivered:
+            self._set_cached_target(hwnd, "document")
+        else:
+            self.clear_cached_target()
+        return delivered
+
+    def _fallback_detect_presentation_window_user32(self) -> Optional[int]:
+        return self._detect_presentation_window()
 
     def _is_target_window_valid(self, hwnd: int) -> bool:
+        if hwnd == 0:
+            return False
+        if self._belongs_to_current_process(hwnd):
+            return False
         if win32gui is None:
             return self._fallback_is_target_window_valid(hwnd)
         try:
-            if hwnd == 0:
-                return False
             if hwnd == int(self.overlay.winId()):
                 return False
             if not win32gui.IsWindow(hwnd) or not win32gui.IsWindowVisible(hwnd):
@@ -2639,6 +3375,8 @@ class _PresentationForwarder:
     def _is_candidate_window(self, hwnd: int) -> bool:
         if win32gui is None:
             return self._fallback_is_candidate_window(hwnd)
+        if self._belongs_to_current_process(hwnd):
+            return False
         try:
             class_name = win32gui.GetClassName(hwnd)
         except Exception:
@@ -2646,9 +3384,10 @@ class _PresentationForwarder:
         class_name = class_name.strip().lower()
         if not class_name:
             return False
-        if class_name in self._KNOWN_PRESENTATION_CLASSES:
+        role = self._classify_role_from_class_name(class_name)
+        if role == "slideshow":
             return True
-        if any(class_name.startswith(prefix) for prefix in self._KNOWN_PRESENTATION_PREFIXES):
+        if role == "document":
             return True
         try:
             rect = win32gui.GetWindowRect(hwnd)
@@ -2671,66 +3410,59 @@ class _PresentationForwarder:
         return width >= 400 and height >= 300 and width_diff <= 64 and height_diff <= 64
 
     def _detect_presentation_window(self) -> Optional[int]:
-        if win32gui is None:
-            return self._fallback_detect_presentation_window_user32()
-        overlay_hwnd = int(self.overlay.winId()) if self.overlay.winId() else 0
-        try:
-            foreground = win32gui.GetForegroundWindow()
-        except Exception:
-            foreground = 0
-        if foreground and foreground != overlay_hwnd and self._is_candidate_window(foreground):
-            return foreground
-
-        candidates: List[int] = []
-
-        def _enum_callback(hwnd: int, acc: List[int]) -> bool:
-            if hwnd == overlay_hwnd:
-                return True
-            try:
-                if not win32gui.IsWindowVisible(hwnd) or win32gui.IsIconic(hwnd):
-                    return True
-                rect = win32gui.GetWindowRect(hwnd)
-            except Exception:
-                return True
-            if not rect or not self._rect_intersects_overlay(rect):
-                return True
-            acc.append(hwnd)
-            return True
-
-        try:
-            win32gui.EnumWindows(_enum_callback, candidates)
-        except Exception:
+        candidates = self._gather_target_candidates()
+        foreground_hwnd = self._effective_foreground_window()
+        self._last_detected_role = None
+        if not candidates:
             return None
-        for hwnd in candidates:
-            if self._is_candidate_window(hwnd):
-                return hwnd
+        best_slideshow: Tuple[Optional[int], int] = (None, -1)
+        best_document: Tuple[Optional[int], int] = (None, -1)
+        for index, (hwnd, role, class_name, rect) in enumerate(candidates):
+            if role == "slideshow":
+                score = self._candidate_score(hwnd, class_name=class_name, rect=rect)
+                if score > best_slideshow[1]:
+                    best_slideshow = (hwnd, score)
+            elif role == "document":
+                if not self._is_document_window_valid(
+                    hwnd,
+                    rect=rect,
+                    index=index,
+                    foreground=foreground_hwnd,
+                ):
+                    continue
+                score = self._document_candidate_score(hwnd, rect, index)
+                if score > best_document[1]:
+                    best_document = (hwnd, score)
+        if best_slideshow[0] is not None:
+            self._last_detected_role = "slideshow"
+            return best_slideshow[0]
+        if best_document[0] is not None:
+            self._last_detected_role = "document"
+            return best_document[0]
         return None
 
     def _resolve_presentation_target(self) -> Optional[int]:
-        if win32gui is None:
-            hwnd = self._last_target_hwnd
-            if hwnd and self._fallback_is_target_window_valid(hwnd):
-                return hwnd
-            hwnd = self._fallback_detect_presentation_window_user32()
-            if hwnd and self._fallback_is_target_window_valid(hwnd):
-                self._last_target_hwnd = hwnd
-                return hwnd
-            self._last_target_hwnd = None
-            return None
         hwnd = self._last_target_hwnd
         if hwnd and self._is_target_window_valid(hwnd):
+            if self._should_refresh_cached_target(hwnd):
+                refreshed = self._detect_presentation_window()
+                if refreshed and refreshed != hwnd and self._is_target_window_valid(refreshed):
+                    self._set_cached_target(refreshed, self._last_detected_role)
+                    return refreshed
             return hwnd
-        hwnd = self._detect_presentation_window()
-        if hwnd and self._is_target_window_valid(hwnd):
-            self._last_target_hwnd = hwnd
-            return hwnd
-        self._last_target_hwnd = None
+        refreshed = self._detect_presentation_window()
+        if refreshed and self._is_target_window_valid(refreshed):
+            self._set_cached_target(refreshed, self._last_detected_role)
+            return refreshed
+        self.clear_cached_target()
         return None
 
 
 class OverlayWindow(QWidget):
     _KNOWN_PRESENTATION_CLASSES = _PresentationForwarder._KNOWN_PRESENTATION_CLASSES
     _KNOWN_PRESENTATION_PREFIXES = _PresentationForwarder._KNOWN_PRESENTATION_PREFIXES
+    _SLIDESHOW_PRIORITY_CLASSES = _PresentationForwarder._SLIDESHOW_PRIORITY_CLASSES
+    _SLIDESHOW_SECONDARY_CLASSES = _PresentationForwarder._SLIDESHOW_SECONDARY_CLASSES
 
     def __init__(self, settings_manager: SettingsManager) -> None:
         super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
@@ -2759,6 +3491,12 @@ class OverlayWindow(QWidget):
         self._brush_painter: Optional[QPainter] = None
         self._eraser_painter: Optional[QPainter] = None
         self._last_target_hwnd: Optional[int] = None
+        self._pending_tool_restore: Optional[Tuple[str, Optional[str]]] = None
+        self._scroll_restore_pending = False
+        self._scroll_restore_policy: Optional[str] = None
+        self._scroll_restore_info: Optional[Tuple[str, Optional[str]]] = None
+        self._last_scroll_cursor_inside_toolbar = False
+        self._toolbar_hover_restore: Optional[Tuple[str, Optional[str]]] = None
         base_width = float(max(1, self.pen_size))
         self._brush_pen = QPen(
             self.pen_color,
@@ -2797,6 +3535,14 @@ class OverlayWindow(QWidget):
         self.toolbar = FloatingToolbar(self, self.settings_manager)
         self.set_mode("brush", initial=True)
         self.toolbar.update_undo_state(False)
+        self._nav_repeat_timer = QTimer(self)
+        self._nav_repeat_timer.setInterval(120)
+        self._nav_repeat_timer.timeout.connect(self._on_navigation_repeat_timeout)
+        self._nav_repeat_delay_timer = QTimer(self)
+        self._nav_repeat_delay_timer.setSingleShot(True)
+        self._nav_repeat_delay_timer.setInterval(280)
+        self._nav_repeat_delay_timer.timeout.connect(self._start_navigation_repeat)
+        self._nav_active_vk: Optional[int] = None
 
     def raise_toolbar(self) -> None:
         if getattr(self, "toolbar", None) is not None:
@@ -2903,6 +3649,8 @@ class OverlayWindow(QWidget):
             self._release_canvas_painters()
         focus_on_cursor = bool(self._forwarder) and mode == "cursor" and not initial
         self.mode = mode
+        if not self._restoring_tool:
+            self._pending_tool_restore = None
         if shape_type is not None or mode != "shape":
             self.current_shape = shape_type
         if mode != "shape":
@@ -2938,6 +3686,7 @@ class OverlayWindow(QWidget):
                 self._last_shape_type = self.current_shape
 
     def _restore_last_tool(self, preferred_mode: Optional[str] = None, *, shape_type: Optional[str] = None) -> None:
+        self._pending_tool_restore = None
         if isinstance(self._last_brush_color, QColor) and self._last_brush_color.isValid():
             self.pen_color = QColor(self._last_brush_color)
         if isinstance(self._last_brush_size, int) and self._last_brush_size > 0:
@@ -2982,44 +3731,136 @@ class OverlayWindow(QWidget):
     def go_to_previous_slide(self) -> None:
         self._send_slide_virtual_key(VK_UP)
 
-    def _send_slide_virtual_key(self, vk_code: int) -> None:
+    def _send_slide_virtual_key(self, vk_code: int, *, repeated: bool = False) -> bool:
         if vk_code == 0:
-            return
+            return False
+        if repeated:
+            with self._temporarily_release_keyboard() as had_keyboard_grab:
+                success = self._dispatch_virtual_key(vk_code)
+            if success and self.mode != "cursor" and not had_keyboard_grab:
+                self._ensure_keyboard_capture()
+            if not success:
+                self._pending_tool_restore = None
+            return success
         prev_mode = self.mode
         prev_shape = self.current_shape if prev_mode == "shape" else None
         if prev_mode in {"brush", "shape"}:
             self._update_last_tool_snapshot()
         with self._temporarily_release_keyboard() as had_keyboard_grab:
             success = self._dispatch_virtual_key(vk_code)
+        self._pending_tool_restore = None
         if not success:
-            return
-        if not had_keyboard_grab:
+            return False
+        if not had_keyboard_grab and self.mode != "cursor":
             self._ensure_keyboard_capture()
-        if prev_mode != "cursor":
-            self._restore_last_tool(
-                prev_mode if prev_mode in {"brush", "shape", "eraser"} else None,
-                shape_type=prev_shape,
-            )
+        restore_mode = prev_mode if prev_mode in {"brush", "shape", "eraser"} else None
+        if prev_mode != "cursor" and restore_mode:
+            self._pending_tool_restore = (restore_mode, prev_shape)
         self.raise_toolbar()
+        return True
+
+    def handle_navigation_button_press(self, direction: str) -> None:
+        self._nav_repeat_delay_timer.stop()
+        self._nav_repeat_timer.stop()
+        vk_code = VK_DOWN if direction.lower() == "down" else VK_UP
+        if self._send_slide_virtual_key(vk_code):
+            self._nav_active_vk = vk_code
+            self._nav_repeat_delay_timer.start()
+        else:
+            self._nav_active_vk = None
+            self._nav_repeat_delay_timer.stop()
+            self._nav_repeat_timer.stop()
+
+    def handle_navigation_button_release(self) -> None:
+        self._nav_repeat_delay_timer.stop()
+        self._nav_repeat_timer.stop()
+        self._nav_active_vk = None
+
+    def _start_navigation_repeat(self) -> None:
+        if self._nav_active_vk is None:
+            return
+        if not self._nav_repeat_timer.isActive():
+            self._nav_repeat_timer.start()
+
+    def _on_navigation_repeat_timeout(self) -> None:
+        vk_code = self._nav_active_vk
+        if vk_code is None:
+            self._nav_repeat_timer.stop()
+            return
+        if not self._send_slide_virtual_key(vk_code, repeated=True):
+            self._nav_repeat_timer.stop()
+            self._nav_active_vk = None
 
     def _dispatch_virtual_key(self, vk_code: int) -> bool:
         if vk_code == 0:
             return False
         success = False
         if self._forwarder is not None:
-            if not self._forwarder.focus_presentation_window():
-                self._forwarder.clear_cached_target()
-            success = self._forwarder.send_virtual_key(vk_code)
+            qt_key_map = {
+                VK_UP: Qt.Key.Key_Up,
+                VK_DOWN: Qt.Key.Key_Down,
+                VK_LEFT: Qt.Key.Key_Left,
+                VK_RIGHT: Qt.Key.Key_Right,
+            }
+            qt_key = qt_key_map.get(vk_code)
+            if qt_key is not None:
+                press_event = QKeyEvent(QEvent.Type.KeyPress, qt_key, Qt.KeyboardModifier.NoModifier)
+                release_event = QKeyEvent(QEvent.Type.KeyRelease, qt_key, Qt.KeyboardModifier.NoModifier)
+                press_ok = self._forwarder.forward_key(press_event, is_press=True)
+                release_ok = self._forwarder.forward_key(release_event, is_press=False) if press_ok else False
+                if press_ok and release_ok:
+                    success = True
             if not success:
-                self._forwarder.clear_cached_target()
+                target_hwnd = self._forwarder.get_presentation_target()
+                focus_ok = False
+                if target_hwnd:
+                    try:
+                        focus_ok = self._forwarder.focus_presentation_window()
+                    except Exception:
+                        focus_ok = False
+                    if not focus_ok:
+                        try:
+                            if self._forwarder.bring_target_to_foreground(target_hwnd):
+                                QApplication.processEvents()
+                                time.sleep(0.05)
+                                focus_ok = True
+                        except Exception:
+                            focus_ok = False
+                else:
+                    self._forwarder.clear_cached_target()
+                success = self._forwarder.send_virtual_key(vk_code)
+                if not success and self._forwarder.get_last_target_role() == "document":
+                    success = self._forwarder.send_document_scroll_for_vk(vk_code)
+                if not success:
+                    self._forwarder.clear_cached_target()
         if not success:
             self._focus_presentation_window_fallback()
             success = self._fallback_send_virtual_key(vk_code)
+        if success and self.mode != "cursor":
+            QTimer.singleShot(100, self._ensure_keyboard_capture)
         return success
+
+    def cancel_pending_tool_restore(self) -> None:
+        self._pending_tool_restore = None
+
+    def on_toolbar_mouse_leave(self) -> None:
+        self._nav_repeat_delay_timer.stop()
+        self._nav_repeat_timer.stop()
+        self._nav_active_vk = None
+        if not self._pending_tool_restore:
+            return
+        if getattr(self, "toolbar", None) is not None and self.toolbar.underMouse():
+            return
+        mode, shape = self._pending_tool_restore
+        self._pending_tool_restore = None
+        self._restore_last_tool(mode, shape_type=shape)
 
     def _fallback_send_virtual_key(self, vk_code: int) -> bool:
         if vk_code == 0 or _USER32 is None:
             return False
+        if self._forwarder and self._forwarder.get_last_target_role() == "document":
+            if self._forwarder.send_document_scroll_for_vk(vk_code):
+                return True
         try:
             scan_code = _USER32.MapVirtualKeyW(vk_code, 0) if hasattr(_USER32, "MapVirtualKeyW") else 0
         except Exception:
@@ -3217,6 +4058,29 @@ class OverlayWindow(QWidget):
                 return hwnd
         return None
 
+    def _presentation_window_class(self, hwnd: int) -> str:
+        if hwnd == 0:
+            return ""
+        if win32gui is not None:
+            try:
+                return win32gui.GetClassName(hwnd).strip().lower()
+            except Exception:
+                return ""
+        return _user32_window_class_name(hwnd)
+
+    def _is_preferred_presentation_class(self, class_name: str) -> bool:
+        if not class_name:
+            return False
+        if class_name in self._SLIDESHOW_PRIORITY_CLASSES:
+            return True
+        if class_name in self._SLIDESHOW_SECONDARY_CLASSES:
+            return True
+        return False
+
+    def _should_refresh_cached_presentation_target(self, hwnd: int) -> bool:
+        class_name = self._presentation_window_class(hwnd)
+        return not self._is_preferred_presentation_class(class_name)
+
     def _focus_presentation_window_fallback(self) -> bool:
         if _USER32 is None:
             return False
@@ -3292,6 +4156,15 @@ class OverlayWindow(QWidget):
         if win32gui is None:
             hwnd = self._last_target_hwnd
             if hwnd and self._fallback_is_target_window_valid(hwnd):
+                if self._should_refresh_cached_presentation_target(hwnd):
+                    refreshed = self._fallback_detect_presentation_window_user32()
+                    if (
+                        refreshed
+                        and refreshed != hwnd
+                        and self._fallback_is_target_window_valid(refreshed)
+                    ):
+                        self._last_target_hwnd = refreshed
+                        return refreshed
                 return hwnd
             hwnd = self._fallback_detect_presentation_window_user32()
             if hwnd and self._fallback_is_target_window_valid(hwnd):
@@ -3301,6 +4174,11 @@ class OverlayWindow(QWidget):
             return None
         hwnd = self._last_target_hwnd
         if hwnd and self._is_target_window_valid(hwnd):
+            if self._should_refresh_cached_presentation_target(hwnd):
+                refreshed = self._detect_presentation_window()
+                if refreshed and refreshed != hwnd and self._is_target_window_valid(refreshed):
+                    self._last_target_hwnd = refreshed
+                    return refreshed
             return hwnd
         hwnd = self._detect_presentation_window()
         if hwnd and self._is_target_window_valid(hwnd):
@@ -5044,6 +5922,244 @@ class ClassRollState:
         )
 
 
+class StudentPhotoOverlay(QWidget):
+    closed_by_user = pyqtSignal()
+    auto_closed = pyqtSignal()
+
+    def __init__(self, owner: Optional[QWidget] = None) -> None:
+        flags = (
+            Qt.WindowType.Tool
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+        )
+        super().__init__(None, flags)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._owner = owner
+        self._current_pixmap = QPixmap()
+        self._full_screen_active = False
+        self._auto_close_duration_ms = 0
+        self._auto_close_timer = QTimer(self)
+        self._auto_close_timer.setSingleShot(True)
+        self._auto_close_timer.timeout.connect(self._handle_auto_close)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        self._container = QFrame(self)
+        self._container.setObjectName("studentPhotoContainer")
+        self._container.setStyleSheet(
+            """
+            QFrame#studentPhotoContainer {
+                background-color: rgba(0, 0, 0, 208);
+                border-radius: 16px;
+            }
+            QToolButton {
+                color: #f5f5f5;
+                background-color: rgba(255, 255, 255, 48);
+                border: 1px solid rgba(255, 255, 255, 96);
+                border-radius: 11px;
+                padding: 0;
+            }
+            QToolButton:hover {
+                background-color: rgba(255, 255, 255, 88);
+            }
+            """
+        )
+        outer.addWidget(self._container)
+
+        self._container_layout = QVBoxLayout(self._container)
+        self._container_layout.setContentsMargins(28, 28, 28, 20)
+        self._container_layout.setSpacing(12)
+
+        self._photo_label = QLabel(self._container)
+        self._photo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._photo_label.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum)
+        self._container_layout.addWidget(self._photo_label, 1)
+
+        button_row = QHBoxLayout()
+        button_row.setContentsMargins(0, 0, 0, 0)
+        button_row.setSpacing(0)
+        self._left_close = self._make_close_button()
+        self._right_close = self._make_close_button()
+        button_row.addWidget(self._left_close, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
+        button_row.addStretch(1)
+        button_row.addWidget(self._right_close, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom)
+        self._container_layout.addLayout(button_row)
+
+        self._left_close.clicked.connect(lambda: self._handle_close_request(manual=True))
+        self._right_close.clicked.connect(lambda: self._handle_close_request(manual=True))
+
+    def update_owner(self, owner: Optional[QWidget]) -> None:
+        self._owner = owner
+
+    def _make_close_button(self) -> QToolButton:
+        button = QToolButton(self._container)
+        button.setAutoRaise(True)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setText("X")
+        button.setToolTip("关闭照片")
+        button.setFixedSize(24, 24)
+        return button
+
+    def _handle_close_request(self, *, manual: bool) -> None:
+        self._auto_close_timer.stop()
+        super().hide()
+        if manual:
+            self.closed_by_user.emit()
+        else:
+            self.auto_closed.emit()
+
+    def _handle_auto_close(self) -> None:
+        self._handle_close_request(manual=False)
+
+    def cancel_auto_close(self) -> None:
+        self._auto_close_timer.stop()
+
+    def schedule_auto_close(self, duration_ms: int) -> None:
+        self._auto_close_duration_ms = max(0, int(duration_ms))
+        self._auto_close_timer.stop()
+        if self._auto_close_duration_ms > 0 and self.isVisible():
+            self._auto_close_timer.start(self._auto_close_duration_ms)
+
+    def display_photo(self, pixmap: QPixmap, screen_rect: QRect, duration_ms: int) -> None:
+        if pixmap.isNull():
+            self.hide()
+            return
+
+        self._auto_close_duration_ms = max(0, int(duration_ms))
+        self._auto_close_timer.stop()
+        self._current_pixmap = pixmap
+        max_size = screen_rect.size()
+        original_size = pixmap.size()
+        can_cover_screen = (
+            original_size.width() >= screen_rect.width()
+            and original_size.height() >= screen_rect.height()
+        )
+        full_screen = can_cover_screen
+        if full_screen:
+            scaled = pixmap.scaled(
+                max_size,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        else:
+            if (
+                original_size.width() <= screen_rect.width()
+                and original_size.height() <= screen_rect.height()
+            ):
+                scaled = pixmap
+            else:
+                scaled = pixmap.scaled(
+                    max_size,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+        self._apply_full_screen_style(full_screen)
+        self._photo_label.setPixmap(scaled)
+        self._photo_label.setFixedSize(scaled.size())
+        if full_screen:
+            self.resize(screen_rect.size())
+            self.move(screen_rect.topLeft())
+            self._container.resize(self.size())
+        else:
+            if self.layout() is not None:
+                self.layout().activate()
+            self.adjustSize()
+            window_size = self.size()
+            width = min(window_size.width(), screen_rect.width())
+            height = min(window_size.height(), screen_rect.height())
+            x = screen_rect.x() + max(0, (screen_rect.width() - width) // 2)
+            y = screen_rect.y() + max(0, (screen_rect.height() - height) // 2)
+            self.resize(width, height)
+            self.move(int(x), int(y))
+            self._container.adjustSize()
+        self.show()
+        self._stack_below_owner()
+        self.schedule_auto_close(self._auto_close_duration_ms)
+
+    def _apply_full_screen_style(self, full_screen: bool) -> None:
+        if self._full_screen_active == full_screen:
+            return
+        self._full_screen_active = full_screen
+        if full_screen:
+            self._container_layout.setContentsMargins(24, 24, 24, 32)
+            self._container.setStyleSheet(
+                """
+                QFrame#studentPhotoContainer {
+                    background-color: rgba(0, 0, 0, 230);
+                    border-radius: 0px;
+                }
+                QToolButton {
+                    color: #f5f5f5;
+                    background-color: rgba(255, 255, 255, 48);
+                    border: 1px solid rgba(255, 255, 255, 96);
+                    border-radius: 11px;
+                    padding: 0;
+                }
+                QToolButton:hover {
+                    background-color: rgba(255, 255, 255, 96);
+                }
+                """
+            )
+        else:
+            self._container_layout.setContentsMargins(8, 8, 8, 12)
+            self._container.setStyleSheet(
+                """
+                QFrame#studentPhotoContainer {
+                    background-color: transparent;
+                    border: none;
+                }
+                QToolButton {
+                    color: #f5f5f5;
+                    background-color: rgba(255, 255, 255, 48);
+                    border: 1px solid rgba(255, 255, 255, 96);
+                    border-radius: 11px;
+                    padding: 0;
+                }
+                QToolButton:hover {
+                    background-color: rgba(255, 255, 255, 88);
+                }
+                """
+            )
+
+    def _stack_below_owner(self) -> None:
+        owner = self._owner
+        if owner is None:
+            return
+        try:
+            overlay_hwnd = int(self.winId()) if self.winId() else 0
+            owner_hwnd = int(owner.winId()) if owner.winId() else 0
+        except Exception:
+            overlay_hwnd = 0
+            owner_hwnd = 0
+        if overlay_hwnd == 0 or owner_hwnd == 0:
+            try:
+                owner.raise_()
+            except Exception:
+                pass
+            return
+        if win32gui is not None and win32con is not None:
+            flags = win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE | win32con.SWP_NOOWNERZORDER
+            try:
+                win32gui.SetWindowPos(overlay_hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0, flags)
+                win32gui.SetWindowPos(owner_hwnd, overlay_hwnd, 0, 0, 0, 0, flags)
+            except Exception:
+                logger.debug("win32gui.SetWindowPos failed for photo overlay", exc_info=True)
+        else:
+            try:
+                self.lower()
+                owner.raise_()
+            except Exception:
+                pass
+        try:
+            owner.raise_()
+        except Exception:
+            pass
+
+
 class RollCallTimerWindow(QWidget):
     """集成点名与计时的主功能窗口。"""
     window_closed = pyqtSignal()
@@ -5132,7 +6248,17 @@ class RollCallTimerWindow(QWidget):
 
         self.show_id = str_to_bool(s.get("show_id", "True"), True)
         self.show_name = str_to_bool(s.get("show_name", "True"), True)
-        if not self.show_id and not self.show_name: self.show_id = True
+        self.show_photo = str_to_bool(s.get("show_photo", "False"), False)
+        self.photo_duration_seconds = max(0, _get_int("photo_duration_seconds", 0))
+        if not (self.show_id or self.show_name or self.show_photo):
+            self.show_id = True
+
+        self.photo_root_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "student_photos")
+        self._photo_extensions = [".png", ".jpg", ".jpeg", ".bmp", ".gif"]
+        self._photo_overlay: Optional[StudentPhotoOverlay] = None
+        self._last_photo_student_id: Optional[str] = None
+        self._photo_manual_hidden = False
+        self._ensure_photo_root_directory()
 
         self.current_class_name = str(s.get("current_class", "")).strip()
         self.current_group_name = s.get("current_group", "全部")
@@ -6055,6 +7181,27 @@ class RollCallTimerWindow(QWidget):
         self.show_id_action.toggled.connect(self._on_display_option_changed)
         self.show_name_action = disp.addAction("显示姓名"); self.show_name_action.setCheckable(True); self.show_name_action.setChecked(self.show_name)
         self.show_name_action.toggled.connect(self._on_display_option_changed)
+        self.show_photo_action = disp.addAction("显示照片"); self.show_photo_action.setCheckable(True); self.show_photo_action.setChecked(self.show_photo)
+        self.show_photo_action.toggled.connect(self._on_display_option_changed)
+        self.photo_duration_menu = disp.addMenu("照片显示时间")
+        self.photo_duration_actions: List[QAction] = []
+        duration_choices: List[Tuple[int, str]] = [
+            (0, "不自动关闭"),
+            (3, "3 秒"),
+            (5, "5 秒"),
+            (10, "10 秒"),
+            (15, "15 秒"),
+            (30, "30 秒"),
+        ]
+        current_seconds = int(self.photo_duration_seconds)
+        for seconds, label in duration_choices:
+            action = self.photo_duration_menu.addAction(label)
+            action.setCheckable(True)
+            action.setData(seconds)
+            action.setChecked(seconds == current_seconds)
+            action.triggered.connect(lambda _checked, s=seconds: self._set_photo_duration(s))
+            self.photo_duration_actions.append(action)
+        self._sync_photo_duration_actions()
 
         menu.addSeparator()
         speech = menu.addMenu("语音播报")
@@ -6204,13 +7351,48 @@ class RollCallTimerWindow(QWidget):
         return super().eventFilter(obj, e)
 
     def _on_display_option_changed(self) -> None:
-        if not self.show_id_action.isChecked() and not self.show_name_action.isChecked():
+        photo_checked = getattr(self, "show_photo_action", None)
+        if (
+            not self.show_id_action.isChecked()
+            and not self.show_name_action.isChecked()
+            and not (photo_checked.isChecked() if photo_checked else False)
+        ):
             self.show_id_action.setChecked(True)
         self.show_id = self.show_id_action.isChecked()
         self.show_name = self.show_name_action.isChecked()
+        if photo_checked is not None:
+            self.show_photo = photo_checked.isChecked()
+        if not self.show_photo:
+            self._hide_student_photo(force=True)
         self.update_display_layout()
         self.display_current_student()
         self._schedule_save()
+
+    def _set_photo_duration(self, seconds: int) -> None:
+        seconds = max(0, int(seconds))
+        if self.photo_duration_seconds == seconds:
+            self._sync_photo_duration_actions()
+            return
+        self.photo_duration_seconds = seconds
+        self._sync_photo_duration_actions()
+        overlay = getattr(self, "_photo_overlay", None)
+        if overlay is not None and overlay.isVisible():
+            overlay.schedule_auto_close(int(self.photo_duration_seconds * 1000))
+        self._schedule_save()
+
+    def _sync_photo_duration_actions(self) -> None:
+        current = int(self.photo_duration_seconds)
+        for action in getattr(self, "photo_duration_actions", []):
+            if not isinstance(action, QAction):
+                continue
+            data = action.data()
+            try:
+                value = int(data) if data is not None else 0
+            except (TypeError, ValueError):
+                value = 0
+            block = action.blockSignals(True)
+            action.setChecked(value == current)
+            action.blockSignals(block)
 
     def _toggle_speech(self, enabled: bool) -> None:
         if not enabled:
@@ -6461,6 +7643,7 @@ class RollCallTimerWindow(QWidget):
             if changed:
                 self._schedule_save()
             self.schedule_font_update()
+            self._hide_student_photo(force=True)
         if hasattr(self, "encrypt_button"):
             self.encrypt_button.setVisible(is_roll)
         if hasattr(self, "reset_button"):
@@ -7068,6 +8251,7 @@ class RollCallTimerWindow(QWidget):
         self._group_remaining_indices["全部"] = normalized_all
 
     def display_current_student(self) -> None:
+        photo_student_id: Optional[str] = None
         if self.current_student_index is None:
             self.id_label.setText("学号" if self.show_id else "")
             self.name_label.setText("学生" if self.show_name else "")
@@ -7080,10 +8264,12 @@ class RollCallTimerWindow(QWidget):
             self.id_label.setText(sid if self.show_id else ""); self.name_label.setText(name if self.show_name else "")
             if not self.show_id: self.id_label.setText("")
             if not self.show_name: self.name_label.setText("")
+            photo_student_id = sid or None
         self.update_display_layout()
         self._update_score_display()
         self._update_roll_call_controls()
         self.schedule_font_update()
+        self._maybe_show_student_photo(photo_student_id)
 
     def update_display_layout(self) -> None:
         self.id_label.setVisible(self.show_id); self.name_label.setVisible(self.show_name)
@@ -7092,6 +8278,121 @@ class RollCallTimerWindow(QWidget):
         if not self.show_id: layout.setColumnStretch(0, 0)
         if not self.show_name: layout.setColumnStretch(1, 0)
         self.schedule_font_update()
+
+    def _ensure_photo_root_directory(self) -> None:
+        try:
+            os.makedirs(self.photo_root_path, exist_ok=True)
+        except Exception:
+            logger.debug("Failed to create photo root directory at %s", self.photo_root_path, exc_info=True)
+
+    def _maybe_show_student_photo(self, student_id: Optional[str]) -> None:
+        if not self.show_photo or self.mode != "roll_call":
+            self._hide_student_photo(force=True)
+            return
+        if not student_id:
+            self._hide_student_photo()
+            self._last_photo_student_id = None
+            return
+        normalized_id = student_id.strip()
+        if not normalized_id:
+            self._hide_student_photo()
+            self._last_photo_student_id = None
+            return
+        if self._last_photo_student_id != normalized_id:
+            self._photo_manual_hidden = False
+        if self._photo_manual_hidden and self._last_photo_student_id == normalized_id:
+            return
+        path = self._resolve_student_photo_path(normalized_id)
+        if not path:
+            self._hide_student_photo()
+            self._last_photo_student_id = normalized_id
+            return
+        pixmap = QPixmap(path)
+        if pixmap.isNull():
+            self._hide_student_photo()
+            self._last_photo_student_id = normalized_id
+            return
+        overlay = self._ensure_photo_overlay()
+        screen = (self.windowHandle().screen() if self.windowHandle() else None) or QApplication.primaryScreen()
+        if screen is None:
+            self._hide_student_photo()
+            self._last_photo_student_id = normalized_id
+            return
+        screen_rect = screen.geometry()
+        overlay.display_photo(pixmap, screen_rect, int(max(0, self.photo_duration_seconds) * 1000))
+        self._last_photo_student_id = normalized_id
+        self._photo_manual_hidden = False
+
+    def _hide_student_photo(self, force: bool = False) -> None:
+        overlay = getattr(self, "_photo_overlay", None)
+        if overlay is not None:
+            overlay.cancel_auto_close()
+            if overlay.isVisible():
+                overlay.hide()
+        if force:
+            self._photo_manual_hidden = False
+            self._last_photo_student_id = None
+
+    def _ensure_photo_overlay(self) -> StudentPhotoOverlay:
+        if self._photo_overlay is None:
+            self._photo_overlay = StudentPhotoOverlay(owner=self)
+            self._photo_overlay.closed_by_user.connect(self._on_photo_overlay_closed)
+            self._photo_overlay.auto_closed.connect(self._on_photo_overlay_auto_closed)
+        else:
+            self._photo_overlay.update_owner(self)
+        return self._photo_overlay
+
+    def _on_photo_overlay_closed(self) -> None:
+        self._photo_manual_hidden = True
+        overlay = getattr(self, "_photo_overlay", None)
+        if overlay is not None:
+            overlay.cancel_auto_close()
+
+    def _on_photo_overlay_auto_closed(self) -> None:
+        self._photo_manual_hidden = False
+
+    def _resolve_student_photo_path(self, student_id: str) -> Optional[str]:
+        class_name = self._sanitize_photo_segment(self._resolve_active_class_name())
+        if not class_name:
+            class_name = "default"
+        base_dir = os.path.join(self.photo_root_path, class_name)
+        try:
+            os.makedirs(base_dir, exist_ok=True)
+        except OSError:
+            logger.debug("Unable to ensure photo directory %s", base_dir, exc_info=True)
+        if not os.path.isdir(base_dir):
+            return None
+        for ext in self._photo_extensions:
+            candidate = os.path.join(base_dir, f"{student_id}{ext}")
+            if os.path.isfile(candidate):
+                return candidate
+            upper = os.path.join(base_dir, f"{student_id}{ext.upper()}")
+            if os.path.isfile(upper):
+                return upper
+        lower_id = student_id.lower()
+        try:
+            for entry in os.listdir(base_dir):
+                name, ext = os.path.splitext(entry)
+                if not ext:
+                    continue
+                if ext.lower() not in self._photo_extensions:
+                    continue
+                if name.lower() == lower_id:
+                    candidate = os.path.join(base_dir, entry)
+                    if os.path.isfile(candidate):
+                        return candidate
+        except OSError:
+            logger.debug("Failed to scan photo directory %s", base_dir, exc_info=True)
+        return None
+
+    @staticmethod
+    def _sanitize_photo_segment(value: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        sanitized = re.sub(r"[^\w\u4e00-\u9fff-]+", "_", text)
+        sanitized = sanitized.strip("_")
+        return sanitized or "default"
 
     def _rebuild_group_buttons_ui(self) -> None:
         if not hasattr(self, "group_bar_layout"):
@@ -7239,12 +8540,14 @@ class RollCallTimerWindow(QWidget):
         self.schedule_font_update()
 
     def hideEvent(self, e) -> None:
+        self._hide_student_photo(force=True)
         super().hideEvent(e)
         self._placeholder_on_show = True
         self.save_settings()
         self.visibility_changed.emit(False)
 
     def closeEvent(self, e) -> None:
+        self._hide_student_photo(force=True)
         self.save_settings()
         self.count_timer.stop()
         self.clock_timer.stop()
@@ -7267,6 +8570,8 @@ class RollCallTimerWindow(QWidget):
         sec["geometry"] = geometry_to_text(self)
         sec["show_id"] = bool_to_str(self.show_id)
         sec["show_name"] = bool_to_str(self.show_name)
+        sec["show_photo"] = bool_to_str(self.show_photo)
+        sec["photo_duration_seconds"] = str(int(self.photo_duration_seconds))
         sec["speech_enabled"] = bool_to_str(self.speech_enabled)
         sec["speech_voice_id"] = self.selected_voice_id
         sec["current_class"] = self.current_class_name
