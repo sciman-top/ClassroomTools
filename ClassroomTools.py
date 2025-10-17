@@ -4010,32 +4010,23 @@ class OverlayWindow(QWidget):
         prev_shape = self.current_shape if prev_mode == "shape" else None
         if prev_mode in {"brush", "shape"}:
             self._update_last_tool_snapshot()
+        pointer = self._safe_global_cursor_pos() or QPoint()
+        inside_toolbar = self._is_point_inside_toolbar(pointer)
+        restore_on_move = prev_mode not in {"cursor"} and not inside_toolbar
+        self._begin_navigation_passthrough(
+            prev_mode,
+            prev_shape,
+            restore_on_move=restore_on_move,
+            cursor_reference=pointer,
+        )
         with self._temporarily_release_keyboard() as had_keyboard_grab:
             success = self._dispatch_virtual_key(vk_code)
-        self._pending_tool_restore = None
         if not success:
+            self._pending_tool_restore = None
             self._clear_navigation_passthrough()
             return False
         if not had_keyboard_grab and self.mode != "cursor":
             self._ensure_keyboard_capture()
-        restore_mode = prev_mode if prev_mode in {"brush", "shape", "eraser"} else None
-        if prev_mode != "cursor" and restore_mode:
-            pointer = self._safe_global_cursor_pos() or QPoint()
-            inside_toolbar = self._is_point_inside_toolbar(pointer)
-            self._begin_navigation_passthrough(
-                restore_mode,
-                prev_shape,
-                restore_on_move=not inside_toolbar,
-                cursor_reference=pointer,
-            )
-        elif prev_mode == "cursor":
-            pointer = self._safe_global_cursor_pos() or QPoint()
-            self._begin_navigation_passthrough(
-                "cursor",
-                None,
-                restore_on_move=False,
-                cursor_reference=pointer,
-            )
         self.raise_toolbar()
         return True
 
@@ -4238,7 +4229,8 @@ class OverlayWindow(QWidget):
     def _apply_input_passthrough(self, enabled: bool) -> None:
         # Toggle input passthrough flags and force a refresh
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, enabled)
-        self.setWindowFlag(Qt.WindowType.WindowTransparentForInput, enabled)
+        if self.windowFlags() & Qt.WindowType.WindowTransparentForInput:
+            self.setWindowFlag(Qt.WindowType.WindowTransparentForInput, False)
         if enabled:
             self._release_keyboard_capture()
         if self.isVisible():
