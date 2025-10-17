@@ -43,18 +43,17 @@ from typing import (
 logger = logging.getLogger(__name__)
 
 if sys.platform == "win32":
-    try:
+    try:  # pragma: no cover - Windows 专用依赖
         import win32api
         import win32con
         import win32gui
-        try:
-            _USER32 = ctypes.windll.user32  # type: ignore[attr-defined]
-        except Exception:  # pragma: no cover - 某些环境可能限制 Win32 API
-            _USER32 = None
-    except ImportError:  # pragma: no cover - 环境可能缺少 pywin32
+    except ImportError:  # pragma: no cover - 部分环境未安装 pywin32
         win32api = None  # type: ignore[assignment]
         win32con = None  # type: ignore[assignment]
         win32gui = None  # type: ignore[assignment]
+    try:
+        _USER32 = ctypes.windll.user32  # type: ignore[attr-defined]
+    except Exception:  # pragma: no cover - 某些环境可能限制 Win32 API
         _USER32 = None  # type: ignore[assignment]
 else:
     win32api = None  # type: ignore[assignment]
@@ -69,6 +68,120 @@ VK_RIGHT = getattr(win32con, "VK_RIGHT", 0x27)
 KEYEVENTF_EXTENDEDKEY = getattr(win32con, "KEYEVENTF_EXTENDEDKEY", 0x0001)
 KEYEVENTF_KEYUP = getattr(win32con, "KEYEVENTF_KEYUP", 0x0002)
 _NAVIGATION_EXTENDED_KEYS = {VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT}
+
+if _USER32 is not None:
+    _WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+else:  # pragma: no cover - 非 Windows 平台不会调用
+    _WNDENUMPROC = None  # type: ignore[assignment]
+
+
+def _user32_window_rect(hwnd: int) -> Optional[Tuple[int, int, int, int]]:
+    if _USER32 is None or hwnd == 0:
+        return None
+    rect = wintypes.RECT()
+    try:
+        ok = bool(_USER32.GetWindowRect(wintypes.HWND(hwnd), ctypes.byref(rect)))
+    except Exception:
+        return None
+    if not ok:
+        return None
+    return rect.left, rect.top, rect.right, rect.bottom
+
+
+def _user32_is_window(hwnd: int) -> bool:
+    if _USER32 is None or hwnd == 0:
+        return False
+    try:
+        return bool(_USER32.IsWindow(wintypes.HWND(hwnd)))
+    except Exception:
+        return False
+
+
+def _user32_is_window_visible(hwnd: int) -> bool:
+    if _USER32 is None or hwnd == 0:
+        return False
+    try:
+        return bool(_USER32.IsWindowVisible(wintypes.HWND(hwnd)))
+    except Exception:
+        return False
+
+
+def _user32_is_window_iconic(hwnd: int) -> bool:
+    if _USER32 is None or hwnd == 0:
+        return False
+    try:
+        return bool(_USER32.IsIconic(wintypes.HWND(hwnd)))
+    except Exception:
+        return False
+
+
+def _user32_window_class_name(hwnd: int) -> str:
+    if _USER32 is None or hwnd == 0:
+        return ""
+    buffer = ctypes.create_unicode_buffer(256)
+    try:
+        length = int(_USER32.GetClassNameW(wintypes.HWND(hwnd), buffer, len(buffer)))
+    except Exception:
+        return ""
+    if length <= 0:
+        return ""
+    return buffer.value.strip().lower()
+
+
+def _user32_get_foreground_window() -> int:
+    if _USER32 is None:
+        return 0
+    try:
+        return int(_USER32.GetForegroundWindow())
+    except Exception:
+        return 0
+
+
+def _user32_get_parent(hwnd: int) -> int:
+    if _USER32 is None or hwnd == 0:
+        return 0
+    try:
+        return int(_USER32.GetParent(wintypes.HWND(hwnd)))
+    except Exception:
+        return 0
+
+
+def _user32_top_level_hwnd(hwnd: int) -> int:
+    if _USER32 is None or hwnd == 0:
+        return hwnd
+    try:
+        ga_root = getattr(win32con, "GA_ROOT", 2) if win32con is not None else 2
+    except Exception:
+        ga_root = 2
+    try:
+        ancestor = int(_USER32.GetAncestor(wintypes.HWND(hwnd), ga_root))
+    except Exception:
+        ancestor = 0
+    if ancestor:
+        return ancestor
+    parent = _user32_get_parent(hwnd)
+    return parent or hwnd
+
+
+def _user32_focus_window(hwnd: int) -> bool:
+    if _USER32 is None or hwnd == 0:
+        return False
+    focused = False
+    try:
+        focused = bool(_USER32.SetForegroundWindow(wintypes.HWND(hwnd)))
+    except Exception:
+        focused = False
+    if not focused:
+        try:
+            focused = bool(_USER32.SetActiveWindow(wintypes.HWND(hwnd)))
+        except Exception:
+            focused = False
+    focus_ok = False
+    try:
+        focus_ok = bool(_USER32.SetFocus(wintypes.HWND(hwnd)))
+    except Exception:
+        focus_ok = False
+    return focused or focus_ok
 
 from PyQt6.QtCore import (
     QByteArray,
@@ -2430,9 +2543,83 @@ class _PresentationForwarder:
         o_left, o_top, o_right, o_bottom = overlay_rect
         return not (right <= o_left or left >= o_right or bottom <= o_top or top >= o_bottom)
 
+    def _fallback_is_target_window_valid(self, hwnd: int) -> bool:
+        if _USER32 is None or hwnd == 0:
+            return False
+        overlay_hwnd = int(self.overlay.winId()) if self.overlay.winId() else 0
+        if hwnd == overlay_hwnd:
+            return False
+        if not _user32_is_window(hwnd):
+            return False
+        if not _user32_is_window_visible(hwnd) or _user32_is_window_iconic(hwnd):
+            return False
+        rect = _user32_window_rect(hwnd)
+        if not rect:
+            return False
+        return self._rect_intersects_overlay(rect)
+
+    def _fallback_is_candidate_window(self, hwnd: int) -> bool:
+        if _USER32 is None or hwnd == 0:
+            return False
+        class_name = _user32_window_class_name(hwnd)
+        if not class_name:
+            return False
+        if class_name in self._KNOWN_PRESENTATION_CLASSES:
+            return True
+        if any(class_name.startswith(prefix) for prefix in self._KNOWN_PRESENTATION_PREFIXES):
+            return True
+        rect = _user32_window_rect(hwnd)
+        if not rect:
+            return False
+        left, top, right, bottom = rect
+        width = max(0, right - left)
+        height = max(0, bottom - top)
+        overlay_rect = self._overlay_rect_tuple()
+        if overlay_rect is None:
+            return False
+        o_width = overlay_rect[2] - overlay_rect[0]
+        o_height = overlay_rect[3] - overlay_rect[1]
+        if o_width <= 0 or o_height <= 0:
+            return False
+        width_diff = abs(width - o_width)
+        height_diff = abs(height - o_height)
+        return width >= 400 and height >= 300 and width_diff <= 64 and height_diff <= 64
+
+    def _fallback_detect_presentation_window_user32(self) -> Optional[int]:
+        if _USER32 is None:
+            return None
+        overlay_hwnd = int(self.overlay.winId()) if self.overlay.winId() else 0
+        foreground = _user32_get_foreground_window()
+        if foreground and foreground != overlay_hwnd and self._fallback_is_candidate_window(foreground):
+            return foreground
+        if _WNDENUMPROC is None:
+            return None
+        candidates: List[int] = []
+
+        def _enum_callback(hwnd: int, _l_param: int) -> int:
+            if hwnd == overlay_hwnd:
+                return True
+            if not _user32_is_window_visible(hwnd) or _user32_is_window_iconic(hwnd):
+                return True
+            rect = _user32_window_rect(hwnd)
+            if not rect or not self._rect_intersects_overlay(rect):
+                return True
+            candidates.append(int(hwnd))
+            return True
+
+        enum_proc = _WNDENUMPROC(_enum_callback)
+        try:
+            _USER32.EnumWindows(enum_proc, 0)
+        except Exception:
+            return None
+        for hwnd in candidates:
+            if self._fallback_is_candidate_window(hwnd):
+                return hwnd
+        return None
+
     def _is_target_window_valid(self, hwnd: int) -> bool:
         if win32gui is None:
-            return False
+            return self._fallback_is_target_window_valid(hwnd)
         try:
             if hwnd == 0:
                 return False
@@ -2451,7 +2638,7 @@ class _PresentationForwarder:
 
     def _is_candidate_window(self, hwnd: int) -> bool:
         if win32gui is None:
-            return False
+            return self._fallback_is_candidate_window(hwnd)
         try:
             class_name = win32gui.GetClassName(hwnd)
         except Exception:
@@ -2485,7 +2672,7 @@ class _PresentationForwarder:
 
     def _detect_presentation_window(self) -> Optional[int]:
         if win32gui is None:
-            return None
+            return self._fallback_detect_presentation_window_user32()
         overlay_hwnd = int(self.overlay.winId()) if self.overlay.winId() else 0
         try:
             foreground = win32gui.GetForegroundWindow()
@@ -2521,6 +2708,14 @@ class _PresentationForwarder:
 
     def _resolve_presentation_target(self) -> Optional[int]:
         if win32gui is None:
+            hwnd = self._last_target_hwnd
+            if hwnd and self._fallback_is_target_window_valid(hwnd):
+                return hwnd
+            hwnd = self._fallback_detect_presentation_window_user32()
+            if hwnd and self._fallback_is_target_window_valid(hwnd):
+                self._last_target_hwnd = hwnd
+                return hwnd
+            self._last_target_hwnd = None
             return None
         hwnd = self._last_target_hwnd
         if hwnd and self._is_target_window_valid(hwnd):
@@ -2792,31 +2987,78 @@ class OverlayWindow(QWidget):
             return
         prev_mode = self.mode
         prev_shape = self.current_shape if prev_mode == "shape" else None
-        had_keyboard_grab = self._keyboard_grabbed
-        if had_keyboard_grab:
-            self._release_keyboard_capture()
-        try:
-            success = False
-            if self._forwarder is not None:
-                if not self._forwarder.focus_presentation_window():
-                    self._forwarder.clear_cached_target()
+        if prev_mode in {"brush", "shape"}:
+            self._update_last_tool_snapshot()
+        with self._temporarily_release_keyboard() as had_keyboard_grab:
+            success = self._dispatch_virtual_key(vk_code)
+        if not success:
+            return
+        if not had_keyboard_grab:
+            self._ensure_keyboard_capture()
+        if prev_mode != "cursor":
+            self._restore_last_tool(
+                prev_mode if prev_mode in {"brush", "shape", "eraser"} else None,
+                shape_type=prev_shape,
+            )
+        self.raise_toolbar()
+
+    def _dispatch_virtual_key(self, vk_code: int) -> bool:
+        if vk_code == 0:
+            return False
+        success = False
+        if self._forwarder is not None:
+            target_hwnd: Optional[int] = None
+            resolve_target = getattr(self._forwarder, "_resolve_presentation_target", None)
+            detect_target = getattr(self._forwarder, "_detect_presentation_window", None)
+            if callable(resolve_target):
+                try:
+                    candidate = int(resolve_target())
+                except Exception:
+                    candidate = 0
+                if candidate:
+                    target_hwnd = candidate
+            if not target_hwnd and callable(detect_target):
+                try:
+                    candidate = int(detect_target())
+                except Exception:
+                    candidate = 0
+                if candidate:
+                    target_hwnd = candidate
+            if target_hwnd:
+                focused = False
+                if win32gui is not None:
+                    try:
+                        win32gui.SetForegroundWindow(target_hwnd)
+                        focused = True
+                    except Exception:
+                        focused = False
+                if not focused:
+                    focused = _user32_focus_window(target_hwnd)
+                if focused:
+                    try:
+                        QApplication.processEvents()
+                    except Exception:
+                        pass
+                    time.sleep(0.05)
                 success = self._forwarder.send_virtual_key(vk_code)
                 if not success:
                     self._forwarder.clear_cached_target()
-            if not success:
-                success = self._fallback_send_virtual_key(vk_code)
-        finally:
-            if had_keyboard_grab:
-                self._ensure_keyboard_capture()
+            else:
+                self._forwarder.clear_cached_target()
+        if not success:
+            if self._focus_presentation_window_fallback():
+                try:
+                    QApplication.processEvents()
+                except Exception:
+                    pass
+                time.sleep(0.05)
+            success = self._fallback_send_virtual_key(vk_code)
         if success:
-            if not had_keyboard_grab:
+            try:
+                QTimer.singleShot(100, self._ensure_keyboard_capture)
+            except Exception:
                 self._ensure_keyboard_capture()
-            if prev_mode != "cursor":
-                self._restore_last_tool(
-                    prev_mode if prev_mode in {"brush", "shape", "eraser"} else None,
-                    shape_type=prev_shape,
-                )
-            self.raise_toolbar()
+        return success
 
     def _fallback_send_virtual_key(self, vk_code: int) -> bool:
         if vk_code == 0 or _USER32 is None:
@@ -2915,6 +3157,17 @@ class OverlayWindow(QWidget):
             pass
         self._keyboard_grabbed = False
 
+    @contextlib.contextmanager
+    def _temporarily_release_keyboard(self):
+        had_keyboard_grab = self._keyboard_grabbed
+        if had_keyboard_grab:
+            self._release_keyboard_capture()
+        try:
+            yield had_keyboard_grab
+        finally:
+            if had_keyboard_grab:
+                self._ensure_keyboard_capture()
+
     def _overlay_rect_tuple(self) -> Optional[Tuple[int, int, int, int]]:
         rect = self.geometry()
         if rect.isNull():
@@ -2933,9 +3186,101 @@ class OverlayWindow(QWidget):
         o_left, o_top, o_right, o_bottom = overlay
         return not (right <= o_left or left >= o_right or bottom <= o_top or top >= o_bottom)
 
+    def _fallback_is_target_window_valid(self, hwnd: int) -> bool:
+        if _USER32 is None or hwnd == 0:
+            return False
+        overlay_hwnd = int(self.winId()) if self.winId() else 0
+        if hwnd == overlay_hwnd:
+            return False
+        if not _user32_is_window(hwnd):
+            return False
+        if not _user32_is_window_visible(hwnd) or _user32_is_window_iconic(hwnd):
+            return False
+        rect = _user32_window_rect(hwnd)
+        if not rect:
+            return False
+        return self._rect_intersects_overlay(rect)
+
+    def _fallback_is_candidate_window(self, hwnd: int) -> bool:
+        if _USER32 is None or hwnd == 0:
+            return False
+        class_name = _user32_window_class_name(hwnd)
+        if not class_name:
+            return False
+        if class_name in self._KNOWN_PRESENTATION_CLASSES:
+            return True
+        if any(class_name.startswith(prefix) for prefix in self._KNOWN_PRESENTATION_PREFIXES):
+            return True
+        rect = _user32_window_rect(hwnd)
+        if not rect:
+            return False
+        left, top, right, bottom = rect
+        width = max(0, right - left)
+        height = max(0, bottom - top)
+        overlay = self._overlay_rect_tuple()
+        if overlay is None:
+            return False
+        o_width = overlay[2] - overlay[0]
+        o_height = overlay[3] - overlay[1]
+        if o_width <= 0 or o_height <= 0:
+            return False
+        width_diff = abs(width - o_width)
+        height_diff = abs(height - o_height)
+        return width >= 400 and height >= 300 and width_diff <= 64 and height_diff <= 64
+
+    def _fallback_detect_presentation_window_user32(self) -> Optional[int]:
+        if _USER32 is None:
+            return None
+        overlay_hwnd = int(self.winId()) if self.winId() else 0
+        foreground = _user32_get_foreground_window()
+        if foreground and foreground != overlay_hwnd and self._fallback_is_candidate_window(foreground):
+            return foreground
+        if _WNDENUMPROC is None:
+            return None
+        candidates: List[int] = []
+
+        def _enum_callback(hwnd: int, _l_param: int) -> int:
+            if hwnd == overlay_hwnd:
+                return True
+            if not _user32_is_window_visible(hwnd) or _user32_is_window_iconic(hwnd):
+                return True
+            rect = _user32_window_rect(hwnd)
+            if not rect or not self._rect_intersects_overlay(rect):
+                return True
+            candidates.append(int(hwnd))
+            return True
+
+        enum_proc = _WNDENUMPROC(_enum_callback)
+        try:
+            _USER32.EnumWindows(enum_proc, 0)
+        except Exception:
+            return None
+        for hwnd in candidates:
+            if self._fallback_is_candidate_window(hwnd):
+                return hwnd
+        return None
+
+    def _focus_presentation_window_fallback(self) -> bool:
+        if _USER32 is None:
+            return False
+        hwnd = self._resolve_presentation_target()
+        if not hwnd:
+            hwnd = self._fallback_detect_presentation_window_user32()
+            if hwnd and self._fallback_is_target_window_valid(hwnd):
+                self._last_target_hwnd = hwnd
+        if not hwnd or not self._fallback_is_target_window_valid(hwnd):
+            return False
+        top_level = _user32_top_level_hwnd(hwnd)
+        focused = _user32_focus_window(top_level)
+        if not focused:
+            focused = _user32_focus_window(hwnd)
+        elif hwnd != top_level:
+            _user32_focus_window(hwnd)
+        return focused
+
     def _is_target_window_valid(self, hwnd: int) -> bool:
         if win32gui is None:
-            return False
+            return self._fallback_is_target_window_valid(hwnd)
         try:
             if hwnd == 0 or hwnd == int(self.winId()):
                 return False
@@ -2952,7 +3297,7 @@ class OverlayWindow(QWidget):
 
     def _detect_presentation_window(self) -> Optional[int]:
         if win32gui is None:
-            return None
+            return self._fallback_detect_presentation_window_user32()
         overlay_hwnd = int(self.winId()) if self.winId() else 0
         try:
             foreground = win32gui.GetForegroundWindow()
@@ -2988,6 +3333,14 @@ class OverlayWindow(QWidget):
 
     def _resolve_presentation_target(self) -> Optional[int]:
         if win32gui is None:
+            hwnd = self._last_target_hwnd
+            if hwnd and self._fallback_is_target_window_valid(hwnd):
+                return hwnd
+            hwnd = self._fallback_detect_presentation_window_user32()
+            if hwnd and self._fallback_is_target_window_valid(hwnd):
+                self._last_target_hwnd = hwnd
+                return hwnd
+            self._last_target_hwnd = None
             return None
         hwnd = self._last_target_hwnd
         if hwnd and self._is_target_window_valid(hwnd):
@@ -3001,7 +3354,7 @@ class OverlayWindow(QWidget):
 
     def _is_candidate_presentation_window(self, hwnd: int) -> bool:
         if win32gui is None:
-            return False
+            return self._fallback_is_candidate_window(hwnd)
         try:
             class_name = win32gui.GetClassName(hwnd).lower()
         except Exception:
