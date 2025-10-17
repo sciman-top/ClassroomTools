@@ -3819,7 +3819,16 @@ class OverlayWindow(QWidget):
             self._ensure_keyboard_capture()
         restore_mode = prev_mode if prev_mode in {"brush", "shape", "eraser"} else None
         if prev_mode != "cursor" and restore_mode:
-            self._schedule_tool_restore(restore_mode, prev_shape, restore_on_move=False)
+            try:
+                pointer = QCursor.pos()
+            except Exception:
+                pointer = QPoint()
+            inside_toolbar = self._is_point_inside_toolbar(pointer)
+            self._schedule_tool_restore(
+                restore_mode,
+                prev_shape,
+                restore_on_move=not inside_toolbar,
+            )
         self.raise_toolbar()
         return True
 
@@ -4435,6 +4444,14 @@ class OverlayWindow(QWidget):
         return dirty_region
 
     def mousePressEvent(self, e) -> None:
+        pending = self._pending_tool_restore
+        if pending and self.mode == "cursor":
+            try:
+                global_pos = e.globalPosition().toPoint()
+            except Exception:
+                global_pos = QCursor.pos()
+            if not self._is_point_inside_toolbar(global_pos):
+                self._restore_pending_tool()
         if e.button() == Qt.MouseButton.LeftButton and self.mode != "cursor":
             self._ensure_keyboard_capture()
             self._start_paint_session(e)
@@ -9222,6 +9239,8 @@ class LauncherBubble(QWidget):
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
         ensure_widget_within_screen(self)
+        self.raise_()
+        QTimer.singleShot(0, self.raise_)
 
 
 class LauncherWindow(QWidget):
@@ -9384,6 +9403,19 @@ class LauncherWindow(QWidget):
         self._last_position = self.pos()
         if self._minimized_on_start:
             QTimer.singleShot(0, self._restore_minimized_state)
+        self.ensure_launcher_topmost()
+
+    def ensure_launcher_topmost(self) -> None:
+        if self._minimized:
+            if self.bubble is not None and self.bubble.isVisible():
+                self.bubble.raise_()
+                QTimer.singleShot(0, self.bubble.raise_)
+            return
+        self.raise_()
+        QTimer.singleShot(0, self.raise_)
+        if self.bubble is not None and self.bubble.isVisible():
+            self.bubble.raise_()
+            QTimer.singleShot(0, self.bubble.raise_)
 
     def eventFilter(self, obj, e) -> bool:
         if e.type() == QEvent.Type.MouseButtonPress and e.button() == Qt.MouseButton.LeftButton:
@@ -9417,6 +9449,7 @@ class LauncherWindow(QWidget):
             self.overlay.hide_overlay(); self.paint_button.setText("画笔")
         else:
             self.overlay.show_overlay(); self.paint_button.setText("隐藏画笔")
+        self.ensure_launcher_topmost()
 
     def toggle_roll_call(self) -> None:
         """切换点名/计时窗口的显示状态，必要时先创建窗口。"""
@@ -9517,8 +9550,10 @@ class LauncherWindow(QWidget):
         self.bubble.setWindowOpacity(0.74)
         self.bubble.show()
         self.bubble.raise_()
+        QTimer.singleShot(0, self.bubble.raise_)
         self._minimized = True
         self.save_position()
+        self.ensure_launcher_topmost()
 
     def _restore_minimized_state(self) -> None:
         if not self._minimized_on_start:
@@ -9575,6 +9610,7 @@ class LauncherWindow(QWidget):
         ensure_widget_within_screen(self)
         self._last_position = self.pos()
         self.save_position()
+        self.ensure_launcher_topmost()
 
     def _on_bubble_position_changed(self, pos: QPoint) -> None:
         self._bubble_position = QPoint(pos.x(), pos.y())
