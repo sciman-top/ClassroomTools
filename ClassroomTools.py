@@ -3547,8 +3547,6 @@ class OverlayWindow(QWidget):
         self.history: List[QPixmap] = []
         self._history_limit = 30
         self.toolbar = FloatingToolbar(self, self.settings_manager)
-        self.set_mode("brush", initial=True)
-        self.toolbar.update_undo_state(False)
         self._nav_repeat_timer = QTimer(self)
         self._nav_repeat_timer.setInterval(120)
         self._nav_repeat_timer.timeout.connect(self._on_navigation_repeat_timeout)
@@ -3562,6 +3560,8 @@ class OverlayWindow(QWidget):
         self._nav_restore_timer = QTimer(self)
         self._nav_restore_timer.setInterval(80)
         self._nav_restore_timer.timeout.connect(self._check_navigation_restore)
+        self.set_mode("brush", initial=True)
+        self.toolbar.update_undo_state(False)
 
     def raise_toolbar(self) -> None:
         if getattr(self, "toolbar", None) is not None:
