@@ -3676,9 +3676,21 @@ class OverlayWindow(QWidget):
         else:
             pos = self._safe_global_cursor_pos()
             self._nav_restore_cursor_pos = QPoint(pos) if isinstance(pos, QPoint) else pos
-        if self.mode != "cursor" and not self._nav_forced_passthrough:
+        nav_from_drawing = prev_mode != "cursor"
+        if nav_from_drawing:
+            was_transparent = self.testAttribute(
+                Qt.WidgetAttribute.WA_TransparentForMouseEvents
+            ) or bool(
+                self.windowFlags()
+                & Qt.WindowType.WindowTransparentForInput
+            )
+            if was_transparent:
+                self._apply_input_passthrough(False)
             self._nav_forced_passthrough = True
-            self._apply_input_passthrough(True)
+            if not self._keyboard_grabbed:
+                self._ensure_keyboard_capture()
+        else:
+            self._nav_forced_passthrough = False
         if prev_mode == "cursor":
             self._pending_tool_restore = None
             self._nav_restore_timer.stop()
@@ -4179,12 +4191,36 @@ class OverlayWindow(QWidget):
         if self._navigation_origin_mode == "cursor":
             self._clear_navigation_passthrough()
 
+    def _fallback_scroll_with_wheel(self, delta: int) -> bool:
+        if delta == 0:
+            return False
+        if win32api is not None and win32con is not None:
+            try:
+                win32api.mouse_event(win32con.MOUSEEVENTF_WHEEL, 0, 0, delta, 0)
+                return True
+            except Exception:
+                pass
+        if _USER32 is None:
+            return False
+        try:
+            _USER32.mouse_event(0x0800, 0, 0, delta, 0)
+            return True
+        except Exception:
+            return False
+
     def _fallback_send_virtual_key(self, vk_code: int) -> bool:
         if vk_code == 0 or _USER32 is None:
             return False
         if self._forwarder and self._forwarder.get_last_target_role() == "document":
             if self._forwarder.send_document_scroll_for_vk(vk_code):
                 return True
+        wheel_delta = 0
+        if vk_code in {VK_UP, VK_PRIOR}:
+            wheel_delta = WHEEL_DELTA
+        elif vk_code in {VK_DOWN, VK_NEXT}:
+            wheel_delta = -WHEEL_DELTA
+        if wheel_delta and self._fallback_scroll_with_wheel(wheel_delta):
+            return True
         try:
             scan_code = _USER32.MapVirtualKeyW(vk_code, 0) if hasattr(_USER32, "MapVirtualKeyW") else 0
         except Exception:
