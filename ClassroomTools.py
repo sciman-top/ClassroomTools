@@ -4227,10 +4227,9 @@ class OverlayWindow(QWidget):
 
     # ---- 系统级穿透 ----
     def _apply_input_passthrough(self, enabled: bool) -> None:
-        # Toggle input passthrough flags and force a refresh
+        """Toggle system-level input passthrough for cursor/navigation mode."""
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, enabled)
-        if self.windowFlags() & Qt.WindowType.WindowTransparentForInput:
-            self.setWindowFlag(Qt.WindowType.WindowTransparentForInput, False)
+        self.setWindowFlag(Qt.WindowType.WindowTransparentForInput, enabled)
         if enabled:
             self._release_keyboard_capture()
         if self.isVisible():
