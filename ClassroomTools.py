@@ -3560,6 +3560,7 @@ class OverlayWindow(QWidget):
         self._nav_restore_timer = QTimer(self)
         self._nav_restore_timer.setInterval(80)
         self._nav_restore_timer.timeout.connect(self._check_navigation_restore)
+        self._nav_forced_passthrough = False
         self.set_mode("brush", initial=True)
         self.toolbar.update_undo_state(False)
 
@@ -3606,6 +3607,18 @@ class OverlayWindow(QWidget):
         except Exception:
             return None
 
+    _NAVIGATION_KEY_CODES: Set[int] = {
+        int(Qt.Key.Key_Up),
+        int(Qt.Key.Key_Down),
+        int(Qt.Key.Key_Left),
+        int(Qt.Key.Key_Right),
+        int(Qt.Key.Key_PageUp),
+        int(Qt.Key.Key_PageDown),
+        int(Qt.Key.Key_Space),
+        int(Qt.Key.Key_Return),
+        int(Qt.Key.Key_Enter),
+    }
+
     def _begin_navigation_passthrough(
         self,
         prev_mode: str,
@@ -3623,7 +3636,9 @@ class OverlayWindow(QWidget):
         else:
             pos = self._safe_global_cursor_pos()
             self._nav_restore_cursor_pos = QPoint(pos) if isinstance(pos, QPoint) else pos
-        self.set_mode("cursor")
+        if self.mode != "cursor" and not self._nav_forced_passthrough:
+            self._nav_forced_passthrough = True
+            self._apply_input_passthrough(True)
         self._schedule_tool_restore(prev_mode, prev_shape, restore_on_move=restore_on_move)
         pending = self._pending_tool_restore
         if restore_on_move and pending:
@@ -3640,6 +3655,10 @@ class OverlayWindow(QWidget):
         self._nav_restore_cursor_pos = None
         if self._nav_restore_timer.isActive():
             self._nav_restore_timer.stop()
+        if self._nav_forced_passthrough and self.mode != "cursor":
+            self._apply_input_passthrough(False)
+            self._ensure_keyboard_capture()
+        self._nav_forced_passthrough = False
 
     def _check_navigation_restore(self) -> None:
         pending = self._pending_tool_restore
@@ -3647,7 +3666,7 @@ class OverlayWindow(QWidget):
             self._nav_passthrough_active
             and pending
             and pending.restore_on_move
-            and self.mode == "cursor"
+            and (self.mode == "cursor" or self._nav_forced_passthrough)
         ):
             if not (pending and pending.restore_on_move):
                 self._nav_restore_timer.stop()
@@ -3697,6 +3716,38 @@ class OverlayWindow(QWidget):
             prev_shape,
             restore_on_move=restore_on_move,
             cursor_reference=global_pos,
+        )
+
+    def _after_navigation_key(self, event: QKeyEvent) -> None:
+        if self.mode == "cursor" or not self._forwarder:
+            return
+        if int(event.key()) not in self._NAVIGATION_KEY_CODES:
+            return
+        modifiers = event.modifiers()
+        if modifiers & (
+            Qt.KeyboardModifier.ControlModifier
+            | Qt.KeyboardModifier.AltModifier
+            | Qt.KeyboardModifier.MetaModifier
+        ):
+            return
+        role = self._forwarder.get_last_target_role()
+        if role not in {"document", "slideshow"}:
+            return
+        prev_mode = self.mode
+        if prev_mode not in {"brush", "shape", "eraser"}:
+            return
+        prev_shape = self.current_shape if prev_mode == "shape" else None
+        if prev_mode in {"brush", "shape"}:
+            self._update_last_tool_snapshot()
+        pointer = self._safe_global_cursor_pos()
+        if pointer is None:
+            pointer = QPoint()
+        restore_on_move = not self._is_point_inside_toolbar(pointer)
+        self._begin_navigation_passthrough(
+            prev_mode,
+            prev_shape,
+            restore_on_move=restore_on_move,
+            cursor_reference=pointer,
         )
 
     def _build_scene(self) -> None:
@@ -3795,7 +3846,7 @@ class OverlayWindow(QWidget):
 
     def set_mode(self, mode: str, shape_type: Optional[str] = None, *, initial: bool = False) -> None:
         prev_mode = getattr(self, "mode", None)
-        if mode != "cursor":
+        if mode != "cursor" or self._nav_passthrough_active:
             self._clear_navigation_passthrough()
         if prev_mode != mode:
             self._release_canvas_painters()
@@ -4536,7 +4587,7 @@ class OverlayWindow(QWidget):
 
     def mousePressEvent(self, e) -> None:
         pending = self._pending_tool_restore
-        if pending and self.mode == "cursor":
+        if pending and (self.mode == "cursor" or self._nav_forced_passthrough):
             try:
                 global_pos = e.globalPosition().toPoint()
             except Exception:
@@ -4552,7 +4603,9 @@ class OverlayWindow(QWidget):
 
     def mouseMoveEvent(self, e) -> None:
         pending = self._pending_tool_restore
-        if pending and pending.restore_on_move and self.mode == "cursor":
+        if pending and pending.restore_on_move and (
+            self.mode == "cursor" or self._nav_forced_passthrough
+        ):
             try:
                 global_pos = e.globalPosition().toPoint()
             except Exception:
@@ -4585,6 +4638,7 @@ class OverlayWindow(QWidget):
 
     def keyPressEvent(self, e: QKeyEvent) -> None:
         if self._forwarder and self._forwarder.forward_key(e, is_press=True):
+            self._after_navigation_key(e)
             e.accept()
             return
         if e.key() == Qt.Key.Key_Escape:
