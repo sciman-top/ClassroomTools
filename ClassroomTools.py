@@ -245,7 +245,6 @@ from PyQt6.QtCore import (
     Qt,
     QTimer,
     QEvent,
-    QEventLoop,
     pyqtSignal,
     QObject,
 )
@@ -314,24 +313,6 @@ def _prepare_windows_tts_environment() -> None:
     except Exception:
         # 打包环境下若目录创建失败，也不要阻塞主程序。
         pass
-
-
-def _process_qt_events(*, exclude_user_input: bool = True) -> None:
-    """Drain pending Qt events while avoiding re-entrancy storms."""
-
-    try:
-        flags = QEventLoop.ProcessEventsFlag.AllEvents
-        if exclude_user_input:
-            flags = (
-                QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents
-                | QEventLoop.ProcessEventsFlag.ExcludeSocketNotifiers
-            )
-        QApplication.processEvents(flags)
-    except Exception:
-        try:
-            QApplication.processEvents()
-        except Exception:
-            pass
 
 
 # 兼容早期 Python 版本缺失的 ULONG_PTR 定义，供 Win32 输入结构体使用。
@@ -2112,21 +2093,6 @@ class _PresentationForwarder:
         "wpsframewindow",
     }
     _DOCUMENT_WINDOW_PREFIXES: Tuple[str, ...] = ("opusapp", "kwps", "wpsframe", "wpsmain")
-    _DOCUMENT_SCROLL_CLASSES: Set[str] = {
-        "_wwg",
-        "_wwf",
-        "_wwb",
-        "_wwd",
-        "_wwm",
-        "paneclassdc",
-        "_wstr",
-    }
-    _DOCUMENT_SCROLL_PREFIXES: Tuple[str, ...] = (
-        "_ww",
-        "wordpane",
-        "paneclassdc",
-        "mdiclient",
-    )
     _FORCE_WHEEL_INJECTION_CLASSES: Set[str] = set()
     _KNOWN_PRESENTATION_CLASSES: Set[str] = (
         _SLIDESHOW_PRIORITY_CLASSES
@@ -2223,13 +2189,6 @@ class _PresentationForwarder:
         if class_name in self._DOCUMENT_WINDOW_CLASSES:
             return True
         return any(class_name.startswith(prefix) for prefix in self._DOCUMENT_WINDOW_PREFIXES)
-
-    def _is_document_scroll_class(self, class_name: str) -> bool:
-        if not class_name:
-            return False
-        if class_name in self._DOCUMENT_SCROLL_CLASSES:
-            return True
-        return any(class_name.startswith(prefix) for prefix in self._DOCUMENT_SCROLL_PREFIXES)
 
     def _classify_role_from_class_name(self, class_name: str) -> Optional[str]:
         if not class_name:
@@ -2362,6 +2321,16 @@ class _PresentationForwarder:
         role = self._last_target_role or self._classify_role_from_class_name(
             self._window_class_name(target)
         )
+        if role == "document":
+            delta = self._document_nav_delta(vk_code)
+            if delta:
+                if not is_press:
+                    return True
+                delivered = self._send_document_wheel(target, delta)
+                if delivered:
+                    return True
+                self.clear_cached_target()
+                return False
         for hwnd, update_cache in self._iter_key_targets(target):
             if self._send_key_to_window(
                 hwnd, vk_code, event, is_press=is_press, update_cache=update_cache
@@ -2389,6 +2358,13 @@ class _PresentationForwarder:
         role = self._last_target_role or self._classify_role_from_class_name(
             self._window_class_name(target)
         )
+        if role == "document":
+            delta = self._document_nav_delta(vk_code)
+            if delta:
+                success = self._send_document_wheel(target, delta)
+                if not success:
+                    self.clear_cached_target()
+                return success
         press = release = False
         with self._keyboard_capture_guard():
             attach_pair = self._attach_to_target_thread(target)
@@ -2601,7 +2577,10 @@ class _PresentationForwarder:
                         self.overlay.raise_toolbar()
                     except Exception:
                         pass
-                    _process_qt_events()
+                    try:
+                        QApplication.processEvents()
+                    except Exception:
+                        pass
 
                 try:
                     QTimer.singleShot(10, _restore_focus)
@@ -2844,7 +2823,10 @@ class _PresentationForwarder:
             overlay._ensure_keyboard_capture()
         except Exception:
             pass
-        _process_qt_events()
+        try:
+            QApplication.processEvents()
+        except Exception:
+            pass
 
     def _map_virtual_key(self, vk_code: int) -> int:
         map_vk = getattr(win32api, "MapVirtualKey", None) if win32api is not None else None
@@ -2880,17 +2862,8 @@ class _PresentationForwarder:
             for candidate in _push(child_hwnd, cache=False, require_visible=False):
                 yield candidate
     
-    def _iter_wheel_targets(
-        self, target: int, *, preferred_hwnd: Optional[int] = None
-    ) -> Iterable[int]:
+    def _iter_wheel_targets(self, target: int) -> Iterable[int]:
         seen: Set[int] = set()
-
-        if preferred_hwnd and preferred_hwnd not in seen:
-            if self._top_level_hwnd(preferred_hwnd) == self._top_level_hwnd(target) and self._is_keyboard_target(
-                preferred_hwnd, require_visible=False
-            ):
-                seen.add(preferred_hwnd)
-                yield preferred_hwnd
 
         for focus_hwnd in self._gather_thread_focus_handles(target):
             if focus_hwnd in seen:
@@ -3422,66 +3395,6 @@ class _PresentationForwarder:
     def _document_nav_delta(self, vk_code: int) -> int:
         return self._DOCUMENT_NAVIGATION_KEYS.get(vk_code, 0)
 
-    def _has_vertical_scrollbar(self, hwnd: int) -> bool:
-        if hwnd == 0 or win32gui is None or win32con is None:
-            return False
-        try:
-            style = win32gui.GetWindowLong(hwnd, win32con.GWL_STYLE)
-        except Exception:
-            return False
-        try:
-            ex_style = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
-        except Exception:
-            ex_style = 0
-        if style & win32con.WS_VSCROLL:
-            return True
-        return bool(ex_style & getattr(win32con, "WS_EX_LAYOUTRTL", 0) and style & win32con.WS_HSCROLL)
-
-    def _resolve_document_scroll_target(self, hwnd: int) -> Optional[int]:
-        if hwnd == 0:
-            return None
-        top = self._top_level_hwnd(hwnd)
-        overlay_rect = self._overlay_rect_tuple()
-        best_hwnd: Optional[int] = None
-        best_score = -1
-
-        def _score(candidate: int) -> int:
-            if candidate == 0 or self._top_level_hwnd(candidate) != top:
-                return -1
-            if not self._is_keyboard_target(candidate, require_visible=False):
-                return -1
-            class_name = self._window_class_name(candidate)
-            score = 0
-            if self._is_document_scroll_class(class_name):
-                score += 80
-            if candidate == hwnd:
-                score += 10
-            if self._has_vertical_scrollbar(candidate):
-                score += 20
-            rect = self._get_window_rect_generic(candidate)
-            if rect and overlay_rect:
-                left, top_edge, right, bottom = rect
-                width = max(0, right - left)
-                height = max(0, bottom - top_edge)
-                score += min(width, height) // 4
-            return score
-
-        for focus_hwnd in self._gather_thread_focus_handles(hwnd):
-            value = _score(focus_hwnd)
-            if value > best_score:
-                best_score = value
-                best_hwnd = focus_hwnd
-
-        candidates = [hwnd]
-        candidates.extend(self._collect_descendant_windows(hwnd))
-        for child in candidates:
-            value = _score(child)
-            if value > best_score:
-                best_score = value
-                best_hwnd = child
-
-        return best_hwnd if best_score >= 0 else None
-
     def _get_default_wheel_point(self, hwnd: int) -> Optional[Tuple[int, int]]:
         rect = self._get_window_rect_generic(hwnd)
         if not rect:
@@ -3551,15 +3464,13 @@ class _PresentationForwarder:
         *,
         modifiers: int = 0,
         point: Optional[Tuple[int, int]] = None,
-        preferred_hwnd: Optional[int] = None,
     ) -> bool:
         if hwnd == 0:
             return False
-        base_hwnd = preferred_hwnd if preferred_hwnd else hwnd
-        effective_point = point or self._get_default_wheel_point(base_hwnd)
+        effective_point = point or self._get_default_wheel_point(hwnd)
         if effective_point is None:
             return False
-        for candidate in self._iter_wheel_targets(hwnd, preferred_hwnd=preferred_hwnd):
+        for candidate in self._iter_wheel_targets(hwnd):
             if self._send_wheel_message(
                 candidate,
                 delta,
@@ -3567,9 +3478,8 @@ class _PresentationForwarder:
                 point=effective_point,
             ):
                 return True
-        fallback_hwnd = preferred_hwnd if preferred_hwnd else hwnd
         return self._send_wheel_message(
-            fallback_hwnd,
+            hwnd,
             delta,
             modifiers=modifiers,
             point=effective_point,
@@ -3582,7 +3492,6 @@ class _PresentationForwarder:
         *,
         modifiers: int = 0,
         point: Optional[Tuple[int, int]] = None,
-        preferred_hwnd: Optional[int] = None,
         allow_message_fallback: bool = False,
     ) -> bool:
         if hwnd == 0:
@@ -3601,7 +3510,7 @@ class _PresentationForwarder:
                     original_cursor = self._get_cursor_pos()
                     passthrough_applied = self._set_overlay_passthrough(True)
                     if passthrough_applied:
-                        _process_qt_events()
+                        QApplication.processEvents()
                     if point is not None:
                         self._set_cursor_pos(point)
                     self._injecting_wheel = True
@@ -3618,7 +3527,6 @@ class _PresentationForwarder:
                         delta,
                         modifiers=modifiers,
                         point=point,
-                        preferred_hwnd=preferred_hwnd,
                     )
             finally:
                 self._detach_from_target_thread(attach_pair)
@@ -3637,7 +3545,6 @@ class _PresentationForwarder:
         role_hint: str,
         modifiers: int = 0,
         source_event: Optional[QWheelEvent] = None,
-        wheel_hwnd: Optional[int] = None,
         injection_only: bool = False,
     ) -> bool:
         if hwnd == 0:
@@ -3649,22 +3556,16 @@ class _PresentationForwarder:
                 point = (int(global_pos.x()), int(global_pos.y()))
             except Exception:
                 point = None
-        preferred_hwnd = wheel_hwnd if wheel_hwnd else hwnd
-        default_point = (
-            point
-            if point is not None
-            else self._get_default_wheel_point(preferred_hwnd) or self._get_default_wheel_point(hwnd)
-        )
+        default_point = point if point is not None else self._get_default_wheel_point(hwnd)
         force_injection = self._should_force_wheel_injection(hwnd, role_hint)
         delivered = False
         message_attempted = injection_only
-        if not force_injection and not injection_only and role_hint != "document":
+        if not force_injection and not injection_only:
             delivered = self._deliver_wheel_messages(
                 hwnd,
                 delta,
                 modifiers=modifiers,
                 point=default_point,
-                preferred_hwnd=preferred_hwnd,
             )
             message_attempted = True
         if not delivered:
@@ -3673,7 +3574,6 @@ class _PresentationForwarder:
                 delta,
                 modifiers=modifiers,
                 point=default_point,
-                preferred_hwnd=preferred_hwnd,
                 allow_message_fallback=not message_attempted,
             )
         if delivered:
@@ -3690,14 +3590,12 @@ class _PresentationForwarder:
         modifiers: int = 0,
         source_event: Optional[QWheelEvent] = None,
     ) -> bool:
-        scroll_hwnd = self._resolve_document_scroll_target(hwnd) or hwnd
         return self._send_navigation_wheel_impl(
             hwnd,
             delta,
             role_hint="document",
             modifiers=modifiers,
             source_event=source_event,
-            wheel_hwnd=scroll_hwnd,
         )
 
     def _fallback_detect_presentation_window_user32(self) -> Optional[int]:
