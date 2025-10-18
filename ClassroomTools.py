@@ -3488,7 +3488,7 @@ class _PresentationForwarder:
         if hwnd == 0:
             return False
         if role_hint == "document":
-            return False
+            return True
         class_name = self._window_class_name(hwnd)
         if not class_name:
             return False
