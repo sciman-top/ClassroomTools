@@ -2362,16 +2362,6 @@ class _PresentationForwarder:
         role = self._last_target_role or self._classify_role_from_class_name(
             self._window_class_name(target)
         )
-        if role == "document":
-            delta = self._document_nav_delta(vk_code)
-            if delta:
-                if not is_press:
-                    return True
-                delivered = self._send_document_wheel(target, delta)
-                if delivered:
-                    return True
-                self.clear_cached_target()
-                return False
         for hwnd, update_cache in self._iter_key_targets(target):
             if self._send_key_to_window(
                 hwnd, vk_code, event, is_press=is_press, update_cache=update_cache
@@ -2399,13 +2389,6 @@ class _PresentationForwarder:
         role = self._last_target_role or self._classify_role_from_class_name(
             self._window_class_name(target)
         )
-        if role == "document":
-            delta = self._document_nav_delta(vk_code)
-            if delta:
-                success = self._send_document_wheel(target, delta)
-                if not success:
-                    self.clear_cached_target()
-                return success
         press = release = False
         with self._keyboard_capture_guard():
             attach_pair = self._attach_to_target_thread(target)
@@ -3675,7 +3658,7 @@ class _PresentationForwarder:
         force_injection = self._should_force_wheel_injection(hwnd, role_hint)
         delivered = False
         message_attempted = injection_only
-        if not force_injection and not injection_only:
+        if not force_injection and not injection_only and role_hint != "document":
             delivered = self._deliver_wheel_messages(
                 hwnd,
                 delta,
