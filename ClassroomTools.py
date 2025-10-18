@@ -1932,6 +1932,7 @@ class _PresentationForwarder:
 
     _SMTO_ABORTIFHUNG = 0x0002
     _MAX_CHILD_FORWARDS = 32
+    _INPUT_MOUSE = 0
     _INPUT_KEYBOARD = 1
     _KEYEVENTF_EXTENDEDKEY = 0x0001
     _KEYEVENTF_KEYUP = 0x0002
@@ -1952,6 +1953,7 @@ class _PresentationForwarder:
             ]
 
         _KeyboardInput = None  # type: ignore[assignment]
+        _MouseInput = None  # type: ignore[assignment]
         _InputUnion = None  # type: ignore[assignment]
         _Input = None  # type: ignore[assignment]
         try:
@@ -1969,10 +1971,31 @@ class _PresentationForwarder:
                     ]
                 },
             )
+            _MouseInput = type(
+                "_MouseInput",
+                (ctypes.Structure,),
+                {
+                    "_fields_": [
+                        ("dx", wintypes.LONG),
+                        ("dy", wintypes.LONG),
+                        ("mouseData", wintypes.DWORD),
+                        ("dwFlags", wintypes.DWORD),
+                        ("time", wintypes.DWORD),
+                        ("dwExtraInfo", wintypes.ULONG_PTR),
+                    ]
+                },
+            )
+            _union_fields: List[Tuple[str, Any]] = []
+            if _MouseInput is not None:
+                _union_fields.append(("mi", _MouseInput))
+            if _KeyboardInput is not None:
+                _union_fields.append(("ki", _KeyboardInput))
+            if not _union_fields:
+                raise RuntimeError("Input union requires at least one field")
             _InputUnion = type(
                 "_InputUnion",
                 (ctypes.Union,),
-                {"_fields_": [("ki", _KeyboardInput)]},
+                {"_fields_": _union_fields},
             )
             _Input = type(
                 "_Input",
@@ -1995,6 +2018,7 @@ class _PresentationForwarder:
             _fields_: List[Tuple[str, Any]] = []
 
         _KeyboardInput = None  # type: ignore[assignment]
+        _MouseInput = None  # type: ignore[assignment]
         _InputUnion = None  # type: ignore[assignment]
         _Input = None  # type: ignore[assignment]
 
@@ -2169,18 +2193,29 @@ class _PresentationForwarder:
         y_word = ctypes.c_short(global_pos.y()).value & 0xFFFF
         l_param = x_word | (y_word << 16)
         delivered = False
-        with self._keyboard_capture_guard():
-            focus_ok = self.bring_target_to_foreground(target)
-            if not focus_ok:
-                focus_ok = self._activate_window_for_input(target)
-            for hwnd, update_cache in self._iter_wheel_targets(target):
-                if self._deliver_mouse_wheel(hwnd, w_param, l_param):
+        overlay = getattr(self, "overlay", None)
+        passthrough_cm = (
+            overlay._temporary_navigation_passthrough()
+            if overlay is not None and hasattr(overlay, "_temporary_navigation_passthrough")
+            else contextlib.nullcontext()
+        )
+        with passthrough_cm:
+            with self._keyboard_capture_guard():
+                focus_ok = self.bring_target_to_foreground(target)
+                if not focus_ok:
+                    focus_ok = self._activate_window_for_input(target)
+                if focus_ok and self._send_input_wheel_event(delta):
                     delivered = True
-                    if update_cache:
-                        self._last_target_hwnd = target
-                    break
-            if not delivered and focus_ok:
-                delivered = self._deliver_mouse_wheel(target, w_param, l_param)
+                    self._last_target_hwnd = target
+                if not delivered:
+                    for hwnd, update_cache in self._iter_wheel_targets(target):
+                        if self._deliver_mouse_wheel(hwnd, w_param, l_param):
+                            delivered = True
+                            if update_cache:
+                                self._last_target_hwnd = target
+                            break
+                if not delivered and focus_ok:
+                    delivered = self._deliver_mouse_wheel(target, w_param, l_param)
         if not delivered:
             self.clear_cached_target()
         return delivered
@@ -2502,6 +2537,49 @@ class _PresentationForwarder:
         input_record.data.ki = keyboard_input
         try:
             sent = int(_USER32.SendInput(1, ctypes.byref(input_record), ctypes.sizeof(self._Input)))
+        except Exception:
+            sent = 0
+        return bool(sent)
+
+    def _send_input_wheel_event(self, delta: int) -> bool:
+        if (
+            _USER32 is None
+            or self._Input is None
+            or getattr(self, "_MouseInput", None) is None
+        ):
+            return False
+        mouse_input = self._MouseInput()
+        mouse_input.dx = 0
+        mouse_input.dy = 0
+        wheel_value = ctypes.c_uint32(ctypes.c_int(delta).value & 0xFFFFFFFF).value
+        mouse_input.mouseData = wheel_value
+        mouse_input.dwFlags = MOUSEEVENTF_WHEEL
+        mouse_input.time = 0
+        try:
+            mouse_input.dwExtraInfo = 0
+        except Exception:
+            pass
+        input_record = self._Input()
+        input_record.type = self._INPUT_MOUSE
+        try:
+            input_record.data.mi = mouse_input
+        except Exception:
+            try:
+                ctypes.memmove(
+                    ctypes.byref(input_record.data),
+                    ctypes.byref(mouse_input),
+                    ctypes.sizeof(mouse_input),
+                )
+            except Exception:
+                return False
+        try:
+            sent = int(
+                _USER32.SendInput(
+                    1,
+                    ctypes.byref(input_record),
+                    ctypes.sizeof(self._Input),
+                )
+            )
         except Exception:
             sent = 0
         return bool(sent)
@@ -3572,13 +3650,23 @@ class OverlayWindow(QWidget):
         return self._fallback_send_wheel(delta)
 
     def _fallback_send_wheel(self, delta: int) -> bool:
-        if delta == 0 or _USER32 is None:
+        if delta == 0:
             return False
-        try:
-            _USER32.mouse_event(MOUSEEVENTF_WHEEL, 0, 0, delta, 0)
-            return True
-        except Exception:
-            return False
+        with self._temporary_navigation_passthrough():
+            forwarder = getattr(self, "_forwarder", None)
+            if forwarder is not None:
+                try:
+                    if forwarder._send_input_wheel_event(delta):
+                        return True
+                except Exception:
+                    pass
+            if _USER32 is None:
+                return False
+            try:
+                _USER32.mouse_event(MOUSEEVENTF_WHEEL, 0, 0, delta, 0)
+                return True
+            except Exception:
+                return False
 
     def _apply_navigation_cursor_hold(self, restore_mode: str, restore_shape: Optional[str]) -> None:
         if restore_mode not in {"brush", "shape", "eraser"}:
@@ -3839,6 +3927,30 @@ class OverlayWindow(QWidget):
         finally:
             if had_keyboard_grab:
                 self._ensure_keyboard_capture()
+
+    @contextlib.contextmanager
+    def _temporary_navigation_passthrough(self) -> Iterable[None]:
+        was_transparent = self.testAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents
+        )
+        applied = False
+        if not was_transparent:
+            try:
+                self._apply_input_passthrough(True)
+                applied = True
+            except Exception:
+                applied = False
+        try:
+            yield
+        finally:
+            if applied:
+                try:
+                    self._apply_input_passthrough(False)
+                finally:
+                    if self.mode != "cursor":
+                        self._ensure_keyboard_capture()
+                    else:
+                        self._release_keyboard_capture()
 
     def _overlay_rect_tuple(self) -> Optional[Tuple[int, int, int, int]]:
         rect = self.geometry()
