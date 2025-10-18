@@ -1906,7 +1906,10 @@ class FloatingToolbar(QWidget):
             or getattr(self.overlay, "navigation_active", False)
         ):
             try:
-                handled = forwarder.forward_wheel(event)
+                handled = forwarder.forward_wheel(
+                    event,
+                    allow_cursor=True,
+                )
             except Exception:
                 handled = False
         if handled:
@@ -2143,8 +2146,8 @@ class _PresentationForwarder:
             self._last_target_hwnd = target
         return activated
 
-    def forward_wheel(self, event: QWheelEvent) -> bool:
-        if not self._can_forward():
+    def forward_wheel(self, event: QWheelEvent, *, allow_cursor: bool = False) -> bool:
+        if not self._can_forward(allow_cursor=allow_cursor):
             self.clear_cached_target()
             return False
         delta_vec = event.angleDelta()
@@ -2242,12 +2245,13 @@ class _PresentationForwarder:
         return success
 
     # ---- 内部工具方法 ----
-    def _can_forward(self) -> bool:
+    def _can_forward(self, *, allow_cursor: bool = False) -> bool:
         if not self.is_supported():
             return False
-        if getattr(self.overlay, "mode", "cursor") == "cursor":
-            return False
         if getattr(self.overlay, "whiteboard_active", False):
+            return False
+        mode = getattr(self.overlay, "mode", "cursor")
+        if mode == "cursor" and not allow_cursor:
             return False
         return True
 
@@ -3532,7 +3536,10 @@ class OverlayWindow(QWidget):
                     Qt.ScrollPhase.ScrollUpdate,
                     False,
                 )
-                handled = self._forwarder.forward_wheel(wheel_event)
+                handled = self._forwarder.forward_wheel(
+                    wheel_event,
+                    allow_cursor=(self.mode == "cursor" or self.navigation_active),
+                )
             except Exception:
                 handled = False
         if handled:
@@ -4239,7 +4246,8 @@ class OverlayWindow(QWidget):
 
     # ---- 画图事件 ----
     def wheelEvent(self, e) -> None:
-        if self._forwarder and self._forwarder.forward_wheel(e):
+        allow_cursor = self.mode == "cursor" or self.navigation_active
+        if self._forwarder and self._forwarder.forward_wheel(e, allow_cursor=allow_cursor):
             e.accept()
             return
         super().wheelEvent(e)
