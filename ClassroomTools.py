@@ -4203,7 +4203,12 @@ class OverlayWindow(QWidget):
         self._set_navigation_origin(tool_mode, prev_shape, inside_toolbar=inside_toolbar)
         if not self._nav_passthrough_active:
             self._interaction_before_navigation = self._interaction_mode
-        self._interaction_mode = "navigation"
+        # 保持光标模式的交互状态，避免在光标场景下误切换为导航模式。
+        self._interaction_mode = (
+            InteractionMode.NAVIGATION.value
+            if prev_mode != ToolMode.CURSOR.value
+            else InteractionMode.CURSOR.value
+        )
         self._navigation_origin_mode = prev_mode
         self._navigation_origin_shape = prev_shape if prev_mode == "shape" else None
         self._navigation_origin_inside_toolbar = inside_toolbar
@@ -5728,9 +5733,9 @@ class OverlayWindow(QWidget):
                 handled = self._send_slide_virtual_key(vk_code)
                 if handled:
                     self._nav_direct_keys.add(key_code)
-        if not handled and self._forwarder and self._forwarder.forward_key(e, is_press=True):
-            if nav_key:
-                self._after_navigation_key(e)
+        if not handled and not nav_key and self._forwarder and self._forwarder.forward_key(
+            e, is_press=True
+        ):
             handled = True
         if handled:
             e.accept()
@@ -5745,12 +5750,6 @@ class OverlayWindow(QWidget):
         if nav_key:
             if key_code in self._nav_direct_keys:
                 self._nav_direct_keys.discard(key_code)
-                if self.mode == "cursor" and self._interaction_mode == "navigation":
-                    QTimer.singleShot(0, self._clear_navigation_passthrough)
-                e.accept()
-                return
-            forwarded = bool(self._forwarder and self._forwarder.forward_key(e, is_press=False))
-            if forwarded:
                 if self.mode == "cursor" and self._interaction_mode == "navigation":
                     QTimer.singleShot(0, self._clear_navigation_passthrough)
                 e.accept()
