@@ -3504,10 +3504,27 @@ class _PresentationForwarder:
             focus_ok = self.bring_target_to_foreground(hwnd)
             if not focus_ok:
                 focus_ok = self._activate_window_for_input(hwnd)
+            if not focus_ok:
+                passthrough_applied = self._set_overlay_passthrough(True)
+                if passthrough_applied:
+                    try:
+                        QApplication.processEvents()
+                    except Exception:
+                        pass
+                    focus_ok = self.bring_target_to_foreground(hwnd)
+                    if not focus_ok:
+                        focus_ok = self._activate_window_for_input(hwnd)
             attach_pair = self._attach_to_target_thread(hwnd)
             try:
                 injected = False
                 if focus_ok:
+                    if not passthrough_applied:
+                        passthrough_applied = self._set_overlay_passthrough(True)
+                        if passthrough_applied:
+                            try:
+                                QApplication.processEvents()
+                            except Exception:
+                                pass
                     original_cursor = self._get_cursor_pos()
                     passthrough_applied = self._set_overlay_passthrough(True)
                     if passthrough_applied:
