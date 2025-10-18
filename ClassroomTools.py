@@ -3228,6 +3228,7 @@ class OverlayWindow(QWidget):
         self.navigation_active = False
         self._navigation_reasons: Dict[str, int] = {}
         self._active_navigation_keys: Set[int] = set()
+        self._cursor_button_navigation = False
         self._brush_painter: Optional[QPainter] = None
         self._eraser_painter: Optional[QPainter] = None
         self._last_target_hwnd: Optional[int] = None
@@ -3380,6 +3381,9 @@ class OverlayWindow(QWidget):
             self._release_canvas_painters()
         if mode != "cursor":
             self._cancel_navigation_cursor_hold()
+        else:
+            self._set_navigation_reason("cursor-button", False)
+            self._cursor_button_navigation = False
         focus_on_cursor = bool(self._forwarder) and mode == "cursor" and not initial
         self.mode = mode
         if not self._restoring_tool:
@@ -3454,7 +3458,10 @@ class OverlayWindow(QWidget):
         """切换光标模式；再次点击恢复最近的画笔或图形设置。"""
         if self.mode == "cursor":
             self._restore_last_tool()
+            self._set_navigation_reason("cursor-button", True)
             return
+        self._set_navigation_reason("cursor-button", False)
+        self._cursor_button_navigation = False
         self._update_last_tool_snapshot()
         self.set_mode("cursor")
 
@@ -3612,12 +3619,18 @@ class OverlayWindow(QWidget):
             return
         if active:
             self._navigation_reasons[reason] = self._navigation_reasons.get(reason, 0) + 1
+            if reason == "cursor-button":
+                self._cursor_button_navigation = True
         else:
             count = self._navigation_reasons.get(reason)
             if count is None:
+                if reason == "cursor-button":
+                    self._cursor_button_navigation = False
                 return
             if count <= 1:
                 self._navigation_reasons.pop(reason, None)
+                if reason == "cursor-button":
+                    self._cursor_button_navigation = False
             else:
                 self._navigation_reasons[reason] = count - 1
         self._update_navigation_state()
@@ -3651,6 +3664,9 @@ class OverlayWindow(QWidget):
         if toolbar is not None and toolbar.underMouse():
             return
         self._set_navigation_reason("toolbar", False)
+        self._set_navigation_reason("cursor-button", False)
+        if not self.navigation_active and self.mode != "cursor":
+            self.update_cursor()
 
     def on_toolbar_mouse_leave(self) -> None:
         if not self._pending_tool_restore:
