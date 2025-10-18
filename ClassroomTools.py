@@ -245,6 +245,7 @@ from PyQt6.QtCore import (
     Qt,
     QTimer,
     QEvent,
+    QEventLoop,
     pyqtSignal,
     QObject,
 )
@@ -313,6 +314,24 @@ def _prepare_windows_tts_environment() -> None:
     except Exception:
         # 打包环境下若目录创建失败，也不要阻塞主程序。
         pass
+
+
+def _process_qt_events(*, exclude_user_input: bool = True) -> None:
+    """Drain pending Qt events while avoiding re-entrancy storms."""
+
+    try:
+        flags = QEventLoop.ProcessEventsFlag.AllEvents
+        if exclude_user_input:
+            flags = (
+                QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents
+                | QEventLoop.ProcessEventsFlag.ExcludeSocketNotifiers
+            )
+        QApplication.processEvents(flags)
+    except Exception:
+        try:
+            QApplication.processEvents()
+        except Exception:
+            pass
 
 
 # 兼容早期 Python 版本缺失的 ULONG_PTR 定义，供 Win32 输入结构体使用。
@@ -2577,10 +2596,7 @@ class _PresentationForwarder:
                         self.overlay.raise_toolbar()
                     except Exception:
                         pass
-                    try:
-                        QApplication.processEvents()
-                    except Exception:
-                        pass
+                    _process_qt_events()
 
                 try:
                     QTimer.singleShot(10, _restore_focus)
@@ -2823,10 +2839,7 @@ class _PresentationForwarder:
             overlay._ensure_keyboard_capture()
         except Exception:
             pass
-        try:
-            QApplication.processEvents()
-        except Exception:
-            pass
+        _process_qt_events()
 
     def _map_virtual_key(self, vk_code: int) -> int:
         map_vk = getattr(win32api, "MapVirtualKey", None) if win32api is not None else None
@@ -3510,7 +3523,7 @@ class _PresentationForwarder:
                     original_cursor = self._get_cursor_pos()
                     passthrough_applied = self._set_overlay_passthrough(True)
                     if passthrough_applied:
-                        QApplication.processEvents()
+                        _process_qt_events()
                     if point is not None:
                         self._set_cursor_pos(point)
                     self._injecting_wheel = True
