@@ -3553,6 +3553,8 @@ class _PresentationForwarder:
                         self._injecting_wheel = False
             finally:
                 self._detach_from_target_thread(attach_pair)
+        if cursor_moved and original_cursor is not None:
+            self._set_cursor_pos(original_cursor)
         if passthrough_applied:
             self._restore_overlay_interaction()
         if cursor_moved and original_cursor is not None:
