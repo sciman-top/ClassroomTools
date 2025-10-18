@@ -3669,7 +3669,8 @@ class OverlayWindow(QWidget):
         self._navigation_origin_mode = prev_mode
         self._navigation_origin_shape = prev_shape if prev_mode == "shape" else None
         self._navigation_origin_inside_toolbar = not restore_on_move
-        self._navigation_restore_to_cursor = prev_mode == "cursor"
+        restore_cursor_passthrough = prev_mode == "cursor" and not self.whiteboard_active
+        self._navigation_restore_to_cursor = restore_cursor_passthrough
         self._nav_passthrough_active = True
         if cursor_reference is not None:
             self._nav_restore_cursor_pos = QPoint(cursor_reference)
@@ -3677,13 +3678,16 @@ class OverlayWindow(QWidget):
             pos = self._safe_global_cursor_pos()
             self._nav_restore_cursor_pos = QPoint(pos) if isinstance(pos, QPoint) else pos
         nav_from_drawing = prev_mode != "cursor"
-        if nav_from_drawing:
+        needs_transparent_state = nav_from_drawing or restore_cursor_passthrough
+        was_transparent = False
+        if needs_transparent_state:
             was_transparent = self.testAttribute(
                 Qt.WidgetAttribute.WA_TransparentForMouseEvents
             ) or bool(
                 self.windowFlags()
                 & Qt.WindowType.WindowTransparentForInput
             )
+        if nav_from_drawing:
             if was_transparent:
                 self._apply_input_passthrough(False)
             self._nav_forced_passthrough = True
@@ -3691,6 +3695,11 @@ class OverlayWindow(QWidget):
                 self._ensure_keyboard_capture()
         else:
             self._nav_forced_passthrough = False
+            if restore_cursor_passthrough:
+                if was_transparent:
+                    self._apply_input_passthrough(False)
+                if not self._keyboard_grabbed:
+                    self._ensure_keyboard_capture()
         if prev_mode == "cursor":
             self._pending_tool_restore = None
             self._nav_restore_timer.stop()
@@ -3715,6 +3724,11 @@ class OverlayWindow(QWidget):
         if self._nav_forced_passthrough and self.mode != "cursor":
             self._apply_input_passthrough(False)
             self._ensure_keyboard_capture()
+        restore_cursor_passthrough = (
+            self._navigation_restore_to_cursor
+            and self.mode == "cursor"
+            and not self.whiteboard_active
+        )
         self._nav_forced_passthrough = False
         previous = self._interaction_before_navigation
         if previous in {"drawing", "cursor"}:
@@ -3727,6 +3741,8 @@ class OverlayWindow(QWidget):
         self._navigation_origin_mode = None
         self._navigation_origin_shape = None
         self._navigation_origin_inside_toolbar = False
+        if restore_cursor_passthrough:
+            self._apply_input_passthrough(True)
         self._navigation_restore_to_cursor = False
         self.update_toolbar_state()
 
