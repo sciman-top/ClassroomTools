@@ -2684,6 +2684,8 @@ class _PresentationForwarder:
     def _is_keyboard_target(self, hwnd: int, *, require_visible: bool) -> bool:
         if hwnd == 0 or self._is_overlay_window(hwnd):
             return False
+        if self._should_ignore_window(hwnd):
+            return False
         if win32gui is None:
             return False
         try:
@@ -2766,6 +2768,13 @@ class _PresentationForwarder:
         bottom = top + rect.height()
         return left, top, right, bottom
 
+    def _overlay_center_point(self) -> Optional[Tuple[int, int]]:
+        rect = self._overlay_rect_tuple()
+        if rect is None:
+            return None
+        left, top, right, bottom = rect
+        return ((left + right) // 2, (top + bottom) // 2)
+
     def _rect_intersects_overlay(self, rect: Tuple[int, int, int, int]) -> bool:
         overlay_rect = self._overlay_rect_tuple()
         if overlay_rect is None:
@@ -2789,8 +2798,65 @@ class _PresentationForwarder:
             return False
         return self._rect_intersects_overlay(rect)
 
+    def _window_process_id(self, hwnd: int) -> Optional[int]:
+        if _USER32 is None or hwnd == 0:
+            return None
+        pid = wintypes.DWORD()
+        try:
+            _USER32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(pid))
+        except Exception:
+            return None
+        value = int(pid.value)
+        return value or None
+
+    def _is_own_process_window(self, hwnd: int) -> bool:
+        try:
+            pid = self._window_process_id(hwnd)
+            return pid == os.getpid() if pid is not None else False
+        except Exception:
+            return False
+
+    def _toolbar_hwnd(self) -> int:
+        toolbar = getattr(self.overlay, "toolbar", None)
+        if toolbar is None:
+            return 0
+        try:
+            wid = toolbar.winId()
+        except Exception:
+            return 0
+        return int(wid) if wid else 0
+
+    def _photo_overlay_hwnd(self) -> int:
+        photo = getattr(self.overlay, "_photo_overlay", None)
+        if photo is None:
+            return 0
+        try:
+            wid = photo.winId()
+        except Exception:
+            return 0
+        return int(wid) if wid else 0
+
+    def _should_ignore_window(self, hwnd: int) -> bool:
+        if hwnd == 0:
+            return True
+        try:
+            overlay_hwnd = int(self.overlay.winId()) if self.overlay.winId() else 0
+        except Exception:
+            overlay_hwnd = 0
+        if hwnd == overlay_hwnd:
+            return True
+        toolbar_hwnd = self._toolbar_hwnd()
+        if toolbar_hwnd and hwnd == toolbar_hwnd:
+            return True
+        photo_hwnd = self._photo_overlay_hwnd()
+        if photo_hwnd and hwnd == photo_hwnd:
+            return True
+        return self._is_own_process_window(hwnd)
+
     def _fallback_is_candidate_window(self, hwnd: int) -> bool:
         if _USER32 is None or hwnd == 0:
+            return False
+        if self._should_ignore_window(hwnd):
             return False
         class_name = _user32_window_class_name(hwnd)
         if not class_name:
@@ -2814,7 +2880,15 @@ class _PresentationForwarder:
             return False
         width_diff = abs(width - o_width)
         height_diff = abs(height - o_height)
-        return width >= 400 and height >= 300 and width_diff <= 64 and height_diff <= 64
+        center = self._overlay_center_point()
+        contains_center = False
+        if center is not None:
+            cx, cy = center
+            contains_center = left <= cx <= right and top <= cy <= bottom
+        size_match = width >= 400 and height >= 300 and width_diff <= 64 and height_diff <= 64
+        if contains_center and width >= 400 and height >= 300:
+            return True
+        return size_match
 
     def _get_window_styles(self, hwnd: int) -> Tuple[Optional[int], Optional[int]]:
         style: Optional[int] = None
@@ -2931,6 +3005,7 @@ class _PresentationForwarder:
         if (
             foreground
             and foreground != overlay_hwnd
+            and not self._should_ignore_window(foreground)
             and self._fallback_is_candidate_window(foreground)
         ):
             score = self._candidate_score(foreground)
@@ -2943,6 +3018,8 @@ class _PresentationForwarder:
 
         def _enum_callback(hwnd: int, _l_param: int) -> int:
             if hwnd == overlay_hwnd:
+                return True
+            if self._should_ignore_window(hwnd):
                 return True
             if not _user32_is_window_visible(hwnd) or _user32_is_window_iconic(hwnd):
                 return True
@@ -2988,6 +3065,8 @@ class _PresentationForwarder:
     def _is_candidate_window(self, hwnd: int) -> bool:
         if win32gui is None:
             return self._fallback_is_candidate_window(hwnd)
+        if self._should_ignore_window(hwnd):
+            return False
         try:
             class_name = win32gui.GetClassName(hwnd)
         except Exception:
@@ -3017,7 +3096,15 @@ class _PresentationForwarder:
             return False
         width_diff = abs(width - o_width)
         height_diff = abs(height - o_height)
-        return width >= 400 and height >= 300 and width_diff <= 64 and height_diff <= 64
+        center = self._overlay_center_point()
+        contains_center = False
+        if center is not None:
+            cx, cy = center
+            contains_center = left <= cx <= right and top <= cy <= bottom
+        size_match = width >= 400 and height >= 300 and width_diff <= 64 and height_diff <= 64
+        if contains_center and width >= 400 and height >= 300:
+            return True
+        return size_match
 
     def _detect_presentation_window(self) -> Optional[int]:
         if win32gui is None:
@@ -3029,7 +3116,12 @@ class _PresentationForwarder:
             foreground = 0
         best_hwnd: Optional[int] = None
         best_score = -1
-        if foreground and foreground != overlay_hwnd and self._is_candidate_window(foreground):
+        if (
+            foreground
+            and foreground != overlay_hwnd
+            and not self._should_ignore_window(foreground)
+            and self._is_candidate_window(foreground)
+        ):
             score = self._candidate_score(foreground)
             if score > best_score:
                 best_score = score
@@ -3039,6 +3131,8 @@ class _PresentationForwarder:
 
         def _enum_callback(hwnd: int, acc: List[int]) -> bool:
             if hwnd == overlay_hwnd:
+                return True
+            if self._should_ignore_window(hwnd):
                 return True
             try:
                 if not win32gui.IsWindowVisible(hwnd) or win32gui.IsIconic(hwnd):
@@ -3536,6 +3630,8 @@ class OverlayWindow(QWidget):
         if active:
             self._cancel_navigation_cursor_hold()
             self._pending_tool_restore = None
+            if self.drawing:
+                self.drawing = False
             toolbar = getattr(self, "toolbar", None)
             if toolbar is not None:
                 try:
@@ -3685,6 +3781,13 @@ class OverlayWindow(QWidget):
         bottom = top + rect.height()
         return left, top, right, bottom
 
+    def _overlay_center_point(self) -> Optional[Tuple[int, int]]:
+        rect = self._overlay_rect_tuple()
+        if rect is None:
+            return None
+        left, top, right, bottom = rect
+        return ((left + right) // 2, (top + bottom) // 2)
+
     def _rect_intersects_overlay(self, rect: Tuple[int, int, int, int]) -> bool:
         overlay = self._overlay_rect_tuple()
         if overlay is None:
@@ -3708,8 +3811,62 @@ class OverlayWindow(QWidget):
             return False
         return self._rect_intersects_overlay(rect)
 
+    def _window_process_id(self, hwnd: int) -> Optional[int]:
+        if _USER32 is None or hwnd == 0:
+            return None
+        pid = wintypes.DWORD()
+        try:
+            _USER32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(pid))
+        except Exception:
+            return None
+        value = int(pid.value)
+        return value or None
+
+    def _is_own_process_window(self, hwnd: int) -> bool:
+        try:
+            pid = self._window_process_id(hwnd)
+            return pid == os.getpid() if pid is not None else False
+        except Exception:
+            return False
+
+    def _toolbar_hwnd(self) -> int:
+        toolbar = getattr(self, "toolbar", None)
+        if toolbar is None:
+            return 0
+        try:
+            wid = toolbar.winId()
+        except Exception:
+            return 0
+        return int(wid) if wid else 0
+
+    def _photo_overlay_hwnd(self) -> int:
+        photo = getattr(self, "_photo_overlay", None)
+        if photo is None:
+            return 0
+        try:
+            wid = photo.winId()
+        except Exception:
+            return 0
+        return int(wid) if wid else 0
+
+    def _should_ignore_window(self, hwnd: int) -> bool:
+        if hwnd == 0:
+            return True
+        overlay_hwnd = int(self.winId()) if self.winId() else 0
+        if hwnd == overlay_hwnd:
+            return True
+        toolbar_hwnd = self._toolbar_hwnd()
+        if toolbar_hwnd and hwnd == toolbar_hwnd:
+            return True
+        photo_hwnd = self._photo_overlay_hwnd()
+        if photo_hwnd and hwnd == photo_hwnd:
+            return True
+        return self._is_own_process_window(hwnd)
+
     def _fallback_is_candidate_window(self, hwnd: int) -> bool:
         if _USER32 is None or hwnd == 0:
+            return False
+        if self._should_ignore_window(hwnd):
             return False
         class_name = _user32_window_class_name(hwnd)
         if not class_name:
@@ -3733,14 +3890,27 @@ class OverlayWindow(QWidget):
             return False
         width_diff = abs(width - o_width)
         height_diff = abs(height - o_height)
-        return width >= 400 and height >= 300 and width_diff <= 64 and height_diff <= 64
+        center = self._overlay_center_point()
+        contains_center = False
+        if center is not None:
+            cx, cy = center
+            contains_center = left <= cx <= right and top <= cy <= bottom
+        size_match = width >= 400 and height >= 300 and width_diff <= 64 and height_diff <= 64
+        if contains_center and width >= 400 and height >= 300:
+            return True
+        return size_match
 
     def _fallback_detect_presentation_window_user32(self) -> Optional[int]:
         if _USER32 is None:
             return None
         overlay_hwnd = int(self.winId()) if self.winId() else 0
         foreground = _user32_get_foreground_window()
-        if foreground and foreground != overlay_hwnd and self._fallback_is_candidate_window(foreground):
+        if (
+            foreground
+            and foreground != overlay_hwnd
+            and not self._should_ignore_window(foreground)
+            and self._fallback_is_candidate_window(foreground)
+        ):
             return foreground
         if _WNDENUMPROC is None:
             return None
@@ -3748,6 +3918,8 @@ class OverlayWindow(QWidget):
 
         def _enum_callback(hwnd: int, _l_param: int) -> int:
             if hwnd == overlay_hwnd:
+                return True
+            if self._should_ignore_window(hwnd):
                 return True
             if not _user32_is_window_visible(hwnd) or _user32_is_window_iconic(hwnd):
                 return True
@@ -3833,13 +4005,19 @@ class OverlayWindow(QWidget):
             foreground = win32gui.GetForegroundWindow()
         except Exception:
             foreground = 0
-        if foreground and foreground != overlay_hwnd:
-            if self._is_candidate_presentation_window(foreground):
-                return foreground
+        if (
+            foreground
+            and foreground != overlay_hwnd
+            and not self._should_ignore_window(foreground)
+            and self._is_candidate_presentation_window(foreground)
+        ):
+            return foreground
         candidates: List[int] = []
 
         def _enum_callback(hwnd: int, result: List[int]) -> bool:
             if hwnd == overlay_hwnd:
+                return True
+            if self._should_ignore_window(hwnd):
                 return True
             try:
                 if not win32gui.IsWindowVisible(hwnd) or win32gui.IsIconic(hwnd):
@@ -3899,6 +4077,8 @@ class OverlayWindow(QWidget):
     def _is_candidate_presentation_window(self, hwnd: int) -> bool:
         if win32gui is None:
             return self._fallback_is_candidate_window(hwnd)
+        if self._should_ignore_window(hwnd):
+            return False
         try:
             class_name = win32gui.GetClassName(hwnd).lower()
         except Exception:
@@ -3923,7 +4103,15 @@ class OverlayWindow(QWidget):
             return False
         width_diff = abs(width - o_width)
         height_diff = abs(height - o_height)
-        return width >= 400 and height >= 300 and width_diff <= 64 and height_diff <= 64
+        center = self._overlay_center_point()
+        contains_center = False
+        if center is not None:
+            cx, cy = center
+            contains_center = left <= cx <= right and top <= cy <= bottom
+        size_match = width >= 400 and height >= 300 and width_diff <= 64 and height_diff <= 64
+        if contains_center and width >= 400 and height >= 300:
+            return True
+        return size_match
 
     def _update_visibility_for_mode(self, *, initial: bool = False) -> None:
         passthrough = (self.mode == "cursor") and (not self.whiteboard_active)
@@ -4066,7 +4254,11 @@ class OverlayWindow(QWidget):
         return dirty_region
 
     def mousePressEvent(self, e) -> None:
-        if e.button() == Qt.MouseButton.LeftButton and self.mode != "cursor":
+        if (
+            e.button() == Qt.MouseButton.LeftButton
+            and self.mode != "cursor"
+            and not self.navigation_active
+        ):
             self._ensure_keyboard_capture()
             self._start_paint_session(e)
             self.raise_toolbar()
