@@ -1789,8 +1789,12 @@ class FloatingToolbar(QWidget):
         for color_hex, button in zip([c for c, _ in brush_configs], brush_buttons):
             button.clicked.connect(lambda _checked, c=color_hex: self.overlay.use_brush_color(c))
         self.btn_shape.clicked.connect(self._select_shape)
-        self.btn_slide_down.clicked.connect(self.overlay.go_to_next_slide)
-        self.btn_slide_up.clicked.connect(self.overlay.go_to_previous_slide)
+        self.btn_slide_down.clicked.connect(
+            lambda _checked=False: self.overlay.go_to_next_slide(via_toolbar=True)
+        )
+        self.btn_slide_up.clicked.connect(
+            lambda _checked=False: self.overlay.go_to_previous_slide(via_toolbar=True)
+        )
         self.btn_undo.clicked.connect(self.overlay.undo_last_action)
         self.btn_eraser.clicked.connect(self.overlay.toggle_eraser_mode)
         self.btn_clear_all.clicked.connect(self.overlay.clear_all)
@@ -3075,6 +3079,7 @@ class OverlayWindow(QWidget):
     _KNOWN_PRESENTATION_PREFIXES = _PresentationForwarder._KNOWN_PRESENTATION_PREFIXES
     _SLIDESHOW_PRIORITY_CLASSES = _PresentationForwarder._SLIDESHOW_PRIORITY_CLASSES
     _SLIDESHOW_SECONDARY_CLASSES = _PresentationForwarder._SLIDESHOW_SECONDARY_CLASSES
+    _NAVIGATION_RESTORE_DELAY_MS = 600
 
     def __init__(self, settings_manager: SettingsManager) -> None:
         super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
@@ -3104,6 +3109,10 @@ class OverlayWindow(QWidget):
         self._eraser_painter: Optional[QPainter] = None
         self._last_target_hwnd: Optional[int] = None
         self._pending_tool_restore: Optional[Tuple[str, Optional[str]]] = None
+        self._nav_restore_mode: Optional[Tuple[str, Optional[str]]] = None
+        self._nav_restore_timer = QTimer(self)
+        self._nav_restore_timer.setSingleShot(True)
+        self._nav_restore_timer.timeout.connect(self._restore_navigation_tool)
         base_width = float(max(1, self.pen_size))
         self._brush_pen = QPen(
             self.pen_color,
@@ -3246,6 +3255,8 @@ class OverlayWindow(QWidget):
         prev_mode = getattr(self, "mode", None)
         if prev_mode != mode:
             self._release_canvas_painters()
+        if mode != "cursor":
+            self._cancel_navigation_cursor_hold()
         focus_on_cursor = bool(self._forwarder) and mode == "cursor" and not initial
         self.mode = mode
         if not self._restoring_tool:
@@ -3324,13 +3335,13 @@ class OverlayWindow(QWidget):
         self._update_last_tool_snapshot()
         self.set_mode("cursor")
 
-    def go_to_next_slide(self) -> None:
-        self._send_slide_virtual_key(VK_DOWN)
+    def go_to_next_slide(self, *, via_toolbar: bool = False) -> None:
+        self._send_slide_virtual_key(VK_DOWN, via_toolbar=via_toolbar)
 
-    def go_to_previous_slide(self) -> None:
-        self._send_slide_virtual_key(VK_UP)
+    def go_to_previous_slide(self, *, via_toolbar: bool = False) -> None:
+        self._send_slide_virtual_key(VK_UP, via_toolbar=via_toolbar)
 
-    def _send_slide_virtual_key(self, vk_code: int) -> None:
+    def _send_slide_virtual_key(self, vk_code: int, *, via_toolbar: bool = False) -> None:
         if vk_code == 0:
             return
         prev_mode = self.mode
@@ -3341,19 +3352,53 @@ class OverlayWindow(QWidget):
             success = self._dispatch_virtual_key(vk_code)
         self._pending_tool_restore = None
         if not success:
+            if via_toolbar:
+                self._cancel_navigation_cursor_hold()
             return
         if not had_keyboard_grab and self.mode != "cursor":
             self._ensure_keyboard_capture()
         restore_mode = prev_mode if prev_mode in {"brush", "shape", "eraser"} else None
-        if prev_mode != "cursor" and restore_mode:
-            if getattr(self, "toolbar", None) is not None and self.toolbar.underMouse():
+        if restore_mode:
+            if via_toolbar:
+                self._apply_navigation_cursor_hold(restore_mode, prev_shape)
+            elif getattr(self, "toolbar", None) is not None and self.toolbar.underMouse():
                 self._pending_tool_restore = (restore_mode, prev_shape)
             else:
                 self._pending_tool_restore = None
                 self._restore_last_tool(restore_mode, shape_type=prev_shape)
         else:
             self._pending_tool_restore = None
+            if via_toolbar:
+                self._cancel_navigation_cursor_hold()
         self.raise_toolbar()
+
+    def _apply_navigation_cursor_hold(self, restore_mode: str, restore_shape: Optional[str]) -> None:
+        if restore_mode not in {"brush", "shape", "eraser"}:
+            return
+        self._nav_restore_mode = (restore_mode, restore_shape)
+        if self.mode != "cursor":
+            self.set_mode("cursor")
+        if self._nav_restore_timer.isActive():
+            self._nav_restore_timer.stop()
+        self._nav_restore_timer.start(self._NAVIGATION_RESTORE_DELAY_MS)
+
+    def _cancel_navigation_cursor_hold(self) -> None:
+        if self._nav_restore_timer.isActive():
+            self._nav_restore_timer.stop()
+        self._nav_restore_mode = None
+
+    def _restore_navigation_tool(self) -> None:
+        pending = self._nav_restore_mode
+        self._nav_restore_mode = None
+        if not pending:
+            return
+        if self.mode != "cursor":
+            return
+        mode, shape = pending
+        if mode == "eraser":
+            self.set_mode("eraser")
+        else:
+            self._restore_last_tool(mode, shape_type=shape)
 
     def _dispatch_virtual_key(self, vk_code: int) -> bool:
         if vk_code == 0:
@@ -3404,6 +3449,7 @@ class OverlayWindow(QWidget):
 
     def cancel_pending_tool_restore(self) -> None:
         self._pending_tool_restore = None
+        self._cancel_navigation_cursor_hold()
 
     def on_toolbar_mouse_leave(self) -> None:
         if not self._pending_tool_restore:
@@ -5492,6 +5538,7 @@ class StudentPhotoOverlay(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setStyleSheet("background: transparent;")
         self._owner = owner
         self._current_pixmap = QPixmap()
         self._auto_close_duration_ms = 0
@@ -5512,6 +5559,8 @@ class StudentPhotoOverlay(QWidget):
         self._right_close = self._make_close_button()
         self._left_close.clicked.connect(lambda: self._handle_close_request(manual=True))
         self._right_close.clicked.connect(lambda: self._handle_close_request(manual=True))
+        self._left_close.pressed.connect(self._safe_stack_below_owner)
+        self._right_close.pressed.connect(self._safe_stack_below_owner)
 
     def update_owner(self, owner: Optional[QWidget]) -> None:
         self._owner = owner
@@ -5604,6 +5653,12 @@ class StudentPhotoOverlay(QWidget):
         self._stack_below_owner()
         self.schedule_auto_close(self._auto_close_duration_ms)
 
+    def _safe_stack_below_owner(self) -> None:
+        try:
+            self._stack_below_owner()
+        except Exception:
+            pass
+
     def _stack_below_owner(self) -> None:
         owner = self._owner
         if owner is None:
@@ -5677,18 +5732,12 @@ class StudentPhotoOverlay(QWidget):
         super().resizeEvent(event)
 
     def mousePressEvent(self, event) -> None:
-        try:
-            self._stack_below_owner()
-        except Exception:
-            pass
+        self._safe_stack_below_owner()
         super().mousePressEvent(event)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
         if watched is self._photo_label and event.type() == QEvent.Type.MouseButtonPress:
-            try:
-                self._stack_below_owner()
-            except Exception:
-                pass
+            self._safe_stack_below_owner()
         return super().eventFilter(watched, event)
 
 
