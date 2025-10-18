@@ -3438,6 +3438,20 @@ class _PresentationForwarder:
             point = self._get_default_wheel_point(hwnd)
         delivered = False
         passthrough_applied = False
+        overlay_passthrough_active = False
+        overlay = getattr(self, "overlay", None)
+        if overlay is not None:
+            try:
+                overlay_passthrough_active = bool(overlay.navigation_passthrough_active)
+            except Exception:
+                overlay_passthrough_active = False
+            if not overlay_passthrough_active:
+                detector = getattr(overlay, "_is_passthrough_enabled", None)
+                if callable(detector):
+                    try:
+                        overlay_passthrough_active = bool(detector())
+                    except Exception:
+                        overlay_passthrough_active = False
         original_cursor: Optional[Tuple[int, int]] = None
         with self._keyboard_capture_guard():
             focus_ok = self.bring_target_to_foreground(hwnd)
@@ -3448,9 +3462,10 @@ class _PresentationForwarder:
                 injected = False
                 if focus_ok:
                     original_cursor = self._get_cursor_pos()
-                    passthrough_applied = self._set_overlay_passthrough(True)
-                    if passthrough_applied:
-                        QApplication.processEvents()
+                    if not overlay_passthrough_active:
+                        passthrough_applied = self._set_overlay_passthrough(True)
+                        if passthrough_applied:
+                            QApplication.processEvents()
                     if point is not None:
                         self._set_cursor_pos(point)
                     self._injecting_wheel = True
@@ -4297,6 +4312,8 @@ class OverlayWindow(QWidget):
         self._restore_last_tool(pending.mode, shape_type=pending.shape)
 
     def _after_navigation_wheel(self, event: QWheelEvent) -> None:
+        if self.whiteboard_active:
+            return
         prev_mode = self.mode
         if prev_mode not in {"brush", "shape", "eraser", "cursor"}:
             return
@@ -4320,6 +4337,8 @@ class OverlayWindow(QWidget):
         )
 
     def _after_navigation_key(self, event: QKeyEvent) -> None:
+        if self.whiteboard_active:
+            return
         key_code = int(event.key())
         if key_code not in self._NAVIGATION_KEY_CODES:
             return
@@ -4599,6 +4618,8 @@ class OverlayWindow(QWidget):
     def _send_slide_virtual_key(
         self, vk_code: int, *, repeated: bool = False, engaged: bool = False
     ) -> bool:
+        if self.whiteboard_active:
+            return False
         if vk_code == 0:
             return False
         if repeated:
@@ -4627,6 +4648,9 @@ class OverlayWindow(QWidget):
     def handle_navigation_button_press(self, direction: str) -> None:
         self._nav_repeat_delay_timer.stop()
         self._nav_repeat_timer.stop()
+        if self.whiteboard_active:
+            self._nav_active_vk = None
+            return
         vk_code = VK_DOWN if direction.lower() == "down" else VK_UP
         self._handle_navigation_button_trigger()
         if self._send_slide_virtual_key(vk_code, engaged=True):
@@ -4918,47 +4942,25 @@ class OverlayWindow(QWidget):
 
     @contextlib.contextmanager
     def _navigation_injection_guard(self):
-        """Temporarily allow mouse/keyboard to pass through for navigation sends."""
+        """Temporarily relax keyboard grabs during navigation dispatch."""
         toolbar_origin = self._navigation_origin_from_toolbar()
-        enable_passthrough = not toolbar_origin
-        prev_mouse_passthrough = self.testAttribute(
-            Qt.WidgetAttribute.WA_TransparentForMouseEvents
+        need_keyboard_release = (
+            not toolbar_origin
+            and self._keyboard_grabbed
+            and not self.navigation_passthrough_active
         )
-        flag_supported = hasattr(Qt.WindowType, "WindowTransparentForInput")
-        prev_window_passthrough = (
-            self._has_window_input_passthrough() if flag_supported else False
-        )
-        toggle_mouse_passthrough = enable_passthrough and not prev_mouse_passthrough
-        toggle_window_passthrough = (
-            enable_passthrough and flag_supported and not prev_window_passthrough
-        )
-        had_keyboard_grab = self._keyboard_grabbed
-        if toggle_mouse_passthrough:
-            self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        if toggle_window_passthrough:
-            self.setWindowFlag(Qt.WindowType.WindowTransparentForInput, True)
-        if toggle_mouse_passthrough or toggle_window_passthrough:
-            if self.isVisible():
-                super().show()
-        if had_keyboard_grab and enable_passthrough:
-            self._release_keyboard_capture()
+        context: contextlib.AbstractContextManager[bool]
+        if need_keyboard_release:
+            context = self._temporarily_release_keyboard()
+        else:
+            context = contextlib.nullcontext(self._keyboard_grabbed)
+        had_keyboard_returned = False
         try:
-            yield had_keyboard_grab
+            with context as had_keyboard:
+                had_keyboard_returned = bool(had_keyboard)
+                yield had_keyboard
         finally:
-            if toggle_mouse_passthrough:
-                self.setAttribute(
-                    Qt.WidgetAttribute.WA_TransparentForMouseEvents,
-                    prev_mouse_passthrough,
-                )
-            if toggle_window_passthrough:
-                self.setWindowFlag(
-                    Qt.WindowType.WindowTransparentForInput,
-                    prev_window_passthrough,
-                )
-            if toggle_mouse_passthrough or toggle_window_passthrough:
-                if self.isVisible():
-                    super().show()
-            if had_keyboard_grab and enable_passthrough:
+            if need_keyboard_release and had_keyboard_returned and not self._keyboard_grabbed:
                 self._ensure_keyboard_capture()
 
     def _extract_wheel_delta(self, event: Optional[QWheelEvent]) -> int:
@@ -5085,6 +5087,8 @@ class OverlayWindow(QWidget):
         wheel_event: Optional[QWheelEvent] = None,
         prefer_scroll: Optional[bool] = None,
     ) -> Tuple[bool, bool]:
+        if self.whiteboard_active:
+            return False, self._keyboard_grabbed
         with self._navigation_action_context(
             vk_code=vk_code,
             wheel_event=wheel_event,
@@ -5420,7 +5424,7 @@ class OverlayWindow(QWidget):
     def wheelEvent(self, e: QWheelEvent) -> None:
         handled = False
         had_grab = False
-        if self.mode in {"brush", "shape", "eraser", "cursor"}:
+        if self.mode in {"brush", "shape", "eraser", "cursor"} and not self.whiteboard_active:
             self._after_navigation_wheel(e)
             handled, had_grab = self._dispatch_navigation_session(
                 wheel_event=e,
