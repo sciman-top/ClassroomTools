@@ -68,6 +68,7 @@ VK_RIGHT = getattr(win32con, "VK_RIGHT", 0x27)
 KEYEVENTF_EXTENDEDKEY = getattr(win32con, "KEYEVENTF_EXTENDEDKEY", 0x0001)
 KEYEVENTF_KEYUP = getattr(win32con, "KEYEVENTF_KEYUP", 0x0002)
 _NAVIGATION_EXTENDED_KEYS = {VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT}
+MOUSEEVENTF_WHEEL = getattr(win32con, "MOUSEEVENTF_WHEEL", 0x0800)
 
 if _USER32 is not None:
     _WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
@@ -210,10 +211,12 @@ from PyQt6.QtGui import (
     QPen,
     QPixmap,
     QKeyEvent,
+    QMouseEvent,
     QResizeEvent,
     QScreen,
     QWheelEvent,
     QAction,
+    QGuiApplication,
 )
 from PyQt6.QtWidgets import (
     QApplication,
@@ -240,6 +243,13 @@ from PyQt6.QtWidgets import (
     QWidget,
     QToolTip,
 )
+
+_QT_NAVIGATION_KEYS = {
+    Qt.Key.Key_Up,
+    Qt.Key.Key_Down,
+    Qt.Key.Key_Left,
+    Qt.Key.Key_Right,
+}
 
 # ---------- 运行环境准备 ----------
 
@@ -407,6 +417,12 @@ def ensure_high_dpi_awareness() -> None:
         return
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
     os.environ.setdefault("QT_SCALE_FACTOR_ROUNDING_POLICY", "PassThrough")
+    try:
+        QGuiApplication.setHighDpiScaleFactorRoundingPolicy(
+            Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+        )
+    except Exception:
+        pass
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(2)
     except Exception:
@@ -1789,8 +1805,12 @@ class FloatingToolbar(QWidget):
         for color_hex, button in zip([c for c, _ in brush_configs], brush_buttons):
             button.clicked.connect(lambda _checked, c=color_hex: self.overlay.use_brush_color(c))
         self.btn_shape.clicked.connect(self._select_shape)
-        self.btn_slide_down.clicked.connect(self.overlay.go_to_next_slide)
-        self.btn_slide_up.clicked.connect(self.overlay.go_to_previous_slide)
+        self.btn_slide_down.clicked.connect(
+            lambda _checked=False: self.overlay.go_to_next_slide(via_toolbar=True)
+        )
+        self.btn_slide_up.clicked.connect(
+            lambda _checked=False: self.overlay.go_to_previous_slide(via_toolbar=True)
+        )
         self.btn_undo.clicked.connect(self.overlay.undo_last_action)
         self.btn_eraser.clicked.connect(self.overlay.toggle_eraser_mode)
         self.btn_clear_all.clicked.connect(self.overlay.clear_all)
@@ -1869,12 +1889,33 @@ class FloatingToolbar(QWidget):
         self.style().polish(self.btn_whiteboard)
 
     def enterEvent(self, event) -> None:
+        self.overlay.handle_toolbar_enter()
         self.overlay.raise_toolbar()
         super().enterEvent(event)
 
     def leaveEvent(self, event) -> None:
         super().leaveEvent(event)
+        self.overlay.handle_toolbar_leave()
         QTimer.singleShot(0, self.overlay.on_toolbar_mouse_leave)
+
+    def wheelEvent(self, event) -> None:
+        handled = False
+        forwarder = getattr(self.overlay, "_forwarder", None)
+        if forwarder is not None and (
+            getattr(self.overlay, "mode", "") == "cursor"
+            or getattr(self.overlay, "navigation_active", False)
+        ):
+            try:
+                handled = forwarder.forward_wheel(
+                    event,
+                    allow_cursor=True,
+                )
+            except Exception:
+                handled = False
+        if handled:
+            event.accept()
+            return
+        super().wheelEvent(event)
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
@@ -1957,24 +1998,25 @@ class _PresentationForwarder:
         _InputUnion = None  # type: ignore[assignment]
         _Input = None  # type: ignore[assignment]
 
-    _KNOWN_PRESENTATION_CLASSES: Set[str] = (
-        {
-            "screenclass",
-            "pptframeclass",
-            "pptviewwndclass",
-            "powerpntframeclass",
-            "powerpointframeclass",
-            "opusapp",
-            "acrobatsdiwindow",
-            "kwppframeclass",
-            "kwppmainframe",
-            "kwpsframeclass",
-            "wpsframeclass",
-            "wpsmainframe",
-        }
-        if win32gui is not None
-        else set()
-    )
+    _KNOWN_PRESENTATION_CLASSES: Set[str] = {
+        "screenclass",
+        "pptframeclass",
+        "pptviewwndclass",
+        "powerpntframeclass",
+        "powerpointframeclass",
+        "opusapp",
+        "acrobatsdiwindow",
+        "kwppframeclass",
+        "kwppmainframe",
+        "kwpsframeclass",
+        "wpsframeclass",
+        "wpsmainframe",
+        "nuidocumentwindow",
+        "netuihwnd",
+        "_wwg",
+        "_wwb",
+        "worddocument",
+    }
     _KNOWN_PRESENTATION_PREFIXES: Tuple[str, ...] = (
         ("kwpp", "kwps", "wpsframe", "wpsmain") if win32gui is not None else tuple()
     )
@@ -1985,6 +2027,16 @@ class _PresentationForwarder:
         "kwppshowframe",
         "kwppshowwndclass",
         "kwpsshowframe",
+    }
+    _PRESENTATION_EDITOR_CLASSES: Set[str] = {
+        "pptframeclass",
+        "powerpntframeclass",
+        "powerpointframeclass",
+        "kwppframeclass",
+        "kwppmainframe",
+        "kwpsframeclass",
+        "wpsframeclass",
+        "wpsmainframe",
     }
     _KEY_FORWARD_MAP: Dict[int, int] = (
         {
@@ -2094,8 +2146,8 @@ class _PresentationForwarder:
             self._last_target_hwnd = target
         return activated
 
-    def forward_wheel(self, event: QWheelEvent) -> bool:
-        if not self._can_forward():
+    def forward_wheel(self, event: QWheelEvent, *, allow_cursor: bool = False) -> bool:
+        if not self._can_forward(allow_cursor=allow_cursor):
             self.clear_cached_target()
             return False
         delta_vec = event.angleDelta()
@@ -2116,19 +2168,19 @@ class _PresentationForwarder:
         x_word = ctypes.c_short(global_pos.x()).value & 0xFFFF
         y_word = ctypes.c_short(global_pos.y()).value & 0xFFFF
         l_param = x_word | (y_word << 16)
+        delivered = False
         with self._keyboard_capture_guard():
             focus_ok = self.bring_target_to_foreground(target)
             if not focus_ok:
                 focus_ok = self._activate_window_for_input(target)
-            try:
-                delivered = bool(win32api.PostMessage(target, win32con.WM_MOUSEWHEEL, w_param, l_param))
-            except Exception:
-                delivered = False
+            for hwnd, update_cache in self._iter_wheel_targets(target):
+                if self._deliver_mouse_wheel(hwnd, w_param, l_param):
+                    delivered = True
+                    if update_cache:
+                        self._last_target_hwnd = target
+                    break
             if not delivered and focus_ok:
-                try:
-                    delivered = bool(win32api.PostMessage(target, win32con.WM_MOUSEWHEEL, w_param, l_param))
-                except Exception:
-                    delivered = False
+                delivered = self._deliver_mouse_wheel(target, w_param, l_param)
         if not delivered:
             self.clear_cached_target()
         return delivered
@@ -2193,12 +2245,13 @@ class _PresentationForwarder:
         return success
 
     # ---- 内部工具方法 ----
-    def _can_forward(self) -> bool:
+    def _can_forward(self, *, allow_cursor: bool = False) -> bool:
         if not self.is_supported():
             return False
-        if getattr(self.overlay, "mode", "cursor") == "cursor":
-            return False
         if getattr(self.overlay, "whiteboard_active", False):
+            return False
+        mode = getattr(self.overlay, "mode", "cursor")
+        if mode == "cursor" and not allow_cursor:
             return False
         return True
 
@@ -2365,25 +2418,41 @@ class _PresentationForwarder:
         return thread_id
 
     def _activate_window_for_input(self, hwnd: int) -> bool:
-        if _USER32 is None:
+        if _USER32 is None or hwnd == 0:
             return False
         root_hwnd = self._top_level_hwnd(hwnd)
+        use_root = (
+            root_hwnd
+            and root_hwnd != hwnd
+            and self._has_window_caption(root_hwnd) is not True
+        )
+        handles_for_activation: List[int] = [hwnd]
+        if use_root and root_hwnd:
+            handles_for_activation.append(root_hwnd)
         activated = False
-        try:
-            activated = bool(_USER32.SetActiveWindow(wintypes.HWND(root_hwnd)))
-        except Exception:
-            activated = False
-        if not activated:
+        for handle in handles_for_activation:
+            if handle == 0:
+                continue
             try:
-                activated = bool(_USER32.SetForegroundWindow(wintypes.HWND(root_hwnd)))
+                if _USER32.SetActiveWindow(wintypes.HWND(handle)):
+                    activated = True
             except Exception:
-                activated = False
+                pass
+            if activated:
+                break
+            try:
+                if _USER32.SetForegroundWindow(wintypes.HWND(handle)):
+                    activated = True
+            except Exception:
+                pass
+            if activated:
+                break
         focus_ok = False
         try:
             focus_ok = bool(_USER32.SetFocus(wintypes.HWND(hwnd)))
         except Exception:
             focus_ok = False
-        if not focus_ok and root_hwnd != hwnd:
+        if not focus_ok and use_root and root_hwnd and root_hwnd != hwnd:
             try:
                 focus_ok = bool(_USER32.SetFocus(wintypes.HWND(root_hwnd)))
             except Exception:
@@ -2446,30 +2515,94 @@ class _PresentationForwarder:
                 return 0
         return 0
 
+    def _target_priority(self, hwnd: int, *, base: int) -> int:
+        score = base
+        class_name = self._window_class_name(hwnd)
+        if self._is_slideshow_class(class_name):
+            score += 520
+        elif class_name in self._KNOWN_PRESENTATION_CLASSES:
+            score += 300
+        if class_name in self._PRESENTATION_EDITOR_CLASSES:
+            score -= 340
+        if class_name.startswith("_ww") or "document" in class_name or "viewer" in class_name:
+            score += 220
+        has_caption = self._has_window_caption(hwnd)
+        if has_caption is False:
+            score += 160
+        elif has_caption is True:
+            score -= 180
+        rect = self._get_window_rect_generic(hwnd)
+        if rect is not None:
+            left, top, right, bottom = rect
+            width = max(0, right - left)
+            height = max(0, bottom - top)
+            if width > 0 and height > 0:
+                area = width * height
+                score += min(area // 24000, 160)
+                if width >= 600 and height >= 400:
+                    score += 80
+        is_topmost = self._is_topmost_window(hwnd)
+        if is_topmost:
+            score += 40
+        return score
+
     def _iter_key_targets(self, target: int) -> Iterable[Tuple[int, bool]]:
         seen: Set[int] = set()
+        ranked: List[Tuple[int, int, bool]] = []
 
-        def _push(
+        def _register(
             hwnd: int,
             *,
             cache: bool,
             require_visible: bool,
-        ) -> Iterable[Tuple[int, bool]]:
+            base: int,
+        ) -> None:
             if hwnd in seen:
-                return ()
+                return
             if not self._is_keyboard_target(hwnd, require_visible=require_visible):
-                return ()
+                return
             seen.add(hwnd)
-            return ((hwnd, cache),)
+            priority = self._target_priority(hwnd, base=base)
+            ranked.append((priority, hwnd, cache))
 
         for focus_hwnd in self._gather_thread_focus_handles(target):
-            for candidate in _push(focus_hwnd, cache=False, require_visible=False):
-                yield candidate
-        for candidate in _push(target, cache=True, require_visible=True):
-            yield candidate
+            _register(focus_hwnd, cache=False, require_visible=False, base=900)
+        _register(target, cache=True, require_visible=True, base=820)
         for child_hwnd in self._collect_descendant_windows(target):
-            for candidate in _push(child_hwnd, cache=False, require_visible=False):
-                yield candidate
+            _register(child_hwnd, cache=False, require_visible=False, base=780)
+
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        for _priority, hwnd, cache in ranked:
+            yield hwnd, cache
+
+    def _iter_wheel_targets(self, target: int) -> Iterable[Tuple[int, bool]]:
+        seen: Set[int] = set()
+        ranked: List[Tuple[int, int, bool]] = []
+
+        def _append(
+            hwnd: int,
+            *,
+            cache: bool,
+            require_visible: bool,
+            base: int,
+        ) -> None:
+            if hwnd in seen:
+                return
+            if not self._is_keyboard_target(hwnd, require_visible=require_visible):
+                return
+            seen.add(hwnd)
+            priority = self._target_priority(hwnd, base=base)
+            ranked.append((priority, hwnd, cache))
+
+        for focus_hwnd in self._gather_thread_focus_handles(target):
+            _append(focus_hwnd, cache=False, require_visible=False, base=880)
+        _append(target, cache=True, require_visible=True, base=800)
+        for child_hwnd in self._collect_descendant_windows(target):
+            _append(child_hwnd, cache=False, require_visible=False, base=760)
+
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        for _priority, hwnd, cache in ranked:
+            yield hwnd, cache
 
     def _build_key_lparam(self, vk_code: int, event: QKeyEvent, is_press: bool) -> int:
         repeat_getter = getattr(event, "count", None)
@@ -2525,6 +2658,34 @@ class _PresentationForwarder:
             sent = 0
         return bool(sent)
 
+    def _deliver_mouse_wheel(self, hwnd: int, w_param: int, l_param: int) -> bool:
+        if hwnd == 0:
+            return False
+        delivered = False
+        if win32api is not None and win32con is not None:
+            try:
+                delivered = bool(win32api.PostMessage(hwnd, win32con.WM_MOUSEWHEEL, w_param, l_param))
+            except Exception:
+                delivered = False
+        if delivered:
+            return True
+        if _USER32 is None:
+            return False
+        result = ctypes.c_size_t()
+        try:
+            sent = _USER32.SendMessageTimeoutW(
+                hwnd,
+                win32con.WM_MOUSEWHEEL if win32con is not None else 0x020A,
+                wintypes.WPARAM(w_param),
+                wintypes.LPARAM(l_param),
+                self._SMTO_ABORTIFHUNG,
+                30,
+                ctypes.byref(result),
+            )
+        except Exception:
+            sent = 0
+        return bool(sent)
+
     def _is_overlay_window(self, hwnd: int) -> bool:
         try:
             overlay_hwnd = int(self.overlay.winId()) if self.overlay.winId() else 0
@@ -2534,6 +2695,8 @@ class _PresentationForwarder:
 
     def _is_keyboard_target(self, hwnd: int, *, require_visible: bool) -> bool:
         if hwnd == 0 or self._is_overlay_window(hwnd):
+            return False
+        if self._should_ignore_window(hwnd):
             return False
         if win32gui is None:
             return False
@@ -2617,6 +2780,13 @@ class _PresentationForwarder:
         bottom = top + rect.height()
         return left, top, right, bottom
 
+    def _overlay_center_point(self) -> Optional[Tuple[int, int]]:
+        rect = self._overlay_rect_tuple()
+        if rect is None:
+            return None
+        left, top, right, bottom = rect
+        return ((left + right) // 2, (top + bottom) // 2)
+
     def _rect_intersects_overlay(self, rect: Tuple[int, int, int, int]) -> bool:
         overlay_rect = self._overlay_rect_tuple()
         if overlay_rect is None:
@@ -2640,8 +2810,65 @@ class _PresentationForwarder:
             return False
         return self._rect_intersects_overlay(rect)
 
+    def _window_process_id(self, hwnd: int) -> Optional[int]:
+        if _USER32 is None or hwnd == 0:
+            return None
+        pid = wintypes.DWORD()
+        try:
+            _USER32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(pid))
+        except Exception:
+            return None
+        value = int(pid.value)
+        return value or None
+
+    def _is_own_process_window(self, hwnd: int) -> bool:
+        try:
+            pid = self._window_process_id(hwnd)
+            return pid == os.getpid() if pid is not None else False
+        except Exception:
+            return False
+
+    def _toolbar_hwnd(self) -> int:
+        toolbar = getattr(self.overlay, "toolbar", None)
+        if toolbar is None:
+            return 0
+        try:
+            wid = toolbar.winId()
+        except Exception:
+            return 0
+        return int(wid) if wid else 0
+
+    def _photo_overlay_hwnd(self) -> int:
+        photo = getattr(self.overlay, "_photo_overlay", None)
+        if photo is None:
+            return 0
+        try:
+            wid = photo.winId()
+        except Exception:
+            return 0
+        return int(wid) if wid else 0
+
+    def _should_ignore_window(self, hwnd: int) -> bool:
+        if hwnd == 0:
+            return True
+        try:
+            overlay_hwnd = int(self.overlay.winId()) if self.overlay.winId() else 0
+        except Exception:
+            overlay_hwnd = 0
+        if hwnd == overlay_hwnd:
+            return True
+        toolbar_hwnd = self._toolbar_hwnd()
+        if toolbar_hwnd and hwnd == toolbar_hwnd:
+            return True
+        photo_hwnd = self._photo_overlay_hwnd()
+        if photo_hwnd and hwnd == photo_hwnd:
+            return True
+        return self._is_own_process_window(hwnd)
+
     def _fallback_is_candidate_window(self, hwnd: int) -> bool:
         if _USER32 is None or hwnd == 0:
+            return False
+        if self._should_ignore_window(hwnd):
             return False
         class_name = _user32_window_class_name(hwnd)
         if not class_name:
@@ -2665,7 +2892,15 @@ class _PresentationForwarder:
             return False
         width_diff = abs(width - o_width)
         height_diff = abs(height - o_height)
-        return width >= 400 and height >= 300 and width_diff <= 64 and height_diff <= 64
+        center = self._overlay_center_point()
+        contains_center = False
+        if center is not None:
+            cx, cy = center
+            contains_center = left <= cx <= right and top <= cy <= bottom
+        size_match = width >= 400 and height >= 300 and width_diff <= 64 and height_diff <= 64
+        if contains_center and width >= 400 and height >= 300:
+            return True
+        return size_match
 
     def _get_window_styles(self, hwnd: int) -> Tuple[Optional[int], Optional[int]]:
         style: Optional[int] = None
@@ -2729,23 +2964,26 @@ class _PresentationForwarder:
 
         score = 0
         if class_name in self._SLIDESHOW_PRIORITY_CLASSES:
-            score += 400
-        elif "screen" in class_name or "slide" in class_name or "show" in class_name:
-            score += 260
+            score += 2000
         elif class_name in self._SLIDESHOW_SECONDARY_CLASSES:
-            score += 180
+            score += 1200
+        elif "screen" in class_name or "slide" in class_name or "show" in class_name:
+            score += 900
         elif class_name in self._KNOWN_PRESENTATION_CLASSES:
-            score += 120
+            score += 400
 
         has_caption = self._has_window_caption(hwnd)
         if has_caption is False:
-            score += 160
+            score += 220
         elif has_caption is True:
-            score -= 40
+            score -= 180
+
+        if class_name in self._PRESENTATION_EDITOR_CLASSES:
+            score -= 600
 
         is_topmost = self._is_topmost_window(hwnd)
         if is_topmost:
-            score += 40
+            score += 80
 
         overlay_rect = self._overlay_rect_tuple()
         if overlay_rect is not None:
@@ -2754,18 +2992,18 @@ class _PresentationForwarder:
             if o_width > 0 and o_height > 0:
                 width_diff = abs(width - o_width)
                 height_diff = abs(height - o_height)
-                size_penalty = min(width_diff + height_diff, 800)
-                score += max(0, 220 - size_penalty // 2)
+                size_penalty = min(width_diff + height_diff, 1600)
+                score += max(0, 320 - size_penalty // 3)
                 area = width * height
                 overlay_area = o_width * o_height
                 if overlay_area > 0:
                     ratio = min(area, overlay_area) / max(area, overlay_area)
-                    score += int(ratio * 120)
+                    score += int(ratio * 160)
                 overlap_x = max(0, min(right, overlay_rect[2]) - max(left, overlay_rect[0]))
                 overlap_y = max(0, min(bottom, overlay_rect[3]) - max(top, overlay_rect[1]))
                 overlap_area = overlap_x * overlap_y
                 if overlap_area > 0 and area > 0:
-                    score += int((overlap_area / area) * 140)
+                    score += int((overlap_area / area) * 180)
 
         return score
 
@@ -2779,6 +3017,7 @@ class _PresentationForwarder:
         if (
             foreground
             and foreground != overlay_hwnd
+            and not self._should_ignore_window(foreground)
             and self._fallback_is_candidate_window(foreground)
         ):
             score = self._candidate_score(foreground)
@@ -2791,6 +3030,8 @@ class _PresentationForwarder:
 
         def _enum_callback(hwnd: int, _l_param: int) -> int:
             if hwnd == overlay_hwnd:
+                return True
+            if self._should_ignore_window(hwnd):
                 return True
             if not _user32_is_window_visible(hwnd) or _user32_is_window_iconic(hwnd):
                 return True
@@ -2836,6 +3077,8 @@ class _PresentationForwarder:
     def _is_candidate_window(self, hwnd: int) -> bool:
         if win32gui is None:
             return self._fallback_is_candidate_window(hwnd)
+        if self._should_ignore_window(hwnd):
+            return False
         try:
             class_name = win32gui.GetClassName(hwnd)
         except Exception:
@@ -2865,7 +3108,15 @@ class _PresentationForwarder:
             return False
         width_diff = abs(width - o_width)
         height_diff = abs(height - o_height)
-        return width >= 400 and height >= 300 and width_diff <= 64 and height_diff <= 64
+        center = self._overlay_center_point()
+        contains_center = False
+        if center is not None:
+            cx, cy = center
+            contains_center = left <= cx <= right and top <= cy <= bottom
+        size_match = width >= 400 and height >= 300 and width_diff <= 64 and height_diff <= 64
+        if contains_center and width >= 400 and height >= 300:
+            return True
+        return size_match
 
     def _detect_presentation_window(self) -> Optional[int]:
         if win32gui is None:
@@ -2877,7 +3128,12 @@ class _PresentationForwarder:
             foreground = 0
         best_hwnd: Optional[int] = None
         best_score = -1
-        if foreground and foreground != overlay_hwnd and self._is_candidate_window(foreground):
+        if (
+            foreground
+            and foreground != overlay_hwnd
+            and not self._should_ignore_window(foreground)
+            and self._is_candidate_window(foreground)
+        ):
             score = self._candidate_score(foreground)
             if score > best_score:
                 best_score = score
@@ -2887,6 +3143,8 @@ class _PresentationForwarder:
 
         def _enum_callback(hwnd: int, acc: List[int]) -> bool:
             if hwnd == overlay_hwnd:
+                return True
+            if self._should_ignore_window(hwnd):
                 return True
             try:
                 if not win32gui.IsWindowVisible(hwnd) or win32gui.IsIconic(hwnd):
@@ -2953,6 +3211,7 @@ class OverlayWindow(QWidget):
     _KNOWN_PRESENTATION_PREFIXES = _PresentationForwarder._KNOWN_PRESENTATION_PREFIXES
     _SLIDESHOW_PRIORITY_CLASSES = _PresentationForwarder._SLIDESHOW_PRIORITY_CLASSES
     _SLIDESHOW_SECONDARY_CLASSES = _PresentationForwarder._SLIDESHOW_SECONDARY_CLASSES
+    _NAVIGATION_RESTORE_DELAY_MS = 600
 
     def __init__(self, settings_manager: SettingsManager) -> None:
         super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
@@ -2978,10 +3237,23 @@ class OverlayWindow(QWidget):
         self._stroke_speed: float = 0.0
         self._stroke_last_midpoint: Optional[QPointF] = None
         self._stroke_filter_point: Optional[QPointF] = None
+        self.navigation_active = False
+        self._navigation_reasons: Dict[str, int] = {}
+        self._active_navigation_keys: Set[int] = set()
+        self._cursor_button_navigation = False
+        self._nav_pointer_button = Qt.MouseButton.NoButton
+        self._nav_pointer_press_pos = QPointF()
+        self._nav_pointer_press_global = QPointF()
+        self._nav_pointer_press_modifiers = Qt.KeyboardModifier.NoModifier
+        self._nav_pointer_started_draw = False
         self._brush_painter: Optional[QPainter] = None
         self._eraser_painter: Optional[QPainter] = None
         self._last_target_hwnd: Optional[int] = None
         self._pending_tool_restore: Optional[Tuple[str, Optional[str]]] = None
+        self._nav_restore_mode: Optional[Tuple[str, Optional[str]]] = None
+        self._nav_restore_timer = QTimer(self)
+        self._nav_restore_timer.setSingleShot(True)
+        self._nav_restore_timer.timeout.connect(self._restore_navigation_tool)
         base_width = float(max(1, self.pen_size))
         self._brush_pen = QPen(
             self.pen_color,
@@ -3124,6 +3396,11 @@ class OverlayWindow(QWidget):
         prev_mode = getattr(self, "mode", None)
         if prev_mode != mode:
             self._release_canvas_painters()
+        if mode != "cursor":
+            self._cancel_navigation_cursor_hold()
+        else:
+            self._set_navigation_reason("cursor-button", False)
+            self._cursor_button_navigation = False
         focus_on_cursor = bool(self._forwarder) and mode == "cursor" and not initial
         self.mode = mode
         if not self._restoring_tool:
@@ -3198,40 +3475,113 @@ class OverlayWindow(QWidget):
         """切换光标模式；再次点击恢复最近的画笔或图形设置。"""
         if self.mode == "cursor":
             self._restore_last_tool()
+            self._set_navigation_reason("cursor-button", True)
             return
+        self._set_navigation_reason("cursor-button", False)
+        self._cursor_button_navigation = False
         self._update_last_tool_snapshot()
         self.set_mode("cursor")
 
-    def go_to_next_slide(self) -> None:
-        self._send_slide_virtual_key(VK_DOWN)
+    def go_to_next_slide(self, *, via_toolbar: bool = False) -> None:
+        self._send_slide_virtual_key(VK_DOWN, via_toolbar=via_toolbar)
 
-    def go_to_previous_slide(self) -> None:
-        self._send_slide_virtual_key(VK_UP)
+    def go_to_previous_slide(self, *, via_toolbar: bool = False) -> None:
+        self._send_slide_virtual_key(VK_UP, via_toolbar=via_toolbar)
 
-    def _send_slide_virtual_key(self, vk_code: int) -> None:
+    def _wheel_delta_for_vk(self, vk_code: int) -> int:
+        if vk_code in (VK_DOWN, VK_RIGHT):
+            return -120
+        if vk_code in (VK_UP, VK_LEFT):
+            return 120
+        return 0
+
+    def _send_slide_virtual_key(self, vk_code: int, *, via_toolbar: bool = False) -> None:
         if vk_code == 0:
             return
+        wheel_delta = self._wheel_delta_for_vk(vk_code)
+        prefer_wheel = via_toolbar or self.navigation_active or self.mode == "cursor"
+        if wheel_delta and prefer_wheel:
+            if self._send_navigation_wheel(wheel_delta):
+                self.raise_toolbar()
+                return
         prev_mode = self.mode
-        prev_shape = self.current_shape if prev_mode == "shape" else None
         if prev_mode in {"brush", "shape"}:
             self._update_last_tool_snapshot()
         with self._temporarily_release_keyboard() as had_keyboard_grab:
             success = self._dispatch_virtual_key(vk_code)
         self._pending_tool_restore = None
         if not success:
+            if via_toolbar:
+                self._cancel_navigation_cursor_hold()
             return
         if not had_keyboard_grab and self.mode != "cursor":
             self._ensure_keyboard_capture()
-        restore_mode = prev_mode if prev_mode in {"brush", "shape", "eraser"} else None
-        if prev_mode != "cursor" and restore_mode:
-            if getattr(self, "toolbar", None) is not None and self.toolbar.underMouse():
-                self._pending_tool_restore = (restore_mode, prev_shape)
-            else:
-                self._pending_tool_restore = None
-                self._restore_last_tool(restore_mode, shape_type=prev_shape)
-        else:
-            self._pending_tool_restore = None
         self.raise_toolbar()
+
+    def _send_navigation_wheel(self, delta: int) -> bool:
+        if delta == 0:
+            return False
+        handled = False
+        if self._forwarder is not None:
+            try:
+                global_pos = QCursor.pos()
+                local_pos = self.mapFromGlobal(global_pos)
+                wheel_event = QWheelEvent(
+                    QPointF(local_pos),
+                    QPointF(global_pos),
+                    QPoint(),
+                    QPoint(0, delta),
+                    Qt.MouseButton.NoButton,
+                    Qt.KeyboardModifier.NoModifier,
+                    Qt.ScrollPhase.ScrollUpdate,
+                    False,
+                )
+                handled = self._forwarder.forward_wheel(
+                    wheel_event,
+                    allow_cursor=(self.mode == "cursor" or self.navigation_active),
+                )
+            except Exception:
+                handled = False
+        if handled:
+            return True
+        return self._fallback_send_wheel(delta)
+
+    def _fallback_send_wheel(self, delta: int) -> bool:
+        if delta == 0 or _USER32 is None:
+            return False
+        try:
+            _USER32.mouse_event(MOUSEEVENTF_WHEEL, 0, 0, delta, 0)
+            return True
+        except Exception:
+            return False
+
+    def _apply_navigation_cursor_hold(self, restore_mode: str, restore_shape: Optional[str]) -> None:
+        if restore_mode not in {"brush", "shape", "eraser"}:
+            return
+        self._nav_restore_mode = (restore_mode, restore_shape)
+        if self.mode != "cursor":
+            self.set_mode("cursor")
+        if self._nav_restore_timer.isActive():
+            self._nav_restore_timer.stop()
+        self._nav_restore_timer.start(self._NAVIGATION_RESTORE_DELAY_MS)
+
+    def _cancel_navigation_cursor_hold(self) -> None:
+        if self._nav_restore_timer.isActive():
+            self._nav_restore_timer.stop()
+        self._nav_restore_mode = None
+
+    def _restore_navigation_tool(self) -> None:
+        pending = self._nav_restore_mode
+        self._nav_restore_mode = None
+        if not pending:
+            return
+        if self.mode != "cursor":
+            return
+        mode, shape = pending
+        if mode == "eraser":
+            self.set_mode("eraser")
+        else:
+            self._restore_last_tool(mode, shape_type=shape)
 
     def _dispatch_virtual_key(self, vk_code: int) -> bool:
         if vk_code == 0:
@@ -3282,6 +3632,68 @@ class OverlayWindow(QWidget):
 
     def cancel_pending_tool_restore(self) -> None:
         self._pending_tool_restore = None
+        self._cancel_navigation_cursor_hold()
+
+    def _set_navigation_reason(self, reason: str, active: bool) -> None:
+        if not reason:
+            return
+        if active:
+            self._navigation_reasons[reason] = self._navigation_reasons.get(reason, 0) + 1
+            if reason == "cursor-button":
+                self._cursor_button_navigation = True
+        else:
+            count = self._navigation_reasons.get(reason)
+            if count is None:
+                if reason == "cursor-button":
+                    self._cursor_button_navigation = False
+                return
+            if count <= 1:
+                self._navigation_reasons.pop(reason, None)
+                if reason == "cursor-button":
+                    self._cursor_button_navigation = False
+            else:
+                self._navigation_reasons[reason] = count - 1
+        self._update_navigation_state()
+
+    def _update_navigation_state(self) -> None:
+        active = bool(self._navigation_reasons)
+        if active == self.navigation_active:
+            return
+        self.navigation_active = active
+        if active:
+            self._cancel_navigation_cursor_hold()
+            self._pending_tool_restore = None
+            if self.drawing:
+                self.drawing = False
+            toolbar = getattr(self, "toolbar", None)
+            if toolbar is not None:
+                try:
+                    self.raise_toolbar()
+                except Exception:
+                    pass
+        self.update_cursor()
+
+    def handle_toolbar_enter(self) -> None:
+        self._set_navigation_reason("toolbar", True)
+        if self.drawing:
+            self.drawing = False
+        self.cancel_pending_tool_restore()
+
+    def handle_toolbar_leave(self) -> None:
+        toolbar = getattr(self, "toolbar", None)
+        if toolbar is not None and toolbar.underMouse():
+            return
+        self._set_navigation_reason("toolbar", False)
+        self._set_navigation_reason("cursor-button", False)
+        if not self.navigation_active and self.mode != "cursor":
+            self.update_cursor()
+
+    def _toolbar_contains_global(self, global_pos: QPoint) -> bool:
+        toolbar = getattr(self, "toolbar", None)
+        if toolbar is None or not toolbar.isVisible():
+            return False
+        local = toolbar.mapFromGlobal(global_pos)
+        return toolbar.rect().contains(local)
 
     def on_toolbar_mouse_leave(self) -> None:
         if not self._pending_tool_restore:
@@ -3309,6 +3721,8 @@ class OverlayWindow(QWidget):
 
     def update_cursor(self) -> None:
         if self.mode == "cursor":
+            self.setCursor(Qt.CursorShape.ArrowCursor); return
+        if self.navigation_active:
             self.setCursor(Qt.CursorShape.ArrowCursor); return
         if self.mode == "shape":
             self.setCursor(Qt.CursorShape.CrossCursor); return
@@ -3410,6 +3824,13 @@ class OverlayWindow(QWidget):
         bottom = top + rect.height()
         return left, top, right, bottom
 
+    def _overlay_center_point(self) -> Optional[Tuple[int, int]]:
+        rect = self._overlay_rect_tuple()
+        if rect is None:
+            return None
+        left, top, right, bottom = rect
+        return ((left + right) // 2, (top + bottom) // 2)
+
     def _rect_intersects_overlay(self, rect: Tuple[int, int, int, int]) -> bool:
         overlay = self._overlay_rect_tuple()
         if overlay is None:
@@ -3433,8 +3854,62 @@ class OverlayWindow(QWidget):
             return False
         return self._rect_intersects_overlay(rect)
 
+    def _window_process_id(self, hwnd: int) -> Optional[int]:
+        if _USER32 is None or hwnd == 0:
+            return None
+        pid = wintypes.DWORD()
+        try:
+            _USER32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(pid))
+        except Exception:
+            return None
+        value = int(pid.value)
+        return value or None
+
+    def _is_own_process_window(self, hwnd: int) -> bool:
+        try:
+            pid = self._window_process_id(hwnd)
+            return pid == os.getpid() if pid is not None else False
+        except Exception:
+            return False
+
+    def _toolbar_hwnd(self) -> int:
+        toolbar = getattr(self, "toolbar", None)
+        if toolbar is None:
+            return 0
+        try:
+            wid = toolbar.winId()
+        except Exception:
+            return 0
+        return int(wid) if wid else 0
+
+    def _photo_overlay_hwnd(self) -> int:
+        photo = getattr(self, "_photo_overlay", None)
+        if photo is None:
+            return 0
+        try:
+            wid = photo.winId()
+        except Exception:
+            return 0
+        return int(wid) if wid else 0
+
+    def _should_ignore_window(self, hwnd: int) -> bool:
+        if hwnd == 0:
+            return True
+        overlay_hwnd = int(self.winId()) if self.winId() else 0
+        if hwnd == overlay_hwnd:
+            return True
+        toolbar_hwnd = self._toolbar_hwnd()
+        if toolbar_hwnd and hwnd == toolbar_hwnd:
+            return True
+        photo_hwnd = self._photo_overlay_hwnd()
+        if photo_hwnd and hwnd == photo_hwnd:
+            return True
+        return self._is_own_process_window(hwnd)
+
     def _fallback_is_candidate_window(self, hwnd: int) -> bool:
         if _USER32 is None or hwnd == 0:
+            return False
+        if self._should_ignore_window(hwnd):
             return False
         class_name = _user32_window_class_name(hwnd)
         if not class_name:
@@ -3458,14 +3933,27 @@ class OverlayWindow(QWidget):
             return False
         width_diff = abs(width - o_width)
         height_diff = abs(height - o_height)
-        return width >= 400 and height >= 300 and width_diff <= 64 and height_diff <= 64
+        center = self._overlay_center_point()
+        contains_center = False
+        if center is not None:
+            cx, cy = center
+            contains_center = left <= cx <= right and top <= cy <= bottom
+        size_match = width >= 400 and height >= 300 and width_diff <= 64 and height_diff <= 64
+        if contains_center and width >= 400 and height >= 300:
+            return True
+        return size_match
 
     def _fallback_detect_presentation_window_user32(self) -> Optional[int]:
         if _USER32 is None:
             return None
         overlay_hwnd = int(self.winId()) if self.winId() else 0
         foreground = _user32_get_foreground_window()
-        if foreground and foreground != overlay_hwnd and self._fallback_is_candidate_window(foreground):
+        if (
+            foreground
+            and foreground != overlay_hwnd
+            and not self._should_ignore_window(foreground)
+            and self._fallback_is_candidate_window(foreground)
+        ):
             return foreground
         if _WNDENUMPROC is None:
             return None
@@ -3473,6 +3961,8 @@ class OverlayWindow(QWidget):
 
         def _enum_callback(hwnd: int, _l_param: int) -> int:
             if hwnd == overlay_hwnd:
+                return True
+            if self._should_ignore_window(hwnd):
                 return True
             if not _user32_is_window_visible(hwnd) or _user32_is_window_iconic(hwnd):
                 return True
@@ -3558,13 +4048,19 @@ class OverlayWindow(QWidget):
             foreground = win32gui.GetForegroundWindow()
         except Exception:
             foreground = 0
-        if foreground and foreground != overlay_hwnd:
-            if self._is_candidate_presentation_window(foreground):
-                return foreground
+        if (
+            foreground
+            and foreground != overlay_hwnd
+            and not self._should_ignore_window(foreground)
+            and self._is_candidate_presentation_window(foreground)
+        ):
+            return foreground
         candidates: List[int] = []
 
         def _enum_callback(hwnd: int, result: List[int]) -> bool:
             if hwnd == overlay_hwnd:
+                return True
+            if self._should_ignore_window(hwnd):
                 return True
             try:
                 if not win32gui.IsWindowVisible(hwnd) or win32gui.IsIconic(hwnd):
@@ -3624,6 +4120,8 @@ class OverlayWindow(QWidget):
     def _is_candidate_presentation_window(self, hwnd: int) -> bool:
         if win32gui is None:
             return self._fallback_is_candidate_window(hwnd)
+        if self._should_ignore_window(hwnd):
+            return False
         try:
             class_name = win32gui.GetClassName(hwnd).lower()
         except Exception:
@@ -3648,7 +4146,15 @@ class OverlayWindow(QWidget):
             return False
         width_diff = abs(width - o_width)
         height_diff = abs(height - o_height)
-        return width >= 400 and height >= 300 and width_diff <= 64 and height_diff <= 64
+        center = self._overlay_center_point()
+        contains_center = False
+        if center is not None:
+            cx, cy = center
+            contains_center = left <= cx <= right and top <= cy <= bottom
+        size_match = width >= 400 and height >= 300 and width_diff <= 64 and height_diff <= 64
+        if contains_center and width >= 400 and height >= 300:
+            return True
+        return size_match
 
     def _update_visibility_for_mode(self, *, initial: bool = False) -> None:
         passthrough = (self.mode == "cursor") and (not self.whiteboard_active)
@@ -3740,7 +4246,8 @@ class OverlayWindow(QWidget):
 
     # ---- 画图事件 ----
     def wheelEvent(self, e) -> None:
-        if self._forwarder and self._forwarder.forward_wheel(e):
+        allow_cursor = self.mode == "cursor" or self.navigation_active
+        if self._forwarder and self._forwarder.forward_wheel(e, allow_cursor=allow_cursor):
             e.accept()
             return
         super().wheelEvent(e)
@@ -3791,7 +4298,26 @@ class OverlayWindow(QWidget):
         return dirty_region
 
     def mousePressEvent(self, e) -> None:
-        if e.button() == Qt.MouseButton.LeftButton and self.mode != "cursor":
+        global_point = e.globalPosition().toPoint()
+        inside_toolbar = self._toolbar_contains_global(global_point)
+        if (
+            not inside_toolbar
+            and self.mode != "cursor"
+            and e.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton)
+        ):
+            self._nav_pointer_button = e.button()
+            self._nav_pointer_press_pos = QPointF(e.position())
+            self._nav_pointer_press_global = QPointF(e.globalPosition())
+            self._nav_pointer_press_modifiers = e.modifiers()
+            self._nav_pointer_started_draw = False
+            self._set_navigation_reason("pointer", True)
+            self.cancel_pending_tool_restore()
+            self._cancel_navigation_cursor_hold()
+        if (
+            e.button() == Qt.MouseButton.LeftButton
+            and self.mode != "cursor"
+            and not self.navigation_active
+        ):
             self._ensure_keyboard_capture()
             self._start_paint_session(e)
             self.raise_toolbar()
@@ -3799,6 +4325,27 @@ class OverlayWindow(QWidget):
         super().mousePressEvent(e)
 
     def mouseMoveEvent(self, e) -> None:
+        if (
+            self._nav_pointer_button == Qt.MouseButton.LeftButton
+            and not self._nav_pointer_started_draw
+            and (e.buttons() & Qt.MouseButton.LeftButton)
+        ):
+            delta = e.position() - self._nav_pointer_press_pos
+            if abs(delta.x()) >= 2 or abs(delta.y()) >= 2:
+                self._nav_pointer_started_draw = True
+                self._set_navigation_reason("pointer", False)
+                synthetic_press = QMouseEvent(
+                    QEvent.Type.MouseButtonPress,
+                    QPointF(self._nav_pointer_press_pos),
+                    QPointF(self._nav_pointer_press_global),
+                    Qt.MouseButton.LeftButton,
+                    Qt.MouseButton.LeftButton,
+                    self._nav_pointer_press_modifiers,
+                )
+                self._ensure_keyboard_capture()
+                self._start_paint_session(synthetic_press)
+                self.raise_toolbar()
+                self._nav_pointer_button = Qt.MouseButton.NoButton
         if self.drawing and self.mode != "cursor":
             p = e.pos(); pf = e.position()
             dirty_region = None
@@ -3813,6 +4360,10 @@ class OverlayWindow(QWidget):
         super().mouseMoveEvent(e)
 
     def mouseReleaseEvent(self, e) -> None:
+        if e.button() == self._nav_pointer_button:
+            self._set_navigation_reason("pointer", False)
+            self._nav_pointer_button = Qt.MouseButton.NoButton
+            self._nav_pointer_started_draw = False
         if e.button() == Qt.MouseButton.LeftButton and self.drawing:
             dirty_region = self._finalize_paint_session(e.pos())
             if dirty_region is not None:
@@ -3822,6 +4373,16 @@ class OverlayWindow(QWidget):
         super().mouseReleaseEvent(e)
 
     def keyPressEvent(self, e: QKeyEvent) -> None:
+        if e.key() in _QT_NAVIGATION_KEYS:
+            if not e.isAutoRepeat():
+                self._active_navigation_keys.add(e.key())
+                self._set_navigation_reason("keyboard", True)
+            if e.key() in (Qt.Key.Key_Down, Qt.Key.Key_Right):
+                self.go_to_next_slide()
+            else:
+                self.go_to_previous_slide()
+            e.accept()
+            return
         if self._forwarder and self._forwarder.forward_key(e, is_press=True):
             e.accept()
             return
@@ -3830,6 +4391,12 @@ class OverlayWindow(QWidget):
         super().keyPressEvent(e)
 
     def keyReleaseEvent(self, e: QKeyEvent) -> None:
+        if e.key() in _QT_NAVIGATION_KEYS:
+            if not e.isAutoRepeat() and e.key() in self._active_navigation_keys:
+                self._active_navigation_keys.discard(e.key())
+                self._set_navigation_reason("keyboard", False)
+            e.accept()
+            return
         if self._forwarder and self._forwarder.forward_key(e, is_press=False):
             e.accept()
             return
@@ -5370,72 +5937,55 @@ class StudentPhotoOverlay(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setStyleSheet("background: transparent;")
         self._owner = owner
         self._current_pixmap = QPixmap()
-        self._full_screen_active = False
         self._auto_close_duration_ms = 0
         self._auto_close_timer = QTimer(self)
         self._auto_close_timer.setSingleShot(True)
         self._auto_close_timer.timeout.connect(self._handle_auto_close)
 
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(0)
-
-        self._container = QFrame(self)
-        self._container.setObjectName("studentPhotoContainer")
-        self._container.setStyleSheet(
-            """
-            QFrame#studentPhotoContainer {
-                background-color: rgba(0, 0, 0, 208);
-                border-radius: 16px;
-            }
-            QToolButton {
-                color: #f5f5f5;
-                background-color: rgba(255, 255, 255, 48);
-                border: 1px solid rgba(255, 255, 255, 96);
-                border-radius: 11px;
-                padding: 0;
-            }
-            QToolButton:hover {
-                background-color: rgba(255, 255, 255, 88);
-            }
-            """
-        )
-        outer.addWidget(self._container)
-
-        self._container_layout = QVBoxLayout(self._container)
-        self._container_layout.setContentsMargins(28, 28, 28, 20)
-        self._container_layout.setSpacing(12)
-
-        self._photo_label = QLabel(self._container)
+        self._photo_label = QLabel(self)
         self._photo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._photo_label.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum)
-        self._container_layout.addWidget(self._photo_label, 1)
+        self._photo_label.setStyleSheet("background: transparent;")
+        self._photo_label.setSizePolicy(
+            QSizePolicy.Policy.Fixed,
+            QSizePolicy.Policy.Fixed,
+        )
+        self._photo_label.installEventFilter(self)
 
-        button_row = QHBoxLayout()
-        button_row.setContentsMargins(0, 0, 0, 0)
-        button_row.setSpacing(0)
         self._left_close = self._make_close_button()
         self._right_close = self._make_close_button()
-        button_row.addWidget(self._left_close, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
-        button_row.addStretch(1)
-        button_row.addWidget(self._right_close, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom)
-        self._container_layout.addLayout(button_row)
-
         self._left_close.clicked.connect(lambda: self._handle_close_request(manual=True))
         self._right_close.clicked.connect(lambda: self._handle_close_request(manual=True))
+        self._left_close.pressed.connect(self._safe_stack_below_owner)
+        self._right_close.pressed.connect(self._safe_stack_below_owner)
 
     def update_owner(self, owner: Optional[QWidget]) -> None:
         self._owner = owner
 
     def _make_close_button(self) -> QToolButton:
-        button = QToolButton(self._container)
+        button = QToolButton(self)
         button.setAutoRaise(True)
+        button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         button.setCursor(Qt.CursorShape.PointingHandCursor)
-        button.setText("X")
+        button.setText("✕")
         button.setToolTip("关闭照片")
-        button.setFixedSize(24, 24)
+        button.setFixedSize(22, 22)
+        button.setStyleSheet(
+            """
+            QToolButton {
+                color: #f5f5f5;
+                background-color: rgba(32, 32, 32, 168);
+                border: 1px solid rgba(255, 255, 255, 120);
+                border-radius: 11px;
+                padding: 0;
+            }
+            QToolButton:hover {
+                background-color: rgba(32, 32, 32, 210);
+            }
+            """
+        )
         return button
 
     def _handle_close_request(self, *, manual: bool) -> None:
@@ -5466,132 +6016,151 @@ class StudentPhotoOverlay(QWidget):
         self._auto_close_duration_ms = max(0, int(duration_ms))
         self._auto_close_timer.stop()
         self._current_pixmap = pixmap
-        max_size = screen_rect.size()
+        available_size = screen_rect.size()
         original_size = pixmap.size()
-        can_cover_screen = (
-            original_size.width() >= screen_rect.width()
-            and original_size.height() >= screen_rect.height()
-        )
-        full_screen = can_cover_screen
-        if full_screen:
+        if (
+            original_size.width() > available_size.width()
+            or original_size.height() > available_size.height()
+        ):
             scaled = pixmap.scaled(
-                max_size,
+                available_size,
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             )
         else:
-            if (
-                original_size.width() <= screen_rect.width()
-                and original_size.height() <= screen_rect.height()
-            ):
-                scaled = pixmap
-            else:
-                scaled = pixmap.scaled(
-                    max_size,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-        self._apply_full_screen_style(full_screen)
+            scaled = pixmap
         self._photo_label.setPixmap(scaled)
-        self._photo_label.setFixedSize(scaled.size())
-        if full_screen:
-            self.resize(screen_rect.size())
-            self.move(screen_rect.topLeft())
-            self._container.resize(self.size())
-        else:
-            if self.layout() is not None:
-                self.layout().activate()
-            self.adjustSize()
-            window_size = self.size()
-            width = min(window_size.width(), screen_rect.width())
-            height = min(window_size.height(), screen_rect.height())
-            x = screen_rect.x() + max(0, (screen_rect.width() - width) // 2)
-            y = screen_rect.y() + max(0, (screen_rect.height() - height) // 2)
-            self.resize(width, height)
-            self.move(int(x), int(y))
-            self._container.adjustSize()
+        target_size = scaled.size()
+        self.resize(target_size)
+        self._photo_label.resize(target_size)
+        self._photo_label.move(0, 0)
+        x = screen_rect.x() + max(0, (screen_rect.width() - target_size.width()) // 2)
+        y = screen_rect.y() + max(0, (screen_rect.height() - target_size.height()) // 2)
+        self.move(int(x), int(y))
         self.show()
+        self._update_close_button_positions()
         self._stack_below_owner()
         self.schedule_auto_close(self._auto_close_duration_ms)
 
-    def _apply_full_screen_style(self, full_screen: bool) -> None:
-        if self._full_screen_active == full_screen:
-            return
-        self._full_screen_active = full_screen
-        if full_screen:
-            self._container_layout.setContentsMargins(24, 24, 24, 32)
-            self._container.setStyleSheet(
-                """
-                QFrame#studentPhotoContainer {
-                    background-color: rgba(0, 0, 0, 230);
-                    border-radius: 0px;
-                }
-                QToolButton {
-                    color: #f5f5f5;
-                    background-color: rgba(255, 255, 255, 48);
-                    border: 1px solid rgba(255, 255, 255, 96);
-                    border-radius: 11px;
-                    padding: 0;
-                }
-                QToolButton:hover {
-                    background-color: rgba(255, 255, 255, 96);
-                }
-                """
-            )
-        else:
-            self._container_layout.setContentsMargins(8, 8, 8, 12)
-            self._container.setStyleSheet(
-                """
-                QFrame#studentPhotoContainer {
-                    background-color: transparent;
-                    border: none;
-                }
-                QToolButton {
-                    color: #f5f5f5;
-                    background-color: rgba(255, 255, 255, 48);
-                    border: 1px solid rgba(255, 255, 255, 96);
-                    border-radius: 11px;
-                    padding: 0;
-                }
-                QToolButton:hover {
-                    background-color: rgba(255, 255, 255, 88);
-                }
-                """
-            )
+    def _safe_stack_below_owner(self) -> None:
+        try:
+            self._stack_below_owner()
+        except Exception:
+            pass
 
     def _stack_below_owner(self) -> None:
         owner = self._owner
         if owner is None:
             return
-        try:
-            overlay_hwnd = int(self.winId()) if self.winId() else 0
-            owner_hwnd = int(owner.winId()) if owner.winId() else 0
-        except Exception:
-            overlay_hwnd = 0
-            owner_hwnd = 0
-        if overlay_hwnd == 0 or owner_hwnd == 0:
-            try:
-                owner.raise_()
-            except Exception:
-                pass
+        owner_chain = self._collect_owner_chain(owner)
+        if not owner_chain:
             return
-        if win32gui is not None and win32con is not None:
-            flags = win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE | win32con.SWP_NOOWNERZORDER
+        overlay_rect = self._widget_frame_rect(self)
+        if overlay_rect is None:
+            overlay_rect = QRect(self.pos(), self.size())
+        owner_rects: List[Tuple[QWidget, QRect]] = []
+        needs_raise = False
+        for widget in owner_chain:
+            rect = self._widget_frame_rect(widget)
+            if rect is None:
+                continue
+            owner_rects.append((widget, rect))
+            if overlay_rect.intersects(rect):
+                needs_raise = True
+        if not needs_raise:
+            return
+        owner_hwnds = self._collect_owner_hwnds(owner_chain)
+        if win32gui is not None and win32con is not None and owner_hwnds:
+            flags = (
+                win32con.SWP_NOMOVE
+                | win32con.SWP_NOSIZE
+                | win32con.SWP_NOOWNERZORDER
+                | win32con.SWP_NOACTIVATE
+            )
+            for hwnd in reversed(owner_hwnds):
+                try:
+                    win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0, flags)
+                except Exception:
+                    logger.debug(
+                        "win32gui.SetWindowPos failed for owner window above photo overlay",
+                        exc_info=True,
+                    )
             try:
-                win32gui.SetWindowPos(overlay_hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0, flags)
-                win32gui.SetWindowPos(owner_hwnd, overlay_hwnd, 0, 0, 0, 0, flags)
-            except Exception:
-                logger.debug("win32gui.SetWindowPos failed for photo overlay", exc_info=True)
-        else:
-            try:
-                self.lower()
-                owner.raise_()
+                if owner_hwnds:
+                    _user32_focus_window(owner_hwnds[0])
             except Exception:
                 pass
+        else:
+            for widget, _ in reversed(owner_rects):
+                try:
+                    widget.raise_()
+                except Exception:
+                    continue
+            try:
+                owner_rects[0][0].activateWindow()
+            except Exception:
+                pass
+
+    def _update_close_button_positions(self) -> None:
+        label_geometry = self._photo_label.geometry()
+        if label_geometry.width() <= 0 or label_geometry.height() <= 0:
+            return
+        margin = 8
+        left_x = label_geometry.left() + margin
+        right_x = label_geometry.right() - self._right_close.width() - margin
+        y = label_geometry.bottom() - self._left_close.height() - margin
+        self._left_close.move(int(left_x), int(y))
+        self._right_close.move(int(right_x), int(y))
+        self._left_close.raise_()
+        self._right_close.raise_()
+
+    def resizeEvent(self, event) -> None:
+        self._photo_label.resize(self.size())
+        self._photo_label.move(0, 0)
+        self._update_close_button_positions()
+        super().resizeEvent(event)
+
+    def mousePressEvent(self, event) -> None:
+        self._safe_stack_below_owner()
+        super().mousePressEvent(event)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if watched is self._photo_label and event.type() == QEvent.Type.MouseButtonPress:
+            self._safe_stack_below_owner()
+        return super().eventFilter(watched, event)
+
+    @staticmethod
+    def _collect_owner_chain(owner: QWidget) -> List[QWidget]:
+        chain: List[QWidget] = []
+        current: Optional[QWidget] = owner
+        while isinstance(current, QWidget):
+            chain.append(current)
+            current = current.parentWidget()
+        return chain
+
+    @staticmethod
+    def _collect_owner_hwnds(owner_chain: Iterable[QWidget]) -> List[int]:
+        handles: List[int] = []
+        for widget in owner_chain:
+            try:
+                handle = int(widget.winId()) if widget.winId() else 0
+            except Exception:
+                handle = 0
+            if handle:
+                handles.append(handle)
+        return handles
+
+    @staticmethod
+    def _widget_frame_rect(widget: QWidget) -> Optional[QRect]:
+        if widget is None or not widget.isVisible():
+            return None
         try:
-            owner.raise_()
+            rect = widget.frameGeometry()
         except Exception:
-            pass
+            rect = widget.geometry()
+        if rect.isNull() or not rect.isValid():
+            return None
+        return QRect(rect)
 
 
 class RollCallTimerWindow(QWidget):
