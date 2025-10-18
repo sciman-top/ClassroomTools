@@ -3574,6 +3574,7 @@ class OverlayWindow(QWidget):
         self.whiteboard_active = False
         self.whiteboard_color = QColor(0, 0, 0, 0); self.last_board_color = QColor("#ffffff")
         self.cursor_pixmap = QPixmap()
+        self._canvas_hidden = False
         self._eraser_stroker = QPainterPathStroker()
         self._eraser_stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
         self._eraser_stroker.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
@@ -3957,6 +3958,7 @@ class OverlayWindow(QWidget):
         self.setGeometry(virtual)
         self.canvas = QPixmap(self.size()); self.canvas.fill(Qt.GlobalColor.transparent)
         self.temp_canvas = QPixmap(self.size()); self.temp_canvas.fill(Qt.GlobalColor.transparent)
+        self._canvas_hidden = False
 
     # ---- ͼ��ͼ����� ----
     def _ensure_brush_painter(self) -> QPainter:
@@ -3989,6 +3991,14 @@ class OverlayWindow(QWidget):
     def _release_canvas_painters(self) -> None:
         self._release_brush_painter()
         self._release_eraser_painter()
+
+    def _set_canvas_hidden(self, hidden: bool) -> None:
+        """Switch rendering visibility for the main canvas without losing content."""
+        hidden = bool(hidden)
+        if hidden == self._canvas_hidden:
+            return
+        self._canvas_hidden = hidden
+        self.update()
 
     def _update_brush_pen_appearance(self, width: float, fade_alpha: int) -> None:
         width = max(0.6, float(width))
@@ -4415,6 +4425,8 @@ class OverlayWindow(QWidget):
     # ---- 系统级穿透 ----
     def _apply_input_passthrough(self, enabled: bool) -> None:
         """Toggle system-level input passthrough for cursor/navigation mode."""
+        hide_canvas = bool(enabled) and self.mode == ToolMode.CURSOR.value and not self.whiteboard_active
+        self._set_canvas_hidden(hide_canvas)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, enabled)
         self.setWindowFlag(Qt.WindowType.WindowTransparentForInput, enabled)
         if enabled:
@@ -4747,6 +4759,7 @@ class OverlayWindow(QWidget):
     def _update_visibility_for_mode(self, *, initial: bool = False) -> None:
         passthrough = (self.mode == "cursor") and (not self.whiteboard_active)
         self._apply_input_passthrough(passthrough)
+        self._set_canvas_hidden(passthrough)
         if passthrough:
             if not self.isVisible():
                 self.show()
@@ -5142,8 +5155,10 @@ class OverlayWindow(QWidget):
             p.fillRect(self.rect(), self.whiteboard_color)
         else:
             p.fillRect(self.rect(), QColor(0, 0, 0, 1))
-        p.drawPixmap(0, 0, self.canvas)
-        if self.drawing and self.mode == "shape": p.drawPixmap(0, 0, self.temp_canvas)
+        if not self._canvas_hidden:
+            p.drawPixmap(0, 0, self.canvas)
+            if self.drawing and self.mode == "shape":
+                p.drawPixmap(0, 0, self.temp_canvas)
         p.end()
 
     def showEvent(self, e) -> None:
