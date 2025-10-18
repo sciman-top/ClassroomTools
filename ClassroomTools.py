@@ -74,6 +74,13 @@ KEYEVENTF_KEYUP = getattr(win32con, "KEYEVENTF_KEYUP", 0x0002)
 _NAVIGATION_EXTENDED_KEYS = {VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT}
 WHEEL_DELTA = getattr(win32con, "WHEEL_DELTA", 120)
 
+_NAVIGATION_WHEEL_DELTAS: Dict[int, int] = {
+    VK_UP: WHEEL_DELTA,
+    VK_PRIOR: WHEEL_DELTA,
+    VK_DOWN: -WHEEL_DELTA,
+    VK_NEXT: -WHEEL_DELTA,
+}
+
 if _USER32 is not None:
     _WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 else:  # pragma: no cover - 非 Windows 平台不会调用
@@ -4047,7 +4054,7 @@ class OverlayWindow(QWidget):
         if vk_code == 0:
             return False
         if repeated:
-            with self._temporarily_release_keyboard() as had_keyboard_grab:
+            with self._navigation_injection_guard() as had_keyboard_grab:
                 success = self._dispatch_virtual_key(vk_code)
             if success and self.mode != "cursor" and not had_keyboard_grab:
                 self._ensure_keyboard_capture()
@@ -4068,7 +4075,7 @@ class OverlayWindow(QWidget):
             restore_on_move=restore_on_move,
             cursor_reference=pointer,
         )
-        with self._temporarily_release_keyboard() as had_keyboard_grab:
+        with self._navigation_injection_guard() as had_keyboard_grab:
             success = self._dispatch_virtual_key(vk_code)
         if not success:
             self._pending_tool_restore = None
@@ -4118,11 +4125,33 @@ class OverlayWindow(QWidget):
             self._nav_repeat_timer.stop()
             self._nav_active_vk = None
 
+    def _navigation_wheel_delta(self, vk_code: int) -> int:
+        return _NAVIGATION_WHEEL_DELTAS.get(vk_code, 0)
+
+    def _send_navigation_scroll(self, vk_code: int, wheel_delta: int) -> bool:
+        if wheel_delta == 0:
+            return False
+        if self._forwarder is not None:
+            try:
+                if self._forwarder.send_document_scroll_for_vk(vk_code):
+                    return True
+            except Exception:
+                pass
+        if self._send_wheel_input(wheel_delta):
+            return True
+        return self._fallback_scroll_with_wheel(wheel_delta)
+
     def _dispatch_virtual_key(self, vk_code: int) -> bool:
         if vk_code == 0:
             return False
+        wheel_delta = self._navigation_wheel_delta(vk_code)
+        prefer_scroll = bool(wheel_delta) and (
+            self.mode == "cursor" or self._interaction_mode == "navigation"
+        )
         success = False
-        if self._forwarder is not None:
+        if prefer_scroll:
+            success = self._send_navigation_scroll(vk_code, wheel_delta)
+        if not success and self._forwarder is not None:
             qt_key_map = {
                 VK_UP: Qt.Key.Key_Up,
                 VK_DOWN: Qt.Key.Key_Down,
@@ -4134,7 +4163,9 @@ class OverlayWindow(QWidget):
                 press_event = QKeyEvent(QEvent.Type.KeyPress, qt_key, Qt.KeyboardModifier.NoModifier)
                 release_event = QKeyEvent(QEvent.Type.KeyRelease, qt_key, Qt.KeyboardModifier.NoModifier)
                 press_ok = self._forwarder.forward_key(press_event, is_press=True)
-                release_ok = self._forwarder.forward_key(release_event, is_press=False) if press_ok else False
+                release_ok = (
+                    self._forwarder.forward_key(release_event, is_press=False) if press_ok else False
+                )
                 if press_ok and release_ok:
                     success = True
             if not success:
@@ -4156,10 +4187,10 @@ class OverlayWindow(QWidget):
                 else:
                     self._forwarder.clear_cached_target()
                 success = self._forwarder.send_virtual_key(vk_code)
-                if not success and self._forwarder.get_last_target_role() == "document":
-                    success = self._forwarder.send_document_scroll_for_vk(vk_code)
                 if not success:
                     self._forwarder.clear_cached_target()
+        if not success and wheel_delta and not prefer_scroll:
+            success = self._send_navigation_scroll(vk_code, wheel_delta)
         if not success:
             self._focus_presentation_window_fallback()
             success = self._fallback_send_virtual_key(vk_code)
@@ -4227,16 +4258,6 @@ class OverlayWindow(QWidget):
     def _fallback_send_virtual_key(self, vk_code: int) -> bool:
         if vk_code == 0 or _USER32 is None:
             return False
-        if self._forwarder and self._forwarder.get_last_target_role() == "document":
-            if self._forwarder.send_document_scroll_for_vk(vk_code):
-                return True
-        wheel_delta = 0
-        if vk_code in {VK_UP, VK_PRIOR}:
-            wheel_delta = WHEEL_DELTA
-        elif vk_code in {VK_DOWN, VK_NEXT}:
-            wheel_delta = -WHEEL_DELTA
-        if wheel_delta and self._fallback_scroll_with_wheel(wheel_delta):
-            return True
         try:
             scan_code = _USER32.MapVirtualKeyW(vk_code, 0) if hasattr(_USER32, "MapVirtualKeyW") else 0
         except Exception:
@@ -4339,6 +4360,44 @@ class OverlayWindow(QWidget):
         try:
             yield had_keyboard_grab
         finally:
+            if had_keyboard_grab:
+                self._ensure_keyboard_capture()
+
+    @contextlib.contextmanager
+    def _navigation_injection_guard(self):
+        """Temporarily allow mouse/keyboard to pass through for navigation sends."""
+        prev_mouse_passthrough = self.testAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents
+        )
+        prev_window_passthrough = self.windowFlags().testFlag(
+            Qt.WindowType.WindowTransparentForInput
+        )
+        had_keyboard_grab = self._keyboard_grabbed
+        if not prev_mouse_passthrough:
+            self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        if not prev_window_passthrough:
+            self.setWindowFlag(Qt.WindowType.WindowTransparentForInput, True)
+        if (not prev_mouse_passthrough) or (not prev_window_passthrough):
+            if self.isVisible():
+                super().show()
+        if had_keyboard_grab:
+            self._release_keyboard_capture()
+        try:
+            yield had_keyboard_grab
+        finally:
+            if not prev_mouse_passthrough:
+                self.setAttribute(
+                    Qt.WidgetAttribute.WA_TransparentForMouseEvents,
+                    prev_mouse_passthrough,
+                )
+            if not prev_window_passthrough:
+                self.setWindowFlag(
+                    Qt.WindowType.WindowTransparentForInput,
+                    prev_window_passthrough,
+                )
+            if (not prev_mouse_passthrough) or (not prev_window_passthrough):
+                if self.isVisible():
+                    super().show()
             if had_keyboard_grab:
                 self._ensure_keyboard_capture()
 
