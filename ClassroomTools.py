@@ -1880,6 +1880,19 @@ class FloatingToolbar(QWidget):
         super().leaveEvent(event)
         QTimer.singleShot(0, self.overlay.on_toolbar_mouse_leave)
 
+    def wheelEvent(self, event) -> None:
+        handled = False
+        forwarder = getattr(self.overlay, "_forwarder", None)
+        if forwarder is not None and getattr(self.overlay, "mode", "") == "cursor":
+            try:
+                handled = forwarder.forward_wheel(event)
+            except Exception:
+                handled = False
+        if handled:
+            event.accept()
+            return
+        super().wheelEvent(event)
+
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
         ensure_widget_within_screen(self)
@@ -3358,13 +3371,13 @@ class OverlayWindow(QWidget):
         if not had_keyboard_grab and self.mode != "cursor":
             self._ensure_keyboard_capture()
         restore_mode = prev_mode if prev_mode in {"brush", "shape", "eraser"} else None
-        if restore_mode:
-            if via_toolbar:
-                self._pending_tool_restore = None
-                self._cancel_navigation_cursor_hold()
-                if self.mode != restore_mode:
-                    self._restore_last_tool(restore_mode, shape_type=prev_shape)
-            elif getattr(self, "toolbar", None) is not None and self.toolbar.underMouse():
+        if via_toolbar:
+            self._pending_tool_restore = None
+            self._cancel_navigation_cursor_hold()
+            if self.mode != "cursor":
+                self.set_mode("cursor")
+        elif restore_mode:
+            if getattr(self, "toolbar", None) is not None and self.toolbar.underMouse():
                 self._pending_tool_restore = (restore_mode, prev_shape)
             else:
                 self._pending_tool_restore = None
