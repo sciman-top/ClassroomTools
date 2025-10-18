@@ -4548,99 +4548,33 @@ class OverlayWindow(QWidget):
         return self._fallback_scroll_with_wheel(delta)
 
     def _send_virtual_key_direct(self, vk_code: int) -> bool:
-        success = False
+        if vk_code == 0:
+            return False
         if self._forwarder is not None:
             try:
-                delivered = self._forwarder.send_navigation_wheel(delta)
+                delivered = self._forwarder.send_virtual_key(vk_code)
             except Exception:
                 delivered = False
-            if delivered:
-                return True
+            else:
+                if delivered:
+                    return True
             try:
-                if self._forwarder.get_last_target_role() == "document":
-                    delivered = self._forwarder.send_document_scroll_for_vk(vk_code)
+                self._forwarder.clear_cached_target()
             except Exception:
-                delivered = False
-            if delivered:
-                return True
-        focused = self._focus_presentation_window_fallback()
-        if not focused:
-            self._focus_presentation_window_fallback()
-        return self._fallback_scroll_with_wheel(delta)
-
-    def _send_virtual_key_direct(self, vk_code: int) -> bool:
-        success = False
-        if prefer_scroll and wheel_delta:
-            success = self._send_navigation_scroll(vk_code, wheel_delta)
-        if not success and self._forwarder is not None:
-            qt_key_map = {
-                VK_UP: Qt.Key.Key_Up,
-                VK_DOWN: Qt.Key.Key_Down,
-                VK_LEFT: Qt.Key.Key_Left,
-                VK_RIGHT: Qt.Key.Key_Right,
-            }
-            qt_key = qt_key_map.get(vk_code)
-            if qt_key is not None:
-                press_event = QKeyEvent(QEvent.Type.KeyPress, qt_key, Qt.KeyboardModifier.NoModifier)
-                release_event = QKeyEvent(QEvent.Type.KeyRelease, qt_key, Qt.KeyboardModifier.NoModifier)
-                press_ok = False
-                release_ok = False
-                try:
-                    press_ok = self._forwarder.forward_key(press_event, is_press=True)
-                    release_ok = (
-                        self._forwarder.forward_key(release_event, is_press=False) if press_ok else False
-                    )
-                except Exception:
-                    press_ok = False
-                    release_ok = False
-                if press_ok and release_ok:
-                    success = True
-            if not success:
-                target_hwnd = None
-                try:
-                    target_hwnd = self._forwarder.get_presentation_target()
-                except Exception:
-                    target_hwnd = None
-                focus_ok = False
-                if target_hwnd:
-                    try:
-                        focus_ok = self._forwarder.focus_presentation_window()
-                    except Exception:
-                        focus_ok = False
-                    if not focus_ok:
-                        try:
-                            if self._forwarder.bring_target_to_foreground(target_hwnd):
-                                QApplication.processEvents()
-                                time.sleep(0.05)
-                                focus_ok = True
-                        except Exception:
-                            focus_ok = False
-                else:
-                    try:
-                        self._forwarder.clear_cached_target()
-                    except Exception:
-                        pass
-                try:
-                    success = self._forwarder.send_virtual_key(vk_code)
-                except Exception:
-                    success = False
-                if not success:
-                    self._forwarder.clear_cached_target()
-        if not success:
-            self._focus_presentation_window_fallback()
-            success = self._fallback_send_virtual_key(vk_code)
-        return success
+                pass
+        self._focus_presentation_window_fallback()
+        return self._fallback_send_virtual_key(vk_code)
 
     def _dispatch_virtual_key(self, vk_code: int) -> bool:
         if vk_code == 0:
             return False
         wheel_delta = self._navigation_wheel_delta(vk_code)
         with self._navigation_input_transfer():
-            success = False
-            if wheel_delta:
-                success = self._send_navigation_wheel(vk_code, wheel_delta)
-            if not success:
-                success = self._send_virtual_key_direct(vk_code)
+            success = self._perform_navigation_dispatch(
+                vk_code,
+                wheel_delta=wheel_delta,
+                prefer_scroll=bool(wheel_delta),
+            )
         if success and self.mode != "cursor":
             QTimer.singleShot(100, self._ensure_keyboard_capture)
         return success
@@ -4670,40 +4604,6 @@ class OverlayWindow(QWidget):
         if self._interaction_mode != InteractionMode.NAVIGATION.value:
             return
         self._handle_toolbar_navigation_leave()
-
-    def _fallback_scroll_with_wheel(self, delta: int) -> bool:
-        if delta == 0:
-            return False
-        if win32api is not None and win32con is not None:
-            try:
-                win32api.mouse_event(win32con.MOUSEEVENTF_WHEEL, 0, 0, delta, 0)
-                return True
-            except Exception:
-                pass
-        if _USER32 is None:
-            return False
-        try:
-            _USER32.mouse_event(0x0800, 0, 0, delta, 0)
-            return True
-        except Exception:
-            return False
-
-    def _fallback_scroll_with_wheel(self, delta: int) -> bool:
-        if delta == 0:
-            return False
-        if win32api is not None and win32con is not None:
-            try:
-                win32api.mouse_event(win32con.MOUSEEVENTF_WHEEL, 0, 0, delta, 0)
-                return True
-            except Exception:
-                pass
-        if _USER32 is None:
-            return False
-        try:
-            _USER32.mouse_event(0x0800, 0, 0, delta, 0)
-            return True
-        except Exception:
-            return False
 
     def _fallback_scroll_with_wheel(self, delta: int) -> bool:
         if delta == 0:
@@ -4904,6 +4804,73 @@ class OverlayWindow(QWidget):
                     super().show()
             if had_keyboard_grab:
                 self._ensure_keyboard_capture()
+
+    def _extract_wheel_delta(self, event: Optional[QWheelEvent]) -> int:
+        if event is None:
+            return 0
+        delta = 0
+        try:
+            angle_delta = event.angleDelta()
+        except Exception:
+            angle_delta = QPoint()
+        if isinstance(angle_delta, QPoint):
+            delta = int(angle_delta.y() or angle_delta.x() or 0)
+        if delta == 0:
+            try:
+                pixel_delta = event.pixelDelta()
+            except Exception:
+                pixel_delta = QPoint()
+            if isinstance(pixel_delta, QPoint):
+                delta = int(pixel_delta.y() or pixel_delta.x() or 0)
+        return delta
+
+    def _forward_wheel_event(self, event: QWheelEvent) -> bool:
+        delivered = False
+        if self._forwarder is not None:
+            try:
+                delivered = self._forwarder.forward_wheel(event)
+            except Exception:
+                delivered = False
+            if delivered:
+                return True
+            try:
+                self._forwarder.clear_cached_target()
+            except Exception:
+                pass
+        delta = self._extract_wheel_delta(event)
+        if delta == 0:
+            return False
+        focused = self._focus_presentation_window_fallback()
+        if not focused:
+            self._focus_presentation_window_fallback()
+        return self._fallback_scroll_with_wheel(delta)
+
+    def _perform_navigation_dispatch(
+        self,
+        vk_code: Optional[int],
+        *,
+        wheel_delta: int,
+        prefer_scroll: bool,
+    ) -> bool:
+        if vk_code is None or vk_code == 0:
+            return False
+        attempts: List[Callable[[], bool]] = []
+        if wheel_delta and prefer_scroll:
+            attempts.append(lambda: self._send_navigation_wheel(vk_code, wheel_delta))
+
+        attempts.append(lambda: self._send_virtual_key_direct(vk_code))
+
+        if wheel_delta and not prefer_scroll:
+            attempts.append(lambda: self._send_navigation_wheel(vk_code, wheel_delta))
+
+        for attempt in attempts:
+            try:
+                delivered = attempt()
+            except Exception:
+                delivered = False
+            if delivered:
+                return True
+        return False
 
     @dataclass
     class _NavigationActionSession:
@@ -5295,9 +5262,21 @@ class OverlayWindow(QWidget):
 
     # ---- 画图事件 ----
     def wheelEvent(self, e: QWheelEvent) -> None:
+        handled = False
+        had_grab = False
         if self.mode in {"brush", "shape", "eraser", "cursor"}:
             self._after_navigation_wheel(e)
-        handled = bool(self._forwarder and self._forwarder.forward_wheel(e))
+            handled, had_grab = self._dispatch_navigation_session(
+                wheel_event=e,
+                prefer_scroll=True,
+            )
+            if handled and self.mode != ToolMode.CURSOR.value and not had_grab:
+                QTimer.singleShot(100, self._ensure_keyboard_capture)
+        if not handled and self._forwarder is not None:
+            try:
+                handled = self._forwarder.forward_wheel(e)
+            except Exception:
+                handled = False
         if handled:
             e.accept()
             return
