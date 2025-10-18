@@ -83,6 +83,8 @@ _NAVIGATION_WHEEL_DELTAS: Dict[int, int] = {
     VK_NEXT: -WHEEL_DELTA,
 }
 
+NAVIGATION_RESTORE_TIMEOUT = 0.45
+
 
 class ToolMode(str, Enum):
     BRUSH = "brush"
@@ -3720,6 +3722,7 @@ class OverlayWindow(QWidget):
         self._nav_restore_timer.setInterval(80)
         self._nav_restore_timer.timeout.connect(self._check_navigation_restore)
         self._nav_forced_passthrough = False
+        self._nav_restore_deadline: Optional[float] = None
         self._nav_direct_keys: Set[int] = set()
         self._nav_cursor_canvas_override = False
         self._interaction_mode = "drawing"
@@ -3779,7 +3782,7 @@ class OverlayWindow(QWidget):
     def _build_mode_state(self, tool: ToolMode) -> ModeState:
         passthrough = tool == ToolMode.CURSOR
         interaction = InteractionMode.CURSOR if tool == ToolMode.CURSOR else InteractionMode.DRAWING
-        canvas_hidden = tool == ToolMode.CURSOR
+        canvas_hidden = False
         keyboard_grabbed = not passthrough
         return ModeState(
             tool=tool,
@@ -4003,11 +4006,17 @@ class OverlayWindow(QWidget):
         origin = self._navigation_origin
         if origin and origin.inside_toolbar:
             pending.restore_on_move = False
+            if self._nav_restore_timer.isActive():
+                self._nav_restore_timer.stop()
+            self._nav_restore_deadline = None
             return
         if not (self.mode == ToolMode.CURSOR.value or self._nav_forced_passthrough):
             return
         if self._is_point_inside_toolbar(global_pos):
             pending.restore_on_move = False
+            if self._nav_restore_timer.isActive():
+                self._nav_restore_timer.stop()
+            self._nav_restore_deadline = None
         else:
             self._restore_pending_tool()
 
@@ -4159,9 +4168,11 @@ class OverlayWindow(QWidget):
                 if self._nav_restore_cursor_pos is None:
                     pos = self._safe_global_cursor_pos()
                     self._nav_restore_cursor_pos = QPoint(pos) if isinstance(pos, QPoint) else pos
+                self._nav_restore_deadline = time.monotonic() + NAVIGATION_RESTORE_TIMEOUT
                 if not self._nav_restore_timer.isActive():
                     self._nav_restore_timer.start()
             else:
+                self._nav_restore_deadline = None
                 self._nav_restore_timer.stop()
         self.update_toolbar_state()
 
@@ -4205,6 +4216,7 @@ class OverlayWindow(QWidget):
         self._nav_restore_cursor_pos = None
         if self._nav_restore_timer.isActive():
             self._nav_restore_timer.stop()
+        self._nav_restore_deadline = None
         if self._nav_forced_passthrough and self.mode != ToolMode.CURSOR.value:
             self._apply_input_passthrough(False)
             self._ensure_keyboard_capture()
@@ -4239,6 +4251,7 @@ class OverlayWindow(QWidget):
         if pending and pending.restore_on_move and self._navigation_origin_from_toolbar():
             pending.restore_on_move = False
             self._nav_restore_timer.stop()
+            self._nav_restore_deadline = None
             return
         if not (
             self._nav_passthrough_active
@@ -4249,21 +4262,30 @@ class OverlayWindow(QWidget):
         ):
             if not (pending and pending.restore_on_move):
                 self._nav_restore_timer.stop()
+                self._nav_restore_deadline = None
             return
         current_pos = self._safe_global_cursor_pos()
         if current_pos is None:
             self._nav_restore_timer.stop()
+            self._nav_restore_deadline = None
             self._restore_pending_tool()
             return
         if self._nav_restore_cursor_pos is None:
             self._nav_restore_cursor_pos = QPoint(current_pos)
             return
         if current_pos == self._nav_restore_cursor_pos:
+            deadline = self._nav_restore_deadline
+            if deadline is not None and time.monotonic() >= deadline:
+                self._nav_restore_timer.stop()
+                self._nav_restore_deadline = None
+                self._restore_pending_tool()
             return
         if self._is_point_inside_toolbar(current_pos):
             pending.restore_on_move = False
             self._nav_restore_timer.stop()
+            self._nav_restore_deadline = None
             return
+        self._nav_restore_deadline = None
         self._restore_pending_tool()
 
     def _restore_pending_tool(self) -> None:
@@ -4716,6 +4738,9 @@ class OverlayWindow(QWidget):
         else:
             if self._pending_tool_restore:
                 self._pending_tool_restore.restore_on_move = False
+                if self._nav_restore_timer.isActive():
+                    self._nav_restore_timer.stop()
+                self._nav_restore_deadline = None
             self._update_navigation_origin_location(inside_toolbar=True)
         self.raise_toolbar()
 
