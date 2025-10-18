@@ -39,6 +39,7 @@ from typing import (
     Set,
     Tuple,
     Union,
+    cast,
 )
 
 logger = logging.getLogger(__name__)
@@ -1866,13 +1867,18 @@ class FloatingToolbar(QWidget):
         pen_color: QColor,
         *,
         navigation_from_cursor: bool = False,
+        highlight_mode: Optional[str] = None,
     ) -> None:
         color_key = pen_color.name().lower()
-        active_mode = mode
-        if interaction_mode == "cursor":
+        active_mode: Optional[str] = mode
+        if highlight_mode is not None:
+            active_mode = highlight_mode
+        elif interaction_mode == "cursor":
             active_mode = "cursor"
         elif interaction_mode == "navigation" and navigation_from_cursor:
-            active_mode = "cursor"
+            active_mode = ""
+        elif interaction_mode == "navigation":
+            active_mode = mode
         for hex_key, button in self.brush_color_buttons.items():
             prev = button.blockSignals(True)
             button.setChecked(active_mode == "brush" and hex_key == color_key)
@@ -1896,6 +1902,18 @@ class FloatingToolbar(QWidget):
 
     def eventFilter(self, obj, event):
         event_type = event.type()
+        if event_type == QEvent.Type.Wheel:
+            wheel_event = cast(QWheelEvent, event)
+            if self.overlay.handle_toolbar_navigation_wheel(wheel_event):
+                return True
+        if event_type == QEvent.Type.KeyPress:
+            key_event = cast(QKeyEvent, event)
+            if self.overlay.handle_toolbar_navigation_key_event(key_event, pressed=True):
+                return True
+        if event_type == QEvent.Type.KeyRelease:
+            key_event = cast(QKeyEvent, event)
+            if self.overlay.handle_toolbar_navigation_key_event(key_event, pressed=False):
+                return True
         if isinstance(obj, QPushButton) and event_type == QEvent.Type.ToolTip:
             try:
                 self.overlay.raise_toolbar()
@@ -3939,6 +3957,26 @@ class OverlayWindow(QWidget):
         elif self._interaction_mode == InteractionMode.NAVIGATION.value:
             self._clear_navigation_passthrough()
 
+    def handle_toolbar_navigation_wheel(self, event: QWheelEvent) -> bool:
+        if self.mode not in {"brush", "shape", "eraser", "cursor"}:
+            return False
+        self.wheelEvent(event)
+        return event.isAccepted()
+
+    def handle_toolbar_navigation_key_event(
+        self, event: QKeyEvent, *, pressed: bool
+    ) -> bool:
+        if self._interaction_mode != InteractionMode.NAVIGATION.value:
+            return False
+        key_code = int(event.key())
+        if key_code not in self._NAVIGATION_KEY_CODES:
+            return False
+        if pressed:
+            self.keyPressEvent(event)
+        else:
+            self.keyReleaseEvent(event)
+        return event.isAccepted()
+
     def _handle_pointer_navigation_restore(self, global_pos: QPoint) -> None:
         pending = self._pending_tool_restore
         if not pending or not pending.restore_on_move:
@@ -4403,11 +4441,19 @@ class OverlayWindow(QWidget):
             and self._navigation_origin is not None
             and self._navigation_origin.mode == ToolMode.CURSOR
         )
+        highlight_mode: Optional[str] = None
+        if (
+            interaction == InteractionMode.NAVIGATION.value
+            and navigation_from_cursor
+        ):
+            restore_mode, _ = self._cursor_navigation_restore_target()
+            highlight_mode = restore_mode if restore_mode is not None else ""
         self.toolbar.update_tool_states(
             self.mode,
             interaction,
             self.pen_color,
             navigation_from_cursor=navigation_from_cursor,
+            highlight_mode=highlight_mode,
         )
 
     def _update_last_tool_snapshot(self) -> None:
