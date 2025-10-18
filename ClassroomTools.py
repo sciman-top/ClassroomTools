@@ -2787,6 +2787,24 @@ class _PresentationForwarder:
         left, top, right, bottom = rect
         return ((left + right) // 2, (top + bottom) // 2)
 
+    def _window_overlay_overlap_ratio(self, rect: Tuple[int, int, int, int]) -> float:
+        overlay_rect = self._overlay_rect_tuple()
+        if overlay_rect is None:
+            return 0.0
+        left, top, right, bottom = rect
+        o_left, o_top, o_right, o_bottom = overlay_rect
+        overlap_left = max(left, o_left)
+        overlap_top = max(top, o_top)
+        overlap_right = min(right, o_right)
+        overlap_bottom = min(bottom, o_bottom)
+        overlap_width = max(0, overlap_right - overlap_left)
+        overlap_height = max(0, overlap_bottom - overlap_top)
+        if overlap_width <= 0 or overlap_height <= 0:
+            return 0.0
+        window_area = max(1, (right - left) * (bottom - top))
+        overlap_area = overlap_width * overlap_height
+        return float(overlap_area) / float(window_area)
+
     def _rect_intersects_overlay(self, rect: Tuple[int, int, int, int]) -> bool:
         overlay_rect = self._overlay_rect_tuple()
         if overlay_rect is None:
@@ -2897,8 +2915,11 @@ class _PresentationForwarder:
         if center is not None:
             cx, cy = center
             contains_center = left <= cx <= right and top <= cy <= bottom
+        overlap_ratio = self._window_overlay_overlap_ratio((left, top, right, bottom))
         size_match = width >= 400 and height >= 300 and width_diff <= 64 and height_diff <= 64
         if contains_center and width >= 400 and height >= 300:
+            return True
+        if overlap_ratio >= 0.6 and width >= 400 and height >= 300:
             return True
         return size_match
 
@@ -2999,11 +3020,12 @@ class _PresentationForwarder:
                 if overlay_area > 0:
                     ratio = min(area, overlay_area) / max(area, overlay_area)
                     score += int(ratio * 160)
-                overlap_x = max(0, min(right, overlay_rect[2]) - max(left, overlay_rect[0]))
-                overlap_y = max(0, min(bottom, overlay_rect[3]) - max(top, overlay_rect[1]))
-                overlap_area = overlap_x * overlap_y
-                if overlap_area > 0 and area > 0:
-                    score += int((overlap_area / area) * 180)
+                overlap_ratio = self._window_overlay_overlap_ratio(rect)
+                if overlap_ratio > 0:
+                    score += int(overlap_ratio * 180)
+                    if overlay_area > 0:
+                        coverage = min((overlap_ratio * area) / max(1, overlay_area), 1.0)
+                        score += int(coverage * 140)
 
         return score
 
@@ -3113,8 +3135,11 @@ class _PresentationForwarder:
         if center is not None:
             cx, cy = center
             contains_center = left <= cx <= right and top <= cy <= bottom
+        overlap_ratio = self._window_overlay_overlap_ratio((left, top, right, bottom))
         size_match = width >= 400 and height >= 300 and width_diff <= 64 and height_diff <= 64
         if contains_center and width >= 400 and height >= 300:
+            return True
+        if overlap_ratio >= 0.6 and width >= 400 and height >= 300:
             return True
         return size_match
 
@@ -3646,6 +3671,7 @@ class OverlayWindow(QWidget):
             if count is None:
                 if reason == "cursor-button":
                     self._cursor_button_navigation = False
+                self._update_navigation_state()
                 return
             if count <= 1:
                 self._navigation_reasons.pop(reason, None)
@@ -3831,6 +3857,24 @@ class OverlayWindow(QWidget):
         left, top, right, bottom = rect
         return ((left + right) // 2, (top + bottom) // 2)
 
+    def _window_overlay_overlap_ratio(self, rect: Tuple[int, int, int, int]) -> float:
+        overlay = self._overlay_rect_tuple()
+        if overlay is None:
+            return 0.0
+        left, top, right, bottom = rect
+        o_left, o_top, o_right, o_bottom = overlay
+        overlap_left = max(left, o_left)
+        overlap_top = max(top, o_top)
+        overlap_right = min(right, o_right)
+        overlap_bottom = min(bottom, o_bottom)
+        overlap_width = max(0, overlap_right - overlap_left)
+        overlap_height = max(0, overlap_bottom - overlap_top)
+        if overlap_width <= 0 or overlap_height <= 0:
+            return 0.0
+        window_area = max(1, (right - left) * (bottom - top))
+        overlap_area = overlap_width * overlap_height
+        return float(overlap_area) / float(window_area)
+
     def _rect_intersects_overlay(self, rect: Tuple[int, int, int, int]) -> bool:
         overlay = self._overlay_rect_tuple()
         if overlay is None:
@@ -3938,8 +3982,11 @@ class OverlayWindow(QWidget):
         if center is not None:
             cx, cy = center
             contains_center = left <= cx <= right and top <= cy <= bottom
+        overlap_ratio = self._window_overlay_overlap_ratio((left, top, right, bottom))
         size_match = width >= 400 and height >= 300 and width_diff <= 64 and height_diff <= 64
         if contains_center and width >= 400 and height >= 300:
+            return True
+        if overlap_ratio >= 0.6 and width >= 400 and height >= 300:
             return True
         return size_match
 
@@ -4151,8 +4198,11 @@ class OverlayWindow(QWidget):
         if center is not None:
             cx, cy = center
             contains_center = left <= cx <= right and top <= cy <= bottom
+        overlap_ratio = self._window_overlay_overlap_ratio((left, top, right, bottom))
         size_match = width >= 400 and height >= 300 and width_diff <= 64 and height_diff <= 64
         if contains_center and width >= 400 and height >= 300:
+            return True
+        if overlap_ratio >= 0.6 and width >= 400 and height >= 300:
             return True
         return size_match
 
