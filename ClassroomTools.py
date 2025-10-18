@@ -3499,20 +3499,36 @@ class _PresentationForwarder:
         delivered = False
         passthrough_applied = False
         original_cursor: Optional[Tuple[int, int]] = None
+        cursor_moved = False
         with self._keyboard_capture_guard():
             focus_ok = self.bring_target_to_foreground(hwnd)
             if not focus_ok:
                 focus_ok = self._activate_window_for_input(hwnd)
+            if not focus_ok:
+                passthrough_applied = self._set_overlay_passthrough(True)
+                if passthrough_applied:
+                    try:
+                        QApplication.processEvents()
+                    except Exception:
+                        pass
+                    focus_ok = self.bring_target_to_foreground(hwnd)
+                    if not focus_ok:
+                        focus_ok = self._activate_window_for_input(hwnd)
             attach_pair = self._attach_to_target_thread(hwnd)
             try:
                 injected = False
                 if focus_ok:
+                    if not passthrough_applied:
+                        passthrough_applied = self._set_overlay_passthrough(True)
+                        if passthrough_applied:
+                            try:
+                                QApplication.processEvents()
+                            except Exception:
+                                pass
                     original_cursor = self._get_cursor_pos()
-                    passthrough_applied = self._set_overlay_passthrough(True)
-                    if passthrough_applied:
-                        QApplication.processEvents()
-                    if point is not None:
+                    if point is not None and original_cursor != point:
                         self._set_cursor_pos(point)
+                        cursor_moved = True
                     self._injecting_wheel = True
                     try:
                         injected = self._send_wheel_input(delta)
@@ -3532,7 +3548,7 @@ class _PresentationForwarder:
                 self._detach_from_target_thread(attach_pair)
         if passthrough_applied:
             self._restore_overlay_interaction()
-        if original_cursor is not None:
+        if cursor_moved and original_cursor is not None:
             self._set_cursor_pos(original_cursor)
         self._injecting_wheel = False
         return delivered
