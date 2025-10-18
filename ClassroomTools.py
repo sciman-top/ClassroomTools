@@ -3029,6 +3029,25 @@ class _PresentationForwarder:
         bottom = top + rect.height()
         return left, top, right, bottom
 
+    @staticmethod
+    def _rect_area(rect: Tuple[int, int, int, int]) -> int:
+        left, top, right, bottom = rect
+        width = max(0, right - left)
+        height = max(0, bottom - top)
+        return width * height
+
+    @staticmethod
+    def _rect_intersection_area(
+        first: Tuple[int, int, int, int], second: Tuple[int, int, int, int]
+    ) -> int:
+        left = max(first[0], second[0])
+        top = max(first[1], second[1])
+        right = min(first[2], second[2])
+        bottom = min(first[3], second[3])
+        if right <= left or bottom <= top:
+            return 0
+        return (right - left) * (bottom - top)
+
     def _rect_intersects_overlay(self, rect: Tuple[int, int, int, int]) -> bool:
         overlay_rect = self._overlay_rect_tuple()
         if overlay_rect is None:
@@ -3278,12 +3297,30 @@ class _PresentationForwarder:
                 return False
         elif index != 0:
             return False
-        if not self._is_window_maximized(hwnd):
+        overlay_rect = self._overlay_rect_tuple()
+        if overlay_rect is None:
             return False
         left, top, right, bottom = rect
         width = max(0, right - left)
         height = max(0, bottom - top)
-        if width < 400 or height < 300:
+        if width < 320 or height < 240:
+            return False
+        if self._is_window_maximized(hwnd):
+            return True
+        overlay_total_area = self._rect_area(overlay_rect)
+        window_total_area = width * height
+        if overlay_total_area <= 0 or window_total_area <= 0:
+            return False
+        overlap_area = self._rect_intersection_area(rect, overlay_rect)
+        if overlap_area <= 0:
+            return False
+        overlay_coverage = overlap_area / overlay_total_area
+        window_coverage = overlap_area / window_total_area
+        if overlay_coverage < 0.55 or window_coverage < 0.4:
+            return False
+        overlay_center_x = overlay_rect[0] + (overlay_rect[2] - overlay_rect[0]) // 2
+        overlay_center_y = overlay_rect[1] + (overlay_rect[3] - overlay_rect[1]) // 2
+        if not (left <= overlay_center_x <= right and top <= overlay_center_y <= bottom):
             return False
         return True
 
