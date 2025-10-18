@@ -2562,6 +2562,26 @@ class _PresentationForwarder:
         for _priority, hwnd, cache in ranked:
             yield hwnd, cache
 
+    def _iter_wheel_targets(self, target: int) -> Iterable[Tuple[int, bool]]:
+        seen: Set[int] = set()
+
+        def _append(hwnd: int, *, cache: bool, require_visible: bool) -> Iterable[Tuple[int, bool]]:
+            if hwnd in seen:
+                return ()
+            if not self._is_keyboard_target(hwnd, require_visible=require_visible):
+                return ()
+            seen.add(hwnd)
+            return ((hwnd, cache),)
+
+        for focus_hwnd in self._gather_thread_focus_handles(target):
+            for candidate in _append(focus_hwnd, cache=False, require_visible=False):
+                yield candidate
+        for candidate in _append(target, cache=True, require_visible=True):
+            yield candidate
+        for child_hwnd in self._collect_descendant_windows(target):
+            for candidate in _append(child_hwnd, cache=False, require_visible=False):
+                yield candidate
+
     def _build_key_lparam(self, vk_code: int, event: QKeyEvent, is_press: bool) -> int:
         repeat_getter = getattr(event, "count", None)
         repeat_count = 1
