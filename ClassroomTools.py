@@ -4773,15 +4773,18 @@ class OverlayWindow(QWidget):
         prev_mouse_passthrough = self.testAttribute(
             Qt.WidgetAttribute.WA_TransparentForMouseEvents
         )
-        prev_window_passthrough = self.windowFlags().testFlag(
-            Qt.WindowType.WindowTransparentForInput
+        flag_supported = hasattr(Qt.WindowType, "WindowTransparentForInput")
+        prev_window_passthrough = (
+            self._has_window_input_passthrough() if flag_supported else False
         )
         had_keyboard_grab = self._keyboard_grabbed
         if not prev_mouse_passthrough:
             self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        if not prev_window_passthrough:
+        if flag_supported and not prev_window_passthrough:
             self.setWindowFlag(Qt.WindowType.WindowTransparentForInput, True)
-        if (not prev_mouse_passthrough) or (not prev_window_passthrough):
+        if (not prev_mouse_passthrough) or (
+            flag_supported and not prev_window_passthrough
+        ):
             if self.isVisible():
                 super().show()
         if had_keyboard_grab:
@@ -4794,12 +4797,14 @@ class OverlayWindow(QWidget):
                     Qt.WidgetAttribute.WA_TransparentForMouseEvents,
                     prev_mouse_passthrough,
                 )
-            if not prev_window_passthrough:
+            if flag_supported and not prev_window_passthrough:
                 self.setWindowFlag(
                     Qt.WindowType.WindowTransparentForInput,
                     prev_window_passthrough,
                 )
-            if (not prev_mouse_passthrough) or (not prev_window_passthrough):
+            if (not prev_mouse_passthrough) or (
+                flag_supported and not prev_window_passthrough
+            ):
                 if self.isVisible():
                     super().show()
             if had_keyboard_grab:
