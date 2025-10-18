@@ -5094,20 +5094,41 @@ class OverlayWindow(QWidget):
         if vk_code is None or vk_code == 0:
             return False
         attempts: List[Callable[[], bool]] = []
+        added_attempts: Set[Tuple[Any, ...]] = set()
+
+        def add_attempt(key: Tuple[Any, ...], func: Callable[[], bool]) -> None:
+            if key in added_attempts:
+                return
+            added_attempts.add(key)
+            attempts.append(func)
+
         if wheel_delta and prefer_scroll:
-            attempts.append(lambda: self._send_navigation_wheel_message_only(wheel_delta))
-            attempts.append(
-                lambda: self._send_navigation_wheel(
-                    vk_code,
-                    wheel_delta,
+            add_attempt(
+                ("wheel_message", wheel_delta),
+                lambda delta=wheel_delta: self._send_navigation_wheel_message_only(delta),
+            )
+            add_attempt(
+                ("wheel_injection", vk_code, wheel_delta, True),
+                lambda code=vk_code, delta=wheel_delta: self._send_navigation_wheel(
+                    code,
+                    delta,
                     injection_only=True,
-                )
+                ),
             )
 
-        attempts.append(lambda: self._send_virtual_key_direct(vk_code))
+        if wheel_delta:
+            add_attempt(
+                ("wheel_injection", vk_code, wheel_delta, False),
+                lambda code=vk_code, delta=wheel_delta: self._send_navigation_wheel(
+                    code,
+                    delta,
+                ),
+            )
 
-        if wheel_delta and not prefer_scroll:
-            attempts.append(lambda: self._send_navigation_wheel(vk_code, wheel_delta))
+        add_attempt(
+            ("virtual_key", vk_code),
+            lambda code=vk_code: self._send_virtual_key_direct(code),
+        )
 
         for attempt in attempts:
             try:
