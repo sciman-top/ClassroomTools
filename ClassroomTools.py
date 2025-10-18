@@ -68,6 +68,7 @@ VK_RIGHT = getattr(win32con, "VK_RIGHT", 0x27)
 KEYEVENTF_EXTENDEDKEY = getattr(win32con, "KEYEVENTF_EXTENDEDKEY", 0x0001)
 KEYEVENTF_KEYUP = getattr(win32con, "KEYEVENTF_KEYUP", 0x0002)
 _NAVIGATION_EXTENDED_KEYS = {VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT}
+MOUSEEVENTF_WHEEL = getattr(win32con, "MOUSEEVENTF_WHEEL", 0x0800)
 
 if _USER32 is not None:
     _WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
@@ -240,6 +241,13 @@ from PyQt6.QtWidgets import (
     QWidget,
     QToolTip,
 )
+
+_QT_NAVIGATION_KEYS = {
+    Qt.Key.Key_Up,
+    Qt.Key.Key_Down,
+    Qt.Key.Key_Left,
+    Qt.Key.Key_Right,
+}
 
 # ---------- 运行环境准备 ----------
 
@@ -1873,17 +1881,22 @@ class FloatingToolbar(QWidget):
         self.style().polish(self.btn_whiteboard)
 
     def enterEvent(self, event) -> None:
+        self.overlay.handle_toolbar_enter()
         self.overlay.raise_toolbar()
         super().enterEvent(event)
 
     def leaveEvent(self, event) -> None:
         super().leaveEvent(event)
+        self.overlay.handle_toolbar_leave()
         QTimer.singleShot(0, self.overlay.on_toolbar_mouse_leave)
 
     def wheelEvent(self, event) -> None:
         handled = False
         forwarder = getattr(self.overlay, "_forwarder", None)
-        if forwarder is not None and getattr(self.overlay, "mode", "") == "cursor":
+        if forwarder is not None and (
+            getattr(self.overlay, "mode", "") == "cursor"
+            or getattr(self.overlay, "navigation_active", False)
+        ):
             try:
                 handled = forwarder.forward_wheel(event)
             except Exception:
@@ -3118,6 +3131,9 @@ class OverlayWindow(QWidget):
         self._stroke_speed: float = 0.0
         self._stroke_last_midpoint: Optional[QPointF] = None
         self._stroke_filter_point: Optional[QPointF] = None
+        self.navigation_active = False
+        self._navigation_reasons: Dict[str, int] = {}
+        self._active_navigation_keys: Set[int] = set()
         self._brush_painter: Optional[QPainter] = None
         self._eraser_painter: Optional[QPainter] = None
         self._last_target_hwnd: Optional[int] = None
@@ -3354,11 +3370,23 @@ class OverlayWindow(QWidget):
     def go_to_previous_slide(self, *, via_toolbar: bool = False) -> None:
         self._send_slide_virtual_key(VK_UP, via_toolbar=via_toolbar)
 
+    def _wheel_delta_for_vk(self, vk_code: int) -> int:
+        if vk_code in (VK_DOWN, VK_RIGHT):
+            return -120
+        if vk_code in (VK_UP, VK_LEFT):
+            return 120
+        return 0
+
     def _send_slide_virtual_key(self, vk_code: int, *, via_toolbar: bool = False) -> None:
         if vk_code == 0:
             return
+        wheel_delta = self._wheel_delta_for_vk(vk_code)
+        prefer_wheel = via_toolbar or self.navigation_active or self.mode == "cursor"
+        if wheel_delta and prefer_wheel:
+            if self._send_navigation_wheel(wheel_delta):
+                self.raise_toolbar()
+                return
         prev_mode = self.mode
-        prev_shape = self.current_shape if prev_mode == "shape" else None
         if prev_mode in {"brush", "shape"}:
             self._update_last_tool_snapshot()
         with self._temporarily_release_keyboard() as had_keyboard_grab:
@@ -3370,23 +3398,41 @@ class OverlayWindow(QWidget):
             return
         if not had_keyboard_grab and self.mode != "cursor":
             self._ensure_keyboard_capture()
-        restore_mode = prev_mode if prev_mode in {"brush", "shape", "eraser"} else None
-        if via_toolbar:
-            self._pending_tool_restore = None
-            self._cancel_navigation_cursor_hold()
-            if self.mode != "cursor":
-                self.set_mode("cursor")
-        elif restore_mode:
-            if getattr(self, "toolbar", None) is not None and self.toolbar.underMouse():
-                self._pending_tool_restore = (restore_mode, prev_shape)
-            else:
-                self._pending_tool_restore = None
-                self._restore_last_tool(restore_mode, shape_type=prev_shape)
-        else:
-            self._pending_tool_restore = None
-            if via_toolbar:
-                self._cancel_navigation_cursor_hold()
         self.raise_toolbar()
+
+    def _send_navigation_wheel(self, delta: int) -> bool:
+        if delta == 0:
+            return False
+        handled = False
+        if self._forwarder is not None:
+            try:
+                global_pos = QCursor.pos()
+                local_pos = self.mapFromGlobal(global_pos)
+                wheel_event = QWheelEvent(
+                    QPointF(local_pos),
+                    QPointF(global_pos),
+                    QPoint(),
+                    QPoint(0, delta),
+                    Qt.MouseButton.NoButton,
+                    Qt.KeyboardModifier.NoModifier,
+                    Qt.ScrollPhase.ScrollUpdate,
+                    False,
+                )
+                handled = self._forwarder.forward_wheel(wheel_event)
+            except Exception:
+                handled = False
+        if handled:
+            return True
+        return self._fallback_send_wheel(delta)
+
+    def _fallback_send_wheel(self, delta: int) -> bool:
+        if delta == 0 or _USER32 is None:
+            return False
+        try:
+            _USER32.mouse_event(MOUSEEVENTF_WHEEL, 0, 0, delta, 0)
+            return True
+        except Exception:
+            return False
 
     def _apply_navigation_cursor_hold(self, restore_mode: str, restore_shape: Optional[str]) -> None:
         if restore_mode not in {"brush", "shape", "eraser"}:
@@ -3467,6 +3513,49 @@ class OverlayWindow(QWidget):
         self._pending_tool_restore = None
         self._cancel_navigation_cursor_hold()
 
+    def _set_navigation_reason(self, reason: str, active: bool) -> None:
+        if not reason:
+            return
+        if active:
+            self._navigation_reasons[reason] = self._navigation_reasons.get(reason, 0) + 1
+        else:
+            count = self._navigation_reasons.get(reason)
+            if count is None:
+                return
+            if count <= 1:
+                self._navigation_reasons.pop(reason, None)
+            else:
+                self._navigation_reasons[reason] = count - 1
+        self._update_navigation_state()
+
+    def _update_navigation_state(self) -> None:
+        active = bool(self._navigation_reasons)
+        if active == self.navigation_active:
+            return
+        self.navigation_active = active
+        if active:
+            self._cancel_navigation_cursor_hold()
+            self._pending_tool_restore = None
+            toolbar = getattr(self, "toolbar", None)
+            if toolbar is not None:
+                try:
+                    self.raise_toolbar()
+                except Exception:
+                    pass
+        self.update_cursor()
+
+    def handle_toolbar_enter(self) -> None:
+        self._set_navigation_reason("toolbar", True)
+        if self.drawing:
+            self.drawing = False
+        self.cancel_pending_tool_restore()
+
+    def handle_toolbar_leave(self) -> None:
+        toolbar = getattr(self, "toolbar", None)
+        if toolbar is not None and toolbar.underMouse():
+            return
+        self._set_navigation_reason("toolbar", False)
+
     def on_toolbar_mouse_leave(self) -> None:
         if not self._pending_tool_restore:
             return
@@ -3493,6 +3582,8 @@ class OverlayWindow(QWidget):
 
     def update_cursor(self) -> None:
         if self.mode == "cursor":
+            self.setCursor(Qt.CursorShape.ArrowCursor); return
+        if self.navigation_active:
             self.setCursor(Qt.CursorShape.ArrowCursor); return
         if self.mode == "shape":
             self.setCursor(Qt.CursorShape.CrossCursor); return
@@ -4006,6 +4097,16 @@ class OverlayWindow(QWidget):
         super().mouseReleaseEvent(e)
 
     def keyPressEvent(self, e: QKeyEvent) -> None:
+        if e.key() in _QT_NAVIGATION_KEYS:
+            if not e.isAutoRepeat():
+                self._active_navigation_keys.add(e.key())
+                self._set_navigation_reason("keyboard", True)
+            if e.key() in (Qt.Key.Key_Down, Qt.Key.Key_Right):
+                self.go_to_next_slide()
+            else:
+                self.go_to_previous_slide()
+            e.accept()
+            return
         if self._forwarder and self._forwarder.forward_key(e, is_press=True):
             e.accept()
             return
@@ -4014,6 +4115,12 @@ class OverlayWindow(QWidget):
         super().keyPressEvent(e)
 
     def keyReleaseEvent(self, e: QKeyEvent) -> None:
+        if e.key() in _QT_NAVIGATION_KEYS:
+            if not e.isAutoRepeat() and e.key() in self._active_navigation_keys:
+                self._active_navigation_keys.discard(e.key())
+                self._set_navigation_reason("keyboard", False)
+            e.accept()
+            return
         if self._forwarder and self._forwarder.forward_key(e, is_press=False):
             e.accept()
             return
