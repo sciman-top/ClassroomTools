@@ -1879,23 +1879,30 @@ class FloatingToolbar(QWidget):
             active_mode = ""
         elif interaction_mode == "navigation":
             active_mode = mode
-        for hex_key, button in self.brush_color_buttons.items():
-            prev = button.blockSignals(True)
-            button.setChecked(active_mode == "brush" and hex_key == color_key)
-            button.blockSignals(prev)
-        for tool, button in (
-            ("cursor", self.btn_cursor),
-            ("shape", self.btn_shape),
-            ("eraser", self.btn_eraser),
-        ):
-            prev = button.blockSignals(True)
-            button.setChecked(active_mode == tool)
-            button.blockSignals(prev)
-        if active_mode == "brush" and color_key not in self.brush_color_buttons:
-            for button in (self.btn_cursor, self.btn_shape, self.btn_eraser):
+        prev_exclusive = self.tool_buttons.exclusive()
+        if prev_exclusive:
+            self.tool_buttons.setExclusive(False)
+        try:
+            for hex_key, button in self.brush_color_buttons.items():
                 prev = button.blockSignals(True)
-                button.setChecked(False)
+                button.setChecked(active_mode == "brush" and hex_key == color_key)
                 button.blockSignals(prev)
+            for tool, button in (
+                ("cursor", self.btn_cursor),
+                ("shape", self.btn_shape),
+                ("eraser", self.btn_eraser),
+            ):
+                prev = button.blockSignals(True)
+                button.setChecked(active_mode == tool)
+                button.blockSignals(prev)
+            if active_mode == "brush" and color_key not in self.brush_color_buttons:
+                for button in (self.btn_cursor, self.btn_shape, self.btn_eraser):
+                    prev = button.blockSignals(True)
+                    button.setChecked(False)
+                    button.blockSignals(prev)
+        finally:
+            if prev_exclusive:
+                self.tool_buttons.setExclusive(True)
 
     def update_undo_state(self, enabled: bool) -> None:
         self.btn_undo.setEnabled(enabled)
@@ -4063,6 +4070,22 @@ class OverlayWindow(QWidget):
             if origin_inside_toolbar is not None
             else not restore_on_move
         )
+        if (
+            self._nav_passthrough_active
+            and self._navigation_origin_mode == prev_mode
+            and self._navigation_origin_inside_toolbar == inside_toolbar
+            and (
+                prev_mode != "shape"
+                or self._navigation_origin_shape == (prev_shape if prev_mode == "shape" else None)
+            )
+        ):
+            if prev_mode == "cursor" and self._canvas_hidden:
+                self._nav_cursor_canvas_override = True
+                self._set_canvas_hidden(False)
+            if cursor_reference is not None:
+                self._nav_restore_cursor_pos = QPoint(cursor_reference)
+            return
+
         self._set_navigation_origin(tool_mode, prev_shape, inside_toolbar=inside_toolbar)
         if not self._nav_passthrough_active:
             self._interaction_before_navigation = self._interaction_mode
@@ -4102,9 +4125,9 @@ class OverlayWindow(QWidget):
                 if not self._keyboard_grabbed:
                     self._ensure_keyboard_capture()
         if prev_mode == "cursor":
-            should_restore_canvas = bool(self._canvas_hidden)
+            should_restore_canvas = bool(self._canvas_hidden) or self._nav_cursor_canvas_override
             self._nav_cursor_canvas_override = should_restore_canvas
-            if should_restore_canvas:
+            if should_restore_canvas and self._canvas_hidden:
                 self._set_canvas_hidden(False)
             restore_mode, restore_shape = self._cursor_navigation_restore_target()
             if restore_mode:
