@@ -3984,6 +3984,18 @@ class OverlayWindow(QWidget):
             self.keyReleaseEvent(event)
         return event.isAccepted()
 
+    def _schedule_toolbar_navigation_cleanup(self) -> None:
+        if not self._navigation_origin_from_toolbar():
+            return
+        if self._pending_tool_restore:
+            QTimer.singleShot(0, self._restore_pending_tool)
+            return
+        if (
+            self.mode == ToolMode.CURSOR.value
+            and self._interaction_mode == InteractionMode.NAVIGATION.value
+        ):
+            QTimer.singleShot(0, self._clear_navigation_passthrough)
+
     def _handle_pointer_navigation_restore(self, global_pos: QPoint) -> None:
         pending = self._pending_tool_restore
         if not pending or not pending.restore_on_move:
@@ -5397,6 +5409,7 @@ class OverlayWindow(QWidget):
             except Exception:
                 handled = False
         if handled:
+            self._schedule_toolbar_navigation_cleanup()
             e.accept()
             return
         super().wheelEvent(e)
