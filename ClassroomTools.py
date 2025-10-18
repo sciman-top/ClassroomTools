@@ -3360,7 +3360,10 @@ class OverlayWindow(QWidget):
         restore_mode = prev_mode if prev_mode in {"brush", "shape", "eraser"} else None
         if restore_mode:
             if via_toolbar:
-                self._apply_navigation_cursor_hold(restore_mode, prev_shape)
+                self._pending_tool_restore = None
+                self._cancel_navigation_cursor_hold()
+                if self.mode != restore_mode:
+                    self._restore_last_tool(restore_mode, shape_type=prev_shape)
             elif getattr(self, "toolbar", None) is not None and self.toolbar.underMouse():
                 self._pending_tool_restore = (restore_mode, prev_shape)
             else:
@@ -5617,29 +5620,19 @@ class StudentPhotoOverlay(QWidget):
         self._auto_close_duration_ms = max(0, int(duration_ms))
         self._auto_close_timer.stop()
         self._current_pixmap = pixmap
-        max_size = screen_rect.size()
+        available_size = screen_rect.size()
         original_size = pixmap.size()
         if (
-            original_size.width() >= screen_rect.width()
-            and original_size.height() >= screen_rect.height()
+            original_size.width() > available_size.width()
+            or original_size.height() > available_size.height()
         ):
             scaled = pixmap.scaled(
-                max_size,
+                available_size,
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             )
         else:
-            if (
-                original_size.width() <= screen_rect.width()
-                and original_size.height() <= screen_rect.height()
-            ):
-                scaled = pixmap
-            else:
-                scaled = pixmap.scaled(
-                    max_size,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
+            scaled = pixmap
         self._photo_label.setPixmap(scaled)
         target_size = scaled.size()
         self.resize(target_size)
@@ -5663,54 +5656,54 @@ class StudentPhotoOverlay(QWidget):
         owner = self._owner
         if owner is None:
             return
-        try:
-            overlay_hwnd = int(self.winId()) if self.winId() else 0
-        except Exception:
-            overlay_hwnd = 0
-        owner_chain: List[QWidget] = []
-        current = owner
-        while isinstance(current, QWidget):
-            owner_chain.append(current)
-            current = current.parentWidget()
-        owner_hwnds: List[int] = []
-        for widget in owner_chain:
-            try:
-                hwnd = int(widget.winId()) if widget.winId() else 0
-            except Exception:
-                hwnd = 0
-            if hwnd:
-                owner_hwnds.append(hwnd)
-        if overlay_hwnd == 0 or not owner_hwnds:
-            try:
-                self.lower()
-            except Exception:
-                pass
-            for widget in owner_chain:
-                try:
-                    widget.raise_()
-                except Exception:
-                    continue
+        owner_chain = self._collect_owner_chain(owner)
+        if not owner_chain:
             return
-        if win32gui is not None and win32con is not None:
-            flags = win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE | win32con.SWP_NOOWNERZORDER
+        overlay_rect = self._widget_frame_rect(self)
+        if overlay_rect is None:
+            overlay_rect = QRect(self.pos(), self.size())
+        owner_rects: List[Tuple[QWidget, QRect]] = []
+        needs_raise = False
+        for widget in owner_chain:
+            rect = self._widget_frame_rect(widget)
+            if rect is None:
+                continue
+            owner_rects.append((widget, rect))
+            if overlay_rect.intersects(rect):
+                needs_raise = True
+        if not needs_raise:
+            return
+        owner_hwnds = self._collect_owner_hwnds(owner_chain)
+        if win32gui is not None and win32con is not None and owner_hwnds:
+            flags = (
+                win32con.SWP_NOMOVE
+                | win32con.SWP_NOSIZE
+                | win32con.SWP_NOOWNERZORDER
+                | win32con.SWP_NOACTIVATE
+            )
+            for hwnd in reversed(owner_hwnds):
+                try:
+                    win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0, flags)
+                except Exception:
+                    logger.debug(
+                        "win32gui.SetWindowPos failed for owner window above photo overlay",
+                        exc_info=True,
+                    )
             try:
-                win32gui.SetWindowPos(overlay_hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0, flags)
-                insert_after = overlay_hwnd
-                for hwnd in owner_hwnds:
-                    win32gui.SetWindowPos(hwnd, insert_after, 0, 0, 0, 0, flags)
-                    insert_after = hwnd
-            except Exception:
-                logger.debug("win32gui.SetWindowPos failed for photo overlay", exc_info=True)
-        else:
-            try:
-                self.lower()
+                if owner_hwnds:
+                    _user32_focus_window(owner_hwnds[0])
             except Exception:
                 pass
-            for widget in owner_chain:
+        else:
+            for widget, _ in reversed(owner_rects):
                 try:
                     widget.raise_()
                 except Exception:
                     continue
+            try:
+                owner_rects[0][0].activateWindow()
+            except Exception:
+                pass
 
     def _update_close_button_positions(self) -> None:
         label_geometry = self._photo_label.geometry()
@@ -5739,6 +5732,39 @@ class StudentPhotoOverlay(QWidget):
         if watched is self._photo_label and event.type() == QEvent.Type.MouseButtonPress:
             self._safe_stack_below_owner()
         return super().eventFilter(watched, event)
+
+    @staticmethod
+    def _collect_owner_chain(owner: QWidget) -> List[QWidget]:
+        chain: List[QWidget] = []
+        current: Optional[QWidget] = owner
+        while isinstance(current, QWidget):
+            chain.append(current)
+            current = current.parentWidget()
+        return chain
+
+    @staticmethod
+    def _collect_owner_hwnds(owner_chain: Iterable[QWidget]) -> List[int]:
+        handles: List[int] = []
+        for widget in owner_chain:
+            try:
+                handle = int(widget.winId()) if widget.winId() else 0
+            except Exception:
+                handle = 0
+            if handle:
+                handles.append(handle)
+        return handles
+
+    @staticmethod
+    def _widget_frame_rect(widget: QWidget) -> Optional[QRect]:
+        if widget is None or not widget.isVisible():
+            return None
+        try:
+            rect = widget.frameGeometry()
+        except Exception:
+            rect = widget.geometry()
+        if rect.isNull() or not rect.isValid():
+            return None
+        return QRect(rect)
 
 
 class RollCallTimerWindow(QWidget):
