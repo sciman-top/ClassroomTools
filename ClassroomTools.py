@@ -2562,26 +2562,6 @@ class _PresentationForwarder:
         for _priority, hwnd, cache in ranked:
             yield hwnd, cache
 
-    def _iter_wheel_targets(self, target: int) -> Iterable[Tuple[int, bool]]:
-        seen: Set[int] = set()
-
-        def _append(hwnd: int, *, cache: bool, require_visible: bool) -> Iterable[Tuple[int, bool]]:
-            if hwnd in seen:
-                return ()
-            if not self._is_keyboard_target(hwnd, require_visible=require_visible):
-                return ()
-            seen.add(hwnd)
-            return ((hwnd, cache),)
-
-        for focus_hwnd in self._gather_thread_focus_handles(target):
-            for candidate in _append(focus_hwnd, cache=False, require_visible=False):
-                yield candidate
-        for candidate in _append(target, cache=True, require_visible=True):
-            yield candidate
-        for child_hwnd in self._collect_descendant_windows(target):
-            for candidate in _append(child_hwnd, cache=False, require_visible=False):
-                yield candidate
-
     def _build_key_lparam(self, vk_code: int, event: QKeyEvent, is_press: bool) -> int:
         repeat_getter = getattr(event, "count", None)
         repeat_count = 1
@@ -5514,57 +5494,22 @@ class StudentPhotoOverlay(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._owner = owner
         self._current_pixmap = QPixmap()
-        self._full_screen_active = False
         self._auto_close_duration_ms = 0
         self._auto_close_timer = QTimer(self)
         self._auto_close_timer.setSingleShot(True)
         self._auto_close_timer.timeout.connect(self._handle_auto_close)
 
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(0)
-
-        self._container = QFrame(self)
-        self._container.setObjectName("studentPhotoContainer")
-        self._container.setStyleSheet(
-            """
-            QFrame#studentPhotoContainer {
-                background-color: rgba(0, 0, 0, 208);
-                border-radius: 16px;
-            }
-            QToolButton {
-                color: #f5f5f5;
-                background-color: rgba(255, 255, 255, 48);
-                border: 1px solid rgba(255, 255, 255, 96);
-                border-radius: 11px;
-                padding: 0;
-            }
-            QToolButton:hover {
-                background-color: rgba(255, 255, 255, 88);
-            }
-            """
-        )
-        outer.addWidget(self._container)
-
-        self._container_layout = QVBoxLayout(self._container)
-        self._container_layout.setContentsMargins(28, 28, 28, 20)
-        self._container_layout.setSpacing(12)
-
-        self._photo_label = QLabel(self._container)
+        self._photo_label = QLabel(self)
         self._photo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._photo_label.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum)
-        self._container_layout.addWidget(self._photo_label, 1)
+        self._photo_label.setStyleSheet("background: transparent;")
+        self._photo_label.setSizePolicy(
+            QSizePolicy.Policy.Fixed,
+            QSizePolicy.Policy.Fixed,
+        )
+        self._photo_label.installEventFilter(self)
 
-        button_row = QHBoxLayout()
-        button_row.setContentsMargins(0, 0, 0, 0)
-        button_row.setSpacing(0)
         self._left_close = self._make_close_button()
         self._right_close = self._make_close_button()
-        button_row.addWidget(self._left_close, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
-        button_row.addStretch(1)
-        button_row.addWidget(self._right_close, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom)
-        self._container_layout.addLayout(button_row)
-
         self._left_close.clicked.connect(lambda: self._handle_close_request(manual=True))
         self._right_close.clicked.connect(lambda: self._handle_close_request(manual=True))
 
@@ -5572,12 +5517,27 @@ class StudentPhotoOverlay(QWidget):
         self._owner = owner
 
     def _make_close_button(self) -> QToolButton:
-        button = QToolButton(self._container)
+        button = QToolButton(self)
         button.setAutoRaise(True)
+        button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         button.setCursor(Qt.CursorShape.PointingHandCursor)
-        button.setText("X")
+        button.setText("✕")
         button.setToolTip("关闭照片")
-        button.setFixedSize(24, 24)
+        button.setFixedSize(22, 22)
+        button.setStyleSheet(
+            """
+            QToolButton {
+                color: #f5f5f5;
+                background-color: rgba(32, 32, 32, 168);
+                border: 1px solid rgba(255, 255, 255, 120);
+                border-radius: 11px;
+                padding: 0;
+            }
+            QToolButton:hover {
+                background-color: rgba(32, 32, 32, 210);
+            }
+            """
+        )
         return button
 
     def _handle_close_request(self, *, manual: bool) -> None:
@@ -5610,12 +5570,10 @@ class StudentPhotoOverlay(QWidget):
         self._current_pixmap = pixmap
         max_size = screen_rect.size()
         original_size = pixmap.size()
-        can_cover_screen = (
+        if (
             original_size.width() >= screen_rect.width()
             and original_size.height() >= screen_rect.height()
-        )
-        full_screen = can_cover_screen
-        if full_screen:
+        ):
             scaled = pixmap.scaled(
                 max_size,
                 Qt.AspectRatioMode.KeepAspectRatio,
@@ -5633,73 +5591,18 @@ class StudentPhotoOverlay(QWidget):
                     Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.SmoothTransformation,
                 )
-        self._apply_full_screen_style(full_screen)
         self._photo_label.setPixmap(scaled)
-        self._photo_label.setFixedSize(scaled.size())
-        if full_screen:
-            self.resize(screen_rect.size())
-            self.move(screen_rect.topLeft())
-            self._container.resize(self.size())
-        else:
-            if self.layout() is not None:
-                self.layout().activate()
-            self.adjustSize()
-            window_size = self.size()
-            width = min(window_size.width(), screen_rect.width())
-            height = min(window_size.height(), screen_rect.height())
-            x = screen_rect.x() + max(0, (screen_rect.width() - width) // 2)
-            y = screen_rect.y() + max(0, (screen_rect.height() - height) // 2)
-            self.resize(width, height)
-            self.move(int(x), int(y))
-            self._container.adjustSize()
+        target_size = scaled.size()
+        self.resize(target_size)
+        self._photo_label.resize(target_size)
+        self._photo_label.move(0, 0)
+        x = screen_rect.x() + max(0, (screen_rect.width() - target_size.width()) // 2)
+        y = screen_rect.y() + max(0, (screen_rect.height() - target_size.height()) // 2)
+        self.move(int(x), int(y))
         self.show()
+        self._update_close_button_positions()
         self._stack_below_owner()
         self.schedule_auto_close(self._auto_close_duration_ms)
-
-    def _apply_full_screen_style(self, full_screen: bool) -> None:
-        if self._full_screen_active == full_screen:
-            return
-        self._full_screen_active = full_screen
-        if full_screen:
-            self._container_layout.setContentsMargins(24, 24, 24, 32)
-            self._container.setStyleSheet(
-                """
-                QFrame#studentPhotoContainer {
-                    background-color: rgba(0, 0, 0, 230);
-                    border-radius: 0px;
-                }
-                QToolButton {
-                    color: #f5f5f5;
-                    background-color: rgba(255, 255, 255, 48);
-                    border: 1px solid rgba(255, 255, 255, 96);
-                    border-radius: 11px;
-                    padding: 0;
-                }
-                QToolButton:hover {
-                    background-color: rgba(255, 255, 255, 96);
-                }
-                """
-            )
-        else:
-            self._container_layout.setContentsMargins(8, 8, 8, 12)
-            self._container.setStyleSheet(
-                """
-                QFrame#studentPhotoContainer {
-                    background-color: transparent;
-                    border: none;
-                }
-                QToolButton {
-                    color: #f5f5f5;
-                    background-color: rgba(255, 255, 255, 48);
-                    border: 1px solid rgba(255, 255, 255, 96);
-                    border-radius: 11px;
-                    padding: 0;
-                }
-                QToolButton:hover {
-                    background-color: rgba(255, 255, 255, 88);
-                }
-                """
-            )
 
     def _stack_below_owner(self) -> None:
         owner = self._owner
@@ -5754,12 +5657,39 @@ class StudentPhotoOverlay(QWidget):
                 except Exception:
                     continue
 
+    def _update_close_button_positions(self) -> None:
+        label_geometry = self._photo_label.geometry()
+        if label_geometry.width() <= 0 or label_geometry.height() <= 0:
+            return
+        margin = 8
+        left_x = label_geometry.left() + margin
+        right_x = label_geometry.right() - self._right_close.width() - margin
+        y = label_geometry.bottom() - self._left_close.height() - margin
+        self._left_close.move(int(left_x), int(y))
+        self._right_close.move(int(right_x), int(y))
+        self._left_close.raise_()
+        self._right_close.raise_()
+
+    def resizeEvent(self, event) -> None:
+        self._photo_label.resize(self.size())
+        self._photo_label.move(0, 0)
+        self._update_close_button_positions()
+        super().resizeEvent(event)
+
     def mousePressEvent(self, event) -> None:
         try:
             self._stack_below_owner()
         except Exception:
             pass
         super().mousePressEvent(event)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if watched is self._photo_label and event.type() == QEvent.Type.MouseButtonPress:
+            try:
+                self._stack_below_owner()
+            except Exception:
+                pass
+        return super().eventFilter(watched, event)
 
 
 class RollCallTimerWindow(QWidget):
