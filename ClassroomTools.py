@@ -3560,22 +3560,44 @@ class _PresentationForwarder:
         force_injection = self._should_force_wheel_injection(hwnd, role_hint)
         delivered = False
         message_attempted = injection_only
-        if not force_injection and not injection_only:
-            delivered = self._deliver_wheel_messages(
-                hwnd,
-                delta,
-                modifiers=modifiers,
-                point=default_point,
-            )
-            message_attempted = True
-        if not delivered:
+        injection_first = (
+            injection_only
+            or force_injection
+            or role_hint == "document"
+        )
+        if injection_first:
             delivered = self._send_wheel_via_injection(
                 hwnd,
                 delta,
                 modifiers=modifiers,
                 point=default_point,
-                allow_message_fallback=not message_attempted,
+                allow_message_fallback=False,
             )
+            if not delivered and not injection_only:
+                message_attempted = True
+                delivered = self._deliver_wheel_messages(
+                    hwnd,
+                    delta,
+                    modifiers=modifiers,
+                    point=default_point,
+                )
+        else:
+            if not injection_only:
+                message_attempted = True
+                delivered = self._deliver_wheel_messages(
+                    hwnd,
+                    delta,
+                    modifiers=modifiers,
+                    point=default_point,
+                )
+            if not delivered:
+                delivered = self._send_wheel_via_injection(
+                    hwnd,
+                    delta,
+                    modifiers=modifiers,
+                    point=default_point,
+                    allow_message_fallback=not message_attempted,
+                )
         if delivered:
             self._set_cached_target(hwnd, role_hint)
         else:
