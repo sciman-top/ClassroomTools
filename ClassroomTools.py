@@ -211,6 +211,7 @@ from PyQt6.QtGui import (
     QPen,
     QPixmap,
     QKeyEvent,
+    QMouseEvent,
     QResizeEvent,
     QScreen,
     QWheelEvent,
@@ -3229,6 +3230,11 @@ class OverlayWindow(QWidget):
         self._navigation_reasons: Dict[str, int] = {}
         self._active_navigation_keys: Set[int] = set()
         self._cursor_button_navigation = False
+        self._nav_pointer_button = Qt.MouseButton.NoButton
+        self._nav_pointer_press_pos = QPointF()
+        self._nav_pointer_press_global = QPointF()
+        self._nav_pointer_press_modifiers = Qt.KeyboardModifiers()
+        self._nav_pointer_started_draw = False
         self._brush_painter: Optional[QPainter] = None
         self._eraser_painter: Optional[QPainter] = None
         self._last_target_hwnd: Optional[int] = None
@@ -3667,6 +3673,13 @@ class OverlayWindow(QWidget):
         self._set_navigation_reason("cursor-button", False)
         if not self.navigation_active and self.mode != "cursor":
             self.update_cursor()
+
+    def _toolbar_contains_global(self, global_pos: QPoint) -> bool:
+        toolbar = getattr(self, "toolbar", None)
+        if toolbar is None or not toolbar.isVisible():
+            return False
+        local = toolbar.mapFromGlobal(global_pos)
+        return toolbar.rect().contains(local)
 
     def on_toolbar_mouse_leave(self) -> None:
         if not self._pending_tool_restore:
@@ -4270,6 +4283,21 @@ class OverlayWindow(QWidget):
         return dirty_region
 
     def mousePressEvent(self, e) -> None:
+        global_point = e.globalPosition().toPoint()
+        inside_toolbar = self._toolbar_contains_global(global_point)
+        if (
+            not inside_toolbar
+            and self.mode != "cursor"
+            and e.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton)
+        ):
+            self._nav_pointer_button = e.button()
+            self._nav_pointer_press_pos = QPointF(e.position())
+            self._nav_pointer_press_global = QPointF(e.globalPosition())
+            self._nav_pointer_press_modifiers = Qt.KeyboardModifiers(e.modifiers())
+            self._nav_pointer_started_draw = False
+            self._set_navigation_reason("pointer", True)
+            self.cancel_pending_tool_restore()
+            self._cancel_navigation_cursor_hold()
         if (
             e.button() == Qt.MouseButton.LeftButton
             and self.mode != "cursor"
@@ -4282,6 +4310,27 @@ class OverlayWindow(QWidget):
         super().mousePressEvent(e)
 
     def mouseMoveEvent(self, e) -> None:
+        if (
+            self._nav_pointer_button == Qt.MouseButton.LeftButton
+            and not self._nav_pointer_started_draw
+            and (e.buttons() & Qt.MouseButton.LeftButton)
+        ):
+            delta = e.position() - self._nav_pointer_press_pos
+            if abs(delta.x()) >= 2 or abs(delta.y()) >= 2:
+                self._nav_pointer_started_draw = True
+                self._set_navigation_reason("pointer", False)
+                synthetic_press = QMouseEvent(
+                    QEvent.Type.MouseButtonPress,
+                    QPointF(self._nav_pointer_press_pos),
+                    QPointF(self._nav_pointer_press_global),
+                    Qt.MouseButton.LeftButton,
+                    Qt.MouseButton.LeftButton,
+                    Qt.KeyboardModifiers(self._nav_pointer_press_modifiers),
+                )
+                self._ensure_keyboard_capture()
+                self._start_paint_session(synthetic_press)
+                self.raise_toolbar()
+                self._nav_pointer_button = Qt.MouseButton.NoButton
         if self.drawing and self.mode != "cursor":
             p = e.pos(); pf = e.position()
             dirty_region = None
@@ -4296,6 +4345,10 @@ class OverlayWindow(QWidget):
         super().mouseMoveEvent(e)
 
     def mouseReleaseEvent(self, e) -> None:
+        if e.button() == self._nav_pointer_button:
+            self._set_navigation_reason("pointer", False)
+            self._nav_pointer_button = Qt.MouseButton.NoButton
+            self._nav_pointer_started_draw = False
         if e.button() == Qt.MouseButton.LeftButton and self.drawing:
             dirty_region = self._finalize_paint_session(e.pos())
             if dirty_region is not None:
