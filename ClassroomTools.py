@@ -2093,6 +2093,7 @@ class _PresentationForwarder:
         "wpsframewindow",
     }
     _DOCUMENT_WINDOW_PREFIXES: Tuple[str, ...] = ("opusapp", "kwps", "wpsframe", "wpsmain")
+    _FORCE_WHEEL_INJECTION_CLASSES: Set[str] = set()
     _KNOWN_PRESENTATION_CLASSES: Set[str] = (
         _SLIDESHOW_PRIORITY_CLASSES
         | _SLIDESHOW_SECONDARY_CLASSES
@@ -2387,7 +2388,27 @@ class _PresentationForwarder:
             )
         return success
 
-    def send_navigation_wheel(self, delta: int) -> bool:
+    def send_navigation_wheel_message(self, delta: int) -> bool:
+        if not self.is_supported() or delta == 0:
+            return False
+        target = self._resolve_presentation_target()
+        if not target:
+            target = self._detect_presentation_window()
+        if not target:
+            return False
+        role = self._last_target_role or self._classify_role_from_class_name(
+            self._window_class_name(target)
+        )
+        if self._should_force_wheel_injection(target, role):
+            return False
+        delivered = self._deliver_wheel_messages(target, delta)
+        if delivered:
+            self._set_cached_target(target, role)
+        else:
+            self.clear_cached_target()
+        return delivered
+
+    def send_navigation_wheel(self, delta: int, *, injection_only: bool = False) -> bool:
         if not self.is_supported() or delta == 0:
             return False
         target = self._resolve_presentation_target()
@@ -2399,9 +2420,19 @@ class _PresentationForwarder:
             self._window_class_name(target)
         )
         role_hint = role or "slideshow"
-        delivered = self._send_navigation_wheel_impl(target, delta, role_hint=role_hint)
+        delivered = self._send_navigation_wheel_impl(
+            target,
+            delta,
+            role_hint=role_hint,
+            injection_only=injection_only,
+        )
         if not delivered and role_hint != "slideshow":
-            delivered = self._send_navigation_wheel_impl(target, delta, role_hint="slideshow")
+            delivered = self._send_navigation_wheel_impl(
+                target,
+                delta,
+                role_hint="slideshow",
+                injection_only=injection_only,
+            )
         if not delivered:
             self.clear_cached_target()
         return delivered
@@ -3416,26 +3447,55 @@ class _PresentationForwarder:
                 delivered = False
         return delivered
 
-    def _send_navigation_wheel_impl(
+    def _should_force_wheel_injection(self, hwnd: int, role_hint: Optional[str]) -> bool:
+        if hwnd == 0:
+            return False
+        if role_hint == "document":
+            return False
+        class_name = self._window_class_name(hwnd)
+        if not class_name:
+            return False
+        return class_name in self._FORCE_WHEEL_INJECTION_CLASSES
+
+    def _deliver_wheel_messages(
         self,
         hwnd: int,
         delta: int,
         *,
-        role_hint: str,
         modifiers: int = 0,
-        source_event: Optional[QWheelEvent] = None,
+        point: Optional[Tuple[int, int]] = None,
     ) -> bool:
         if hwnd == 0:
             return False
-        point: Optional[Tuple[int, int]] = None
-        if source_event is not None:
-            try:
-                global_pos = source_event.globalPosition().toPoint()
-                point = (int(global_pos.x()), int(global_pos.y()))
-            except Exception:
-                point = None
-        if point is None:
-            point = self._get_default_wheel_point(hwnd)
+        effective_point = point or self._get_default_wheel_point(hwnd)
+        if effective_point is None:
+            return False
+        for candidate in self._iter_wheel_targets(hwnd):
+            if self._send_wheel_message(
+                candidate,
+                delta,
+                modifiers=modifiers,
+                point=effective_point,
+            ):
+                return True
+        return self._send_wheel_message(
+            hwnd,
+            delta,
+            modifiers=modifiers,
+            point=effective_point,
+        )
+
+    def _send_wheel_via_injection(
+        self,
+        hwnd: int,
+        delta: int,
+        *,
+        modifiers: int = 0,
+        point: Optional[Tuple[int, int]] = None,
+        allow_message_fallback: bool = False,
+    ) -> bool:
+        if hwnd == 0:
+            return False
         delivered = False
         passthrough_applied = False
         original_cursor: Optional[Tuple[int, int]] = None
@@ -3456,23 +3516,13 @@ class _PresentationForwarder:
                     self._injecting_wheel = True
                     try:
                         injected = self._send_wheel_input(delta)
-                        if injected:
-                            delivered = True
                     finally:
                         if not injected:
                             self._injecting_wheel = False
-                if not delivered:
-                    for candidate in self._iter_wheel_targets(hwnd):
-                        delivered = self._send_wheel_message(
-                            candidate,
-                            delta,
-                            modifiers=modifiers,
-                            point=point,
-                        )
-                        if delivered:
-                            break
-                if not delivered and point is not None:
-                    delivered = self._send_wheel_message(
+                    if injected:
+                        delivered = True
+                if not delivered and allow_message_fallback:
+                    delivered = self._deliver_wheel_messages(
                         hwnd,
                         delta,
                         modifiers=modifiers,
@@ -3485,6 +3535,47 @@ class _PresentationForwarder:
         if original_cursor is not None:
             self._set_cursor_pos(original_cursor)
         self._injecting_wheel = False
+        return delivered
+
+    def _send_navigation_wheel_impl(
+        self,
+        hwnd: int,
+        delta: int,
+        *,
+        role_hint: str,
+        modifiers: int = 0,
+        source_event: Optional[QWheelEvent] = None,
+        injection_only: bool = False,
+    ) -> bool:
+        if hwnd == 0:
+            return False
+        point: Optional[Tuple[int, int]] = None
+        if source_event is not None:
+            try:
+                global_pos = source_event.globalPosition().toPoint()
+                point = (int(global_pos.x()), int(global_pos.y()))
+            except Exception:
+                point = None
+        default_point = point if point is not None else self._get_default_wheel_point(hwnd)
+        force_injection = self._should_force_wheel_injection(hwnd, role_hint)
+        delivered = False
+        message_attempted = injection_only
+        if not force_injection and not injection_only:
+            delivered = self._deliver_wheel_messages(
+                hwnd,
+                delta,
+                modifiers=modifiers,
+                point=default_point,
+            )
+            message_attempted = True
+        if not delivered:
+            delivered = self._send_wheel_via_injection(
+                hwnd,
+                delta,
+                modifiers=modifiers,
+                point=default_point,
+                allow_message_fallback=not message_attempted,
+            )
         if delivered:
             self._set_cached_target(hwnd, role_hint)
         else:
@@ -4679,24 +4770,42 @@ class OverlayWindow(QWidget):
     def _navigation_wheel_delta(self, vk_code: int) -> int:
         return self._NAVIGATION_WHEEL_MAP.get(vk_code, 0)
 
-    def _send_navigation_wheel(self, vk_code: int, delta: int) -> bool:
+    def _send_navigation_wheel_message_only(self, delta: int) -> bool:
+        if delta == 0 or self._forwarder is None:
+            return False
+        try:
+            return self._forwarder.send_navigation_wheel_message(delta)
+        except Exception:
+            return False
+
+    def _send_navigation_wheel(
+        self,
+        vk_code: int,
+        delta: int,
+        *,
+        injection_only: bool = False,
+    ) -> bool:
         if delta == 0:
             return False
         delivered = False
         if self._forwarder is not None:
             try:
-                delivered = self._forwarder.send_navigation_wheel(delta)
+                delivered = self._forwarder.send_navigation_wheel(
+                    delta,
+                    injection_only=injection_only,
+                )
             except Exception:
                 delivered = False
             if delivered:
                 return True
-            try:
-                if self._forwarder.get_last_target_role() == "document":
-                    delivered = self._forwarder.send_document_scroll_for_vk(vk_code)
-            except Exception:
-                delivered = False
-            if delivered:
-                return True
+            if not injection_only:
+                try:
+                    if self._forwarder.get_last_target_role() == "document":
+                        delivered = self._forwarder.send_document_scroll_for_vk(vk_code)
+                except Exception:
+                    delivered = False
+                if delivered:
+                    return True
         focused = self._focus_presentation_window_fallback()
         if not focused:
             self._focus_presentation_window_fallback()
@@ -4927,42 +5036,12 @@ class OverlayWindow(QWidget):
 
     @contextlib.contextmanager
     def _navigation_injection_guard(self):
-        """Temporarily allow mouse/keyboard to pass through for navigation sends."""
-        toolbar_origin = self._navigation_origin_from_toolbar()
-        enable_passthrough = not toolbar_origin
-        try:
-            prev_mouse_passthrough = self.testAttribute(
-                Qt.WidgetAttribute.WA_TransparentForMouseEvents
-            )
-        except Exception:
-            prev_mouse_passthrough = False
-        toggle_mouse_passthrough = bool(enable_passthrough and not prev_mouse_passthrough)
+        """Maintain keyboard grab state while navigation events are dispatched."""
         had_keyboard_grab = self._keyboard_grabbed
-        keyboard_context: contextlib.AbstractContextManager[bool]
-        if enable_passthrough and had_keyboard_grab:
-            keyboard_context = self._temporarily_release_keyboard()
-        else:
-            keyboard_context = contextlib.nullcontext(had_keyboard_grab)
-        if toggle_mouse_passthrough:
-            try:
-                self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-            except Exception:
-                toggle_mouse_passthrough = False
-        had_keyboard_returned = False
         try:
-            with keyboard_context as had_keyboard:
-                had_keyboard_returned = bool(had_keyboard)
-                yield had_keyboard
+            yield had_keyboard_grab
         finally:
-            if toggle_mouse_passthrough:
-                try:
-                    self.setAttribute(
-                        Qt.WidgetAttribute.WA_TransparentForMouseEvents,
-                        prev_mouse_passthrough,
-                    )
-                except Exception:
-                    pass
-            if enable_passthrough and had_keyboard_returned and not self._keyboard_grabbed:
+            if had_keyboard_grab and not self._keyboard_grabbed:
                 self._ensure_keyboard_capture()
 
     def _extract_wheel_delta(self, event: Optional[QWheelEvent]) -> int:
@@ -5016,7 +5095,14 @@ class OverlayWindow(QWidget):
             return False
         attempts: List[Callable[[], bool]] = []
         if wheel_delta and prefer_scroll:
-            attempts.append(lambda: self._send_navigation_wheel(vk_code, wheel_delta))
+            attempts.append(lambda: self._send_navigation_wheel_message_only(wheel_delta))
+            attempts.append(
+                lambda: self._send_navigation_wheel(
+                    vk_code,
+                    wheel_delta,
+                    injection_only=True,
+                )
+            )
 
         attempts.append(lambda: self._send_virtual_key_direct(vk_code))
 
