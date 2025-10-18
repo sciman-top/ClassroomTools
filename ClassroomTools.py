@@ -3720,6 +3720,8 @@ class OverlayWindow(QWidget):
     _KNOWN_PRESENTATION_PREFIXES = _PresentationForwarder._KNOWN_PRESENTATION_PREFIXES
     _SLIDESHOW_PRIORITY_CLASSES = _PresentationForwarder._SLIDESHOW_PRIORITY_CLASSES
     _SLIDESHOW_SECONDARY_CLASSES = _PresentationForwarder._SLIDESHOW_SECONDARY_CLASSES
+    _DOCUMENT_WINDOW_CLASSES = _PresentationForwarder._DOCUMENT_WINDOW_CLASSES
+    _DOCUMENT_WINDOW_PREFIXES = _PresentationForwarder._DOCUMENT_WINDOW_PREFIXES
 
     def __init__(self, settings_manager: SettingsManager) -> None:
         super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
@@ -3873,7 +3875,7 @@ class OverlayWindow(QWidget):
     def _build_mode_state(self, tool: ToolMode) -> ModeState:
         passthrough = tool == ToolMode.CURSOR
         interaction = InteractionMode.CURSOR if tool == ToolMode.CURSOR else InteractionMode.DRAWING
-        canvas_hidden = False
+        canvas_hidden = tool == ToolMode.CURSOR
         keyboard_grabbed = not passthrough
         return ModeState(
             tool=tool,
@@ -4201,7 +4203,12 @@ class OverlayWindow(QWidget):
         self._set_navigation_origin(tool_mode, prev_shape, inside_toolbar=inside_toolbar)
         if not self._nav_passthrough_active:
             self._interaction_before_navigation = self._interaction_mode
-        self._interaction_mode = "navigation"
+        # 保持光标模式的交互状态，避免在光标场景下误切换为导航模式。
+        self._interaction_mode = (
+            InteractionMode.NAVIGATION.value
+            if prev_mode != ToolMode.CURSOR.value
+            else InteractionMode.CURSOR.value
+        )
         self._navigation_origin_mode = prev_mode
         self._navigation_origin_shape = prev_shape if prev_mode == "shape" else None
         self._navigation_origin_inside_toolbar = inside_toolbar
@@ -5224,11 +5231,111 @@ class OverlayWindow(QWidget):
         o_left, o_top, o_right, o_bottom = overlay
         return not (right <= o_left or left >= o_right or bottom <= o_top or top >= o_bottom)
 
+    def _fallback_belongs_to_current_process(self, hwnd: int) -> bool:
+        if _USER32 is None or hwnd == 0:
+            return False
+        pid = wintypes.DWORD()
+        try:
+            _USER32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(pid))
+        except Exception:
+            return False
+        return pid.value == os.getpid()
+
+    def _fallback_next_window_in_z_order(self, hwnd: int) -> int:
+        if _USER32 is None or hwnd == 0:
+            return 0
+        try:
+            command = getattr(win32con, "GW_HWNDNEXT", 2) if win32con is not None else 2
+        except Exception:
+            command = 2
+        try:
+            nxt = _USER32.GetWindow(wintypes.HWND(hwnd), command)
+        except Exception:
+            nxt = 0
+        return int(nxt) if nxt else 0
+
+    def _fallback_effective_foreground_window(self) -> int:
+        if _USER32 is None:
+            return 0
+        overlay_hwnd = int(self.winId()) if self.winId() else 0
+        foreground = _user32_get_foreground_window()
+        visited: Set[int] = set()
+        hwnd = foreground
+        while hwnd and hwnd not in visited:
+            visited.add(hwnd)
+            top = _user32_top_level_hwnd(hwnd)
+            if top == overlay_hwnd or self._fallback_belongs_to_current_process(top):
+                hwnd = self._fallback_next_window_in_z_order(top)
+                continue
+            if self._fallback_is_target_window_valid(top):
+                return top
+            hwnd = self._fallback_next_window_in_z_order(top)
+        return 0
+
+    def _fallback_is_window_maximized(self, hwnd: int) -> bool:
+        if _USER32 is None or hwnd == 0:
+            return False
+        try:
+            return bool(_USER32.IsZoomed(wintypes.HWND(hwnd)))
+        except Exception:
+            return False
+
+    def _fallback_candidate_role(self, hwnd: int) -> Optional[str]:
+        if _USER32 is None or hwnd == 0:
+            return None
+        if not self._fallback_is_target_window_valid(hwnd):
+            return None
+        class_name = _user32_window_class_name(hwnd)
+        if not class_name:
+            return None
+        role: Optional[str] = None
+        if class_name in self._KNOWN_PRESENTATION_CLASSES or any(
+            class_name.startswith(prefix) for prefix in self._KNOWN_PRESENTATION_PREFIXES
+        ):
+            role = "slideshow"
+        elif class_name in self._DOCUMENT_WINDOW_CLASSES or any(
+            class_name.startswith(prefix) for prefix in self._DOCUMENT_WINDOW_PREFIXES
+        ):
+            role = "document"
+        if role is None:
+            return None
+        rect = _user32_window_rect(hwnd)
+        if not rect:
+            return None
+        left, top, right, bottom = rect
+        width = max(0, right - left)
+        height = max(0, bottom - top)
+        if width < 400 or height < 300:
+            return None
+        overlay = self._overlay_rect_tuple()
+        if overlay is None:
+            return None
+        o_width = overlay[2] - overlay[0]
+        o_height = overlay[3] - overlay[1]
+        if o_width <= 0 or o_height <= 0:
+            return None
+        width_diff = abs(width - o_width)
+        height_diff = abs(height - o_height)
+        if width_diff > 64 or height_diff > 64:
+            return None
+        if role == "document":
+            if not self._fallback_is_window_maximized(hwnd):
+                return None
+            foreground = self._fallback_effective_foreground_window()
+            if foreground:
+                target_top = _user32_top_level_hwnd(hwnd)
+                foreground_top = _user32_top_level_hwnd(foreground)
+                if target_top and foreground_top and target_top != foreground_top:
+                    return None
+        return role
+
     def _fallback_is_target_window_valid(self, hwnd: int) -> bool:
         if _USER32 is None or hwnd == 0:
             return False
         overlay_hwnd = int(self.winId()) if self.winId() else 0
         if hwnd == overlay_hwnd:
+            return False
+        if self._fallback_belongs_to_current_process(hwnd):
             return False
         if not _user32_is_window(hwnd):
             return False
@@ -5240,42 +5347,20 @@ class OverlayWindow(QWidget):
         return self._rect_intersects_overlay(rect)
 
     def _fallback_is_candidate_window(self, hwnd: int) -> bool:
-        if _USER32 is None or hwnd == 0:
-            return False
-        class_name = _user32_window_class_name(hwnd)
-        if not class_name:
-            return False
-        if class_name in self._KNOWN_PRESENTATION_CLASSES:
-            return True
-        if any(class_name.startswith(prefix) for prefix in self._KNOWN_PRESENTATION_PREFIXES):
-            return True
-        rect = _user32_window_rect(hwnd)
-        if not rect:
-            return False
-        left, top, right, bottom = rect
-        width = max(0, right - left)
-        height = max(0, bottom - top)
-        overlay = self._overlay_rect_tuple()
-        if overlay is None:
-            return False
-        o_width = overlay[2] - overlay[0]
-        o_height = overlay[3] - overlay[1]
-        if o_width <= 0 or o_height <= 0:
-            return False
-        width_diff = abs(width - o_width)
-        height_diff = abs(height - o_height)
-        return width >= 400 and height >= 300 and width_diff <= 64 and height_diff <= 64
+        return self._fallback_candidate_role(hwnd) is not None
 
     def _fallback_detect_presentation_window_user32(self) -> Optional[int]:
         if _USER32 is None:
             return None
         overlay_hwnd = int(self.winId()) if self.winId() else 0
-        foreground = _user32_get_foreground_window()
-        if foreground and foreground != overlay_hwnd and self._fallback_is_candidate_window(foreground):
-            return foreground
+        foreground = self._fallback_effective_foreground_window()
+        if foreground and foreground != overlay_hwnd:
+            role = self._fallback_candidate_role(foreground)
+            if role is not None:
+                return foreground
         if _WNDENUMPROC is None:
             return None
-        candidates: List[int] = []
+        candidates: List[Tuple[int, str]] = []
 
         def _enum_callback(hwnd: int, _l_param: int) -> int:
             if hwnd == overlay_hwnd:
@@ -5285,7 +5370,9 @@ class OverlayWindow(QWidget):
             rect = _user32_window_rect(hwnd)
             if not rect or not self._rect_intersects_overlay(rect):
                 return True
-            candidates.append(int(hwnd))
+            role = self._fallback_candidate_role(int(hwnd))
+            if role is not None:
+                candidates.append((int(hwnd), role))
             return True
 
         enum_proc = _WNDENUMPROC(_enum_callback)
@@ -5293,8 +5380,11 @@ class OverlayWindow(QWidget):
             _USER32.EnumWindows(enum_proc, 0)
         except Exception:
             return None
-        for hwnd in candidates:
-            if self._fallback_is_candidate_window(hwnd):
+        for hwnd, role in candidates:
+            if role == "slideshow":
+                return hwnd
+        for hwnd, role in candidates:
+            if role == "document":
                 return hwnd
         return None
 
@@ -5643,9 +5733,9 @@ class OverlayWindow(QWidget):
                 handled = self._send_slide_virtual_key(vk_code)
                 if handled:
                     self._nav_direct_keys.add(key_code)
-        if not handled and self._forwarder and self._forwarder.forward_key(e, is_press=True):
-            if nav_key:
-                self._after_navigation_key(e)
+        if not handled and not nav_key and self._forwarder and self._forwarder.forward_key(
+            e, is_press=True
+        ):
             handled = True
         if handled:
             e.accept()
@@ -5660,12 +5750,6 @@ class OverlayWindow(QWidget):
         if nav_key:
             if key_code in self._nav_direct_keys:
                 self._nav_direct_keys.discard(key_code)
-                if self.mode == "cursor" and self._interaction_mode == "navigation":
-                    QTimer.singleShot(0, self._clear_navigation_passthrough)
-                e.accept()
-                return
-            forwarded = bool(self._forwarder and self._forwarder.forward_key(e, is_press=False))
-            if forwarded:
                 if self.mode == "cursor" and self._interaction_mode == "navigation":
                     QTimer.singleShot(0, self._clear_navigation_passthrough)
                 e.accept()
