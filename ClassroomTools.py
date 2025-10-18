@@ -4034,11 +4034,7 @@ class OverlayWindow(QWidget):
         if self._pending_tool_restore:
             QTimer.singleShot(0, self._restore_pending_tool)
             return
-        if (
-            self.mode == ToolMode.CURSOR.value
-            and self._interaction_mode == InteractionMode.NAVIGATION.value
-        ):
-            QTimer.singleShot(0, self._clear_navigation_passthrough)
+        QTimer.singleShot(0, self._clear_navigation_passthrough)
 
     def _handle_pointer_navigation_restore(self, global_pos: QPoint) -> None:
         pending = self._pending_tool_restore
@@ -4969,48 +4965,15 @@ class OverlayWindow(QWidget):
 
     @contextlib.contextmanager
     def _navigation_injection_guard(self):
-        """Temporarily allow mouse/keyboard to pass through for navigation sends."""
+        """Temporarily release keyboard focus while dispatching navigation."""
         session = self._navigation_session_state
-        toolbar_lock = bool(session and session.toolbar_lock)
-        enable_passthrough = not toolbar_lock
         allow_keyboard_passthrough = bool(session and session.keyboard_passthrough)
-        prev_mouse_passthrough = self.testAttribute(
-            Qt.WidgetAttribute.WA_TransparentForMouseEvents
-        )
-        flag_supported = hasattr(Qt.WindowType, "WindowTransparentForInput")
-        prev_window_passthrough = (
-            self._has_window_input_passthrough() if flag_supported else False
-        )
-        toggle_mouse_passthrough = enable_passthrough and not prev_mouse_passthrough
-        toggle_window_passthrough = (
-            enable_passthrough and flag_supported and not prev_window_passthrough
-        )
         had_keyboard_grab = self._keyboard_grabbed
-        if toggle_mouse_passthrough:
-            self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        if toggle_window_passthrough:
-            self.setWindowFlag(Qt.WindowType.WindowTransparentForInput, True)
-        if toggle_mouse_passthrough or toggle_window_passthrough:
-            if self.isVisible():
-                super().show()
         if had_keyboard_grab and allow_keyboard_passthrough:
             self._release_keyboard_capture()
         try:
             yield had_keyboard_grab
         finally:
-            if toggle_mouse_passthrough:
-                self.setAttribute(
-                    Qt.WidgetAttribute.WA_TransparentForMouseEvents,
-                    prev_mouse_passthrough,
-                )
-            if toggle_window_passthrough:
-                self.setWindowFlag(
-                    Qt.WindowType.WindowTransparentForInput,
-                    prev_window_passthrough,
-                )
-            if toggle_mouse_passthrough or toggle_window_passthrough:
-                if self.isVisible():
-                    super().show()
             if had_keyboard_grab and allow_keyboard_passthrough:
                 self._ensure_keyboard_capture()
 
@@ -5032,6 +4995,34 @@ class OverlayWindow(QWidget):
             if isinstance(pixel_delta, QPoint):
                 delta = int(pixel_delta.y() or pixel_delta.x() or 0)
         return delta
+
+    def _current_navigation_role(self) -> Optional[str]:
+        role: Optional[str] = None
+        if self._forwarder is not None:
+            try:
+                role = self._forwarder.get_last_target_role()
+            except Exception:
+                role = None
+        if role:
+            return role
+        role = getattr(self, "_last_detected_role", None)
+        if role:
+            return role
+        hwnd = self._resolve_presentation_target()
+        if not hwnd:
+            return None
+        class_name = self._presentation_window_class(hwnd)
+        if self._is_slideshow_class(class_name):
+            return "slideshow"
+        if self._is_document_class(class_name):
+            return "document"
+        return None
+
+    def _prefer_virtual_navigation_target(self) -> bool:
+        role = self._current_navigation_role()
+        if role == "document":
+            return False
+        return True
 
     def _forward_wheel_event(self, event: QWheelEvent) -> bool:
         delivered = False
@@ -5093,20 +5084,28 @@ class OverlayWindow(QWidget):
 
         def execute(self) -> bool:
             if self.wheel_event is not None:
+                delta = self.overlay._extract_wheel_delta(self.wheel_event)
+                prefer_virtual = self.overlay._prefer_virtual_navigation_target()
+                fallback_vk: Optional[int] = None
+                if delta > 0:
+                    fallback_vk = VK_PRIOR
+                elif delta < 0:
+                    fallback_vk = VK_NEXT
+                if prefer_virtual and fallback_vk is not None:
+                    self.success = self.overlay._perform_navigation_dispatch(
+                        fallback_vk,
+                        wheel_delta=delta,
+                        prefer_scroll=False,
+                    )
+                    if self.success:
+                        return True
                 self.success = self.overlay._forward_wheel_event(self.wheel_event)
-                if not self.success:
-                    delta = self.overlay._extract_wheel_delta(self.wheel_event)
-                    fallback_vk: Optional[int] = None
-                    if delta > 0:
-                        fallback_vk = VK_PRIOR
-                    elif delta < 0:
-                        fallback_vk = VK_NEXT
-                    if fallback_vk is not None:
-                        self.success = self.overlay._perform_navigation_dispatch(
-                            fallback_vk,
-                            wheel_delta=delta,
-                            prefer_scroll=True,
-                        )
+                if not self.success and fallback_vk is not None:
+                    self.success = self.overlay._perform_navigation_dispatch(
+                        fallback_vk,
+                        wheel_delta=delta,
+                        prefer_scroll=not prefer_virtual,
+                    )
                 return self.success
             if self.vk_code is None:
                 self.success = False
