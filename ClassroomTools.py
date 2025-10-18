@@ -3492,7 +3492,6 @@ class _PresentationForwarder:
         *,
         modifiers: int = 0,
         point: Optional[Tuple[int, int]] = None,
-        allow_message_fallback: bool = False,
     ) -> bool:
         if hwnd == 0:
             return False
@@ -3500,6 +3499,7 @@ class _PresentationForwarder:
         passthrough_applied = False
         original_cursor: Optional[Tuple[int, int]] = None
         cursor_moved = False
+        effective_point = point or self._get_default_wheel_point(hwnd)
         with self._keyboard_capture_guard():
             focus_ok = self.bring_target_to_foreground(hwnd)
             if not focus_ok:
@@ -3526,31 +3526,28 @@ class _PresentationForwarder:
                             except Exception:
                                 pass
                     original_cursor = self._get_cursor_pos()
-                    if point is not None and original_cursor != point:
-                        self._set_cursor_pos(point)
+                    passthrough_applied = self._set_overlay_passthrough(True)
+                    if passthrough_applied:
+                        try:
+                            QApplication.processEvents()
+                        except Exception:
+                            pass
+                    if effective_point is not None and original_cursor != effective_point:
+                        self._set_cursor_pos(effective_point)
                         cursor_moved = True
                     self._injecting_wheel = True
                     try:
                         injected = self._send_wheel_input(delta)
+                        if injected:
+                            delivered = True
                     finally:
-                        if not injected:
-                            self._injecting_wheel = False
-                    if injected:
-                        delivered = True
-                if not delivered and allow_message_fallback:
-                    delivered = self._deliver_wheel_messages(
-                        hwnd,
-                        delta,
-                        modifiers=modifiers,
-                        point=point,
-                    )
+                        self._injecting_wheel = False
             finally:
                 self._detach_from_target_thread(attach_pair)
-        if passthrough_applied:
-            self._restore_overlay_interaction()
         if cursor_moved and original_cursor is not None:
             self._set_cursor_pos(original_cursor)
-        self._injecting_wheel = False
+        if passthrough_applied:
+            self._restore_overlay_interaction()
         return delivered
 
     def _send_navigation_wheel_impl(
@@ -3575,22 +3572,15 @@ class _PresentationForwarder:
         default_point = point if point is not None else self._get_default_wheel_point(hwnd)
         force_injection = self._should_force_wheel_injection(hwnd, role_hint)
         delivered = False
-        message_attempted = injection_only
-        injection_first = (
-            injection_only
-            or force_injection
-            or role_hint == "document"
-        )
+        injection_first = injection_only or force_injection or role_hint == "document"
         if injection_first:
             delivered = self._send_wheel_via_injection(
                 hwnd,
                 delta,
                 modifiers=modifiers,
                 point=default_point,
-                allow_message_fallback=False,
             )
             if not delivered and not injection_only:
-                message_attempted = True
                 delivered = self._deliver_wheel_messages(
                     hwnd,
                     delta,
@@ -3599,7 +3589,6 @@ class _PresentationForwarder:
                 )
         else:
             if not injection_only:
-                message_attempted = True
                 delivered = self._deliver_wheel_messages(
                     hwnd,
                     delta,
@@ -3612,7 +3601,6 @@ class _PresentationForwarder:
                     delta,
                     modifiers=modifiers,
                     point=default_point,
-                    allow_message_fallback=not message_attempted,
                 )
         if delivered:
             self._set_cached_target(hwnd, role_hint)
