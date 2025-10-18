@@ -2116,19 +2116,19 @@ class _PresentationForwarder:
         x_word = ctypes.c_short(global_pos.x()).value & 0xFFFF
         y_word = ctypes.c_short(global_pos.y()).value & 0xFFFF
         l_param = x_word | (y_word << 16)
+        delivered = False
         with self._keyboard_capture_guard():
             focus_ok = self.bring_target_to_foreground(target)
             if not focus_ok:
                 focus_ok = self._activate_window_for_input(target)
-            try:
-                delivered = bool(win32api.PostMessage(target, win32con.WM_MOUSEWHEEL, w_param, l_param))
-            except Exception:
-                delivered = False
+            for hwnd, update_cache in self._iter_wheel_targets(target):
+                if self._deliver_mouse_wheel(hwnd, w_param, l_param):
+                    delivered = True
+                    if update_cache:
+                        self._last_target_hwnd = target
+                    break
             if not delivered and focus_ok:
-                try:
-                    delivered = bool(win32api.PostMessage(target, win32con.WM_MOUSEWHEEL, w_param, l_param))
-                except Exception:
-                    delivered = False
+                delivered = self._deliver_mouse_wheel(target, w_param, l_param)
         if not delivered:
             self.clear_cached_target()
         return delivered
@@ -2365,25 +2365,41 @@ class _PresentationForwarder:
         return thread_id
 
     def _activate_window_for_input(self, hwnd: int) -> bool:
-        if _USER32 is None:
+        if _USER32 is None or hwnd == 0:
             return False
         root_hwnd = self._top_level_hwnd(hwnd)
+        use_root = (
+            root_hwnd
+            and root_hwnd != hwnd
+            and self._has_window_caption(root_hwnd) is not True
+        )
+        handles_for_activation: List[int] = [hwnd]
+        if use_root and root_hwnd:
+            handles_for_activation.append(root_hwnd)
         activated = False
-        try:
-            activated = bool(_USER32.SetActiveWindow(wintypes.HWND(root_hwnd)))
-        except Exception:
-            activated = False
-        if not activated:
+        for handle in handles_for_activation:
+            if handle == 0:
+                continue
             try:
-                activated = bool(_USER32.SetForegroundWindow(wintypes.HWND(root_hwnd)))
+                if _USER32.SetActiveWindow(wintypes.HWND(handle)):
+                    activated = True
             except Exception:
-                activated = False
+                pass
+            if activated:
+                break
+            try:
+                if _USER32.SetForegroundWindow(wintypes.HWND(handle)):
+                    activated = True
+            except Exception:
+                pass
+            if activated:
+                break
         focus_ok = False
         try:
             focus_ok = bool(_USER32.SetFocus(wintypes.HWND(hwnd)))
         except Exception:
             focus_ok = False
-        if not focus_ok and root_hwnd != hwnd:
+        if not focus_ok and use_root and root_hwnd and root_hwnd != hwnd:
             try:
                 focus_ok = bool(_USER32.SetFocus(wintypes.HWND(root_hwnd)))
             except Exception:
@@ -2466,9 +2482,29 @@ class _PresentationForwarder:
             for candidate in _push(focus_hwnd, cache=False, require_visible=False):
                 yield candidate
         for candidate in _push(target, cache=True, require_visible=True):
-            yield candidate
+                yield candidate
         for child_hwnd in self._collect_descendant_windows(target):
             for candidate in _push(child_hwnd, cache=False, require_visible=False):
+                yield candidate
+
+    def _iter_wheel_targets(self, target: int) -> Iterable[Tuple[int, bool]]:
+        seen: Set[int] = set()
+
+        def _append(hwnd: int, *, cache: bool, require_visible: bool) -> Iterable[Tuple[int, bool]]:
+            if hwnd in seen:
+                return ()
+            if not self._is_keyboard_target(hwnd, require_visible=require_visible):
+                return ()
+            seen.add(hwnd)
+            return ((hwnd, cache),)
+
+        for focus_hwnd in self._gather_thread_focus_handles(target):
+            for candidate in _append(focus_hwnd, cache=False, require_visible=False):
+                yield candidate
+        for candidate in _append(target, cache=True, require_visible=True):
+            yield candidate
+        for child_hwnd in self._collect_descendant_windows(target):
+            for candidate in _append(child_hwnd, cache=False, require_visible=False):
                 yield candidate
 
     def _build_key_lparam(self, vk_code: int, event: QKeyEvent, is_press: bool) -> int:
@@ -2516,6 +2552,34 @@ class _PresentationForwarder:
                 hwnd,
                 message,
                 wintypes.WPARAM(vk_code),
+                wintypes.LPARAM(l_param),
+                self._SMTO_ABORTIFHUNG,
+                30,
+                ctypes.byref(result),
+            )
+        except Exception:
+            sent = 0
+        return bool(sent)
+
+    def _deliver_mouse_wheel(self, hwnd: int, w_param: int, l_param: int) -> bool:
+        if hwnd == 0:
+            return False
+        delivered = False
+        if win32api is not None and win32con is not None:
+            try:
+                delivered = bool(win32api.PostMessage(hwnd, win32con.WM_MOUSEWHEEL, w_param, l_param))
+            except Exception:
+                delivered = False
+        if delivered:
+            return True
+        if _USER32 is None:
+            return False
+        result = ctypes.c_size_t()
+        try:
+            sent = _USER32.SendMessageTimeoutW(
+                hwnd,
+                win32con.WM_MOUSEWHEEL if win32con is not None else 0x020A,
+                wintypes.WPARAM(w_param),
                 wintypes.LPARAM(l_param),
                 self._SMTO_ABORTIFHUNG,
                 30,
@@ -5565,33 +5629,59 @@ class StudentPhotoOverlay(QWidget):
             return
         try:
             overlay_hwnd = int(self.winId()) if self.winId() else 0
-            owner_hwnd = int(owner.winId()) if owner.winId() else 0
         except Exception:
             overlay_hwnd = 0
-            owner_hwnd = 0
-        if overlay_hwnd == 0 or owner_hwnd == 0:
+        owner_chain: List[QWidget] = []
+        current = owner
+        while isinstance(current, QWidget):
+            owner_chain.append(current)
+            current = current.parentWidget()
+        owner_hwnds: List[int] = []
+        for widget in owner_chain:
             try:
-                owner.raise_()
+                hwnd = int(widget.winId()) if widget.winId() else 0
+            except Exception:
+                hwnd = 0
+            if hwnd:
+                owner_hwnds.append(hwnd)
+        if overlay_hwnd == 0 or not owner_hwnds:
+            try:
+                self.lower()
             except Exception:
                 pass
+            for widget in owner_chain:
+                try:
+                    widget.raise_()
+                except Exception:
+                    continue
             return
         if win32gui is not None and win32con is not None:
             flags = win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE | win32con.SWP_NOOWNERZORDER
             try:
                 win32gui.SetWindowPos(overlay_hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0, flags)
-                win32gui.SetWindowPos(owner_hwnd, overlay_hwnd, 0, 0, 0, 0, flags)
+                insert_after = overlay_hwnd
+                for hwnd in owner_hwnds:
+                    win32gui.SetWindowPos(hwnd, insert_after, 0, 0, 0, 0, flags)
+                    insert_after = hwnd
             except Exception:
                 logger.debug("win32gui.SetWindowPos failed for photo overlay", exc_info=True)
         else:
             try:
                 self.lower()
-                owner.raise_()
             except Exception:
                 pass
+            for widget in owner_chain:
+                try:
+                    widget.raise_()
+                except Exception:
+                    continue
+
+    def mousePressEvent(self, event) -> None:
         try:
-            owner.raise_()
+            self._stack_below_owner()
         except Exception:
             pass
+        super().mousePressEvent(event)
 
 
 class RollCallTimerWindow(QWidget):
