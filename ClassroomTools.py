@@ -1957,24 +1957,25 @@ class _PresentationForwarder:
         _InputUnion = None  # type: ignore[assignment]
         _Input = None  # type: ignore[assignment]
 
-    _KNOWN_PRESENTATION_CLASSES: Set[str] = (
-        {
-            "screenclass",
-            "pptframeclass",
-            "pptviewwndclass",
-            "powerpntframeclass",
-            "powerpointframeclass",
-            "opusapp",
-            "acrobatsdiwindow",
-            "kwppframeclass",
-            "kwppmainframe",
-            "kwpsframeclass",
-            "wpsframeclass",
-            "wpsmainframe",
-        }
-        if win32gui is not None
-        else set()
-    )
+    _KNOWN_PRESENTATION_CLASSES: Set[str] = {
+        "screenclass",
+        "pptframeclass",
+        "pptviewwndclass",
+        "powerpntframeclass",
+        "powerpointframeclass",
+        "opusapp",
+        "acrobatsdiwindow",
+        "kwppframeclass",
+        "kwppmainframe",
+        "kwpsframeclass",
+        "wpsframeclass",
+        "wpsmainframe",
+        "nuidocumentwindow",
+        "netuihwnd",
+        "_wwg",
+        "_wwb",
+        "worddocument",
+    }
     _KNOWN_PRESENTATION_PREFIXES: Tuple[str, ...] = (
         ("kwpp", "kwps", "wpsframe", "wpsmain") if win32gui is not None else tuple()
     )
@@ -1985,6 +1986,16 @@ class _PresentationForwarder:
         "kwppshowframe",
         "kwppshowwndclass",
         "kwpsshowframe",
+    }
+    _PRESENTATION_EDITOR_CLASSES: Set[str] = {
+        "pptframeclass",
+        "powerpntframeclass",
+        "powerpointframeclass",
+        "kwppframeclass",
+        "kwppmainframe",
+        "kwpsframeclass",
+        "wpsframeclass",
+        "wpsmainframe",
     }
     _KEY_FORWARD_MAP: Dict[int, int] = (
         {
@@ -2462,30 +2473,94 @@ class _PresentationForwarder:
                 return 0
         return 0
 
+    def _target_priority(self, hwnd: int, *, base: int) -> int:
+        score = base
+        class_name = self._window_class_name(hwnd)
+        if self._is_slideshow_class(class_name):
+            score += 520
+        elif class_name in self._KNOWN_PRESENTATION_CLASSES:
+            score += 300
+        if class_name in self._PRESENTATION_EDITOR_CLASSES:
+            score -= 340
+        if class_name.startswith("_ww") or "document" in class_name or "viewer" in class_name:
+            score += 220
+        has_caption = self._has_window_caption(hwnd)
+        if has_caption is False:
+            score += 160
+        elif has_caption is True:
+            score -= 180
+        rect = self._get_window_rect_generic(hwnd)
+        if rect is not None:
+            left, top, right, bottom = rect
+            width = max(0, right - left)
+            height = max(0, bottom - top)
+            if width > 0 and height > 0:
+                area = width * height
+                score += min(area // 24000, 160)
+                if width >= 600 and height >= 400:
+                    score += 80
+        is_topmost = self._is_topmost_window(hwnd)
+        if is_topmost:
+            score += 40
+        return score
+
     def _iter_key_targets(self, target: int) -> Iterable[Tuple[int, bool]]:
         seen: Set[int] = set()
+        ranked: List[Tuple[int, int, bool]] = []
 
-        def _push(
+        def _register(
             hwnd: int,
             *,
             cache: bool,
             require_visible: bool,
-        ) -> Iterable[Tuple[int, bool]]:
+            base: int,
+        ) -> None:
             if hwnd in seen:
-                return ()
+                return
             if not self._is_keyboard_target(hwnd, require_visible=require_visible):
-                return ()
+                return
             seen.add(hwnd)
-            return ((hwnd, cache),)
+            priority = self._target_priority(hwnd, base=base)
+            ranked.append((priority, hwnd, cache))
 
         for focus_hwnd in self._gather_thread_focus_handles(target):
-            for candidate in _push(focus_hwnd, cache=False, require_visible=False):
-                yield candidate
-        for candidate in _push(target, cache=True, require_visible=True):
-                yield candidate
+            _register(focus_hwnd, cache=False, require_visible=False, base=900)
+        _register(target, cache=True, require_visible=True, base=820)
         for child_hwnd in self._collect_descendant_windows(target):
-            for candidate in _push(child_hwnd, cache=False, require_visible=False):
-                yield candidate
+            _register(child_hwnd, cache=False, require_visible=False, base=780)
+
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        for _priority, hwnd, cache in ranked:
+            yield hwnd, cache
+
+    def _iter_wheel_targets(self, target: int) -> Iterable[Tuple[int, bool]]:
+        seen: Set[int] = set()
+        ranked: List[Tuple[int, int, bool]] = []
+
+        def _append(
+            hwnd: int,
+            *,
+            cache: bool,
+            require_visible: bool,
+            base: int,
+        ) -> None:
+            if hwnd in seen:
+                return
+            if not self._is_keyboard_target(hwnd, require_visible=require_visible):
+                return
+            seen.add(hwnd)
+            priority = self._target_priority(hwnd, base=base)
+            ranked.append((priority, hwnd, cache))
+
+        for focus_hwnd in self._gather_thread_focus_handles(target):
+            _append(focus_hwnd, cache=False, require_visible=False, base=880)
+        _append(target, cache=True, require_visible=True, base=800)
+        for child_hwnd in self._collect_descendant_windows(target):
+            _append(child_hwnd, cache=False, require_visible=False, base=760)
+
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        for _priority, hwnd, cache in ranked:
+            yield hwnd, cache
 
     def _iter_wheel_targets(self, target: int) -> Iterable[Tuple[int, bool]]:
         seen: Set[int] = set()
@@ -2793,23 +2868,26 @@ class _PresentationForwarder:
 
         score = 0
         if class_name in self._SLIDESHOW_PRIORITY_CLASSES:
-            score += 400
-        elif "screen" in class_name or "slide" in class_name or "show" in class_name:
-            score += 260
+            score += 2000
         elif class_name in self._SLIDESHOW_SECONDARY_CLASSES:
-            score += 180
+            score += 1200
+        elif "screen" in class_name or "slide" in class_name or "show" in class_name:
+            score += 900
         elif class_name in self._KNOWN_PRESENTATION_CLASSES:
-            score += 120
+            score += 400
 
         has_caption = self._has_window_caption(hwnd)
         if has_caption is False:
-            score += 160
+            score += 220
         elif has_caption is True:
-            score -= 40
+            score -= 180
+
+        if class_name in self._PRESENTATION_EDITOR_CLASSES:
+            score -= 600
 
         is_topmost = self._is_topmost_window(hwnd)
         if is_topmost:
-            score += 40
+            score += 80
 
         overlay_rect = self._overlay_rect_tuple()
         if overlay_rect is not None:
@@ -2818,18 +2896,18 @@ class _PresentationForwarder:
             if o_width > 0 and o_height > 0:
                 width_diff = abs(width - o_width)
                 height_diff = abs(height - o_height)
-                size_penalty = min(width_diff + height_diff, 800)
-                score += max(0, 220 - size_penalty // 2)
+                size_penalty = min(width_diff + height_diff, 1600)
+                score += max(0, 320 - size_penalty // 3)
                 area = width * height
                 overlay_area = o_width * o_height
                 if overlay_area > 0:
                     ratio = min(area, overlay_area) / max(area, overlay_area)
-                    score += int(ratio * 120)
+                    score += int(ratio * 160)
                 overlap_x = max(0, min(right, overlay_rect[2]) - max(left, overlay_rect[0]))
                 overlap_y = max(0, min(bottom, overlay_rect[3]) - max(top, overlay_rect[1]))
                 overlap_area = overlap_x * overlap_y
                 if overlap_area > 0 and area > 0:
-                    score += int((overlap_area / area) * 140)
+                    score += int((overlap_area / area) * 180)
 
         return score
 
