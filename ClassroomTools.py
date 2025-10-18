@@ -216,6 +216,7 @@ from PyQt6.QtGui import (
     QScreen,
     QWheelEvent,
     QAction,
+    QGuiApplication,
 )
 from PyQt6.QtWidgets import (
     QApplication,
@@ -416,6 +417,12 @@ def ensure_high_dpi_awareness() -> None:
         return
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
     os.environ.setdefault("QT_SCALE_FACTOR_ROUNDING_POLICY", "PassThrough")
+    try:
+        QGuiApplication.setHighDpiScaleFactorRoundingPolicy(
+            Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+        )
+    except Exception:
+        pass
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(2)
     except Exception:
@@ -3233,7 +3240,7 @@ class OverlayWindow(QWidget):
         self._nav_pointer_button = Qt.MouseButton.NoButton
         self._nav_pointer_press_pos = QPointF()
         self._nav_pointer_press_global = QPointF()
-        self._nav_pointer_press_modifiers = Qt.KeyboardModifiers()
+        self._nav_pointer_press_modifiers = Qt.KeyboardModifier.NoModifier
         self._nav_pointer_started_draw = False
         self._brush_painter: Optional[QPainter] = None
         self._eraser_painter: Optional[QPainter] = None
@@ -4293,7 +4300,7 @@ class OverlayWindow(QWidget):
             self._nav_pointer_button = e.button()
             self._nav_pointer_press_pos = QPointF(e.position())
             self._nav_pointer_press_global = QPointF(e.globalPosition())
-            self._nav_pointer_press_modifiers = Qt.KeyboardModifiers(e.modifiers())
+            self._nav_pointer_press_modifiers = e.modifiers()
             self._nav_pointer_started_draw = False
             self._set_navigation_reason("pointer", True)
             self.cancel_pending_tool_restore()
@@ -4325,7 +4332,7 @@ class OverlayWindow(QWidget):
                     QPointF(self._nav_pointer_press_global),
                     Qt.MouseButton.LeftButton,
                     Qt.MouseButton.LeftButton,
-                    Qt.KeyboardModifiers(self._nav_pointer_press_modifiers),
+                    self._nav_pointer_press_modifiers,
                 )
                 self._ensure_keyboard_capture()
                 self._start_paint_session(synthetic_press)
