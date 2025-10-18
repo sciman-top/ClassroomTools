@@ -26,6 +26,7 @@ import hmac
 from collections import OrderedDict, deque
 from queue import Empty, Queue
 from dataclasses import dataclass
+from enum import Enum
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -80,6 +81,26 @@ _NAVIGATION_WHEEL_DELTAS: Dict[int, int] = {
     VK_DOWN: -WHEEL_DELTA,
     VK_NEXT: -WHEEL_DELTA,
 }
+
+
+class ToolMode(str, Enum):
+    BRUSH = "brush"
+    SHAPE = "shape"
+    ERASER = "eraser"
+    CURSOR = "cursor"
+
+
+class InteractionMode(str, Enum):
+    DRAWING = "drawing"
+    NAVIGATION = "navigation"
+    CURSOR = "cursor"
+
+
+@dataclass
+class NavigationOriginState:
+    mode: ToolMode
+    shape: Optional[str]
+    inside_toolbar: bool
 
 if _USER32 is not None:
     _WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
@@ -3506,7 +3527,7 @@ class OverlayWindow(QWidget):
         s = self.settings_manager.load_settings().get("Paint", {})
         self.pen_size = int(s.get("brush_size", "12"))
         self.pen_color = QColor(s.get("brush_color", "#ff0000"))
-        self.mode = "brush"
+        self.mode = ToolMode.BRUSH.value
         self.current_shape: Optional[str] = None
         self.shape_start_point: Optional[QPoint] = None
         self.drawing = False
@@ -3583,13 +3604,11 @@ class OverlayWindow(QWidget):
         self._nav_restore_timer.timeout.connect(self._check_navigation_restore)
         self._nav_forced_passthrough = False
         self._nav_direct_keys: Set[int] = set()
-        self._interaction_mode = "drawing"
+        self._interaction_mode = InteractionMode.DRAWING.value
         self._interaction_before_navigation: Optional[str] = None
-        self._navigation_origin_mode: Optional[str] = None
-        self._navigation_origin_shape: Optional[str] = None
-        self._navigation_origin_inside_toolbar = False
+        self._navigation_origin: Optional[NavigationOriginState] = None
         self._navigation_restore_to_cursor = False
-        self.set_mode("brush", initial=True)
+        self.set_mode(ToolMode.BRUSH.value, initial=True)
         self.toolbar.update_undo_state(False)
 
     def raise_toolbar(self) -> None:
@@ -3624,6 +3643,127 @@ class OverlayWindow(QWidget):
             shape=tracked_shape,
             restore_on_move=restore_on_move,
         )
+
+    def _set_interaction_mode(self, mode: InteractionMode) -> None:
+        if self._interaction_mode != mode.value:
+            self._interaction_mode = mode.value
+
+    def _coerce_tool_mode(self, mode: Optional[str]) -> Optional[ToolMode]:
+        if not mode:
+            return None
+        try:
+            return ToolMode(mode)
+        except ValueError:
+            return None
+
+    def _set_navigation_origin(
+        self,
+        mode: ToolMode,
+        shape: Optional[str],
+        *,
+        inside_toolbar: bool,
+    ) -> None:
+        tracked_shape = shape if mode == ToolMode.SHAPE else None
+        self._navigation_origin = NavigationOriginState(
+            mode=mode,
+            shape=tracked_shape,
+            inside_toolbar=inside_toolbar,
+        )
+
+    def _update_navigation_origin_location(self, *, inside_toolbar: bool) -> None:
+        origin = self._navigation_origin
+        if not origin:
+            return
+        self._navigation_origin = NavigationOriginState(
+            mode=origin.mode,
+            shape=origin.shape,
+            inside_toolbar=inside_toolbar,
+        )
+
+    def _clear_navigation_origin(self) -> None:
+        self._navigation_origin = None
+
+    def _navigation_origin_from_toolbar(self) -> bool:
+        origin = self._navigation_origin
+        return bool(origin and origin.inside_toolbar)
+
+    def _engage_navigation_transition(
+        self,
+        pointer: Optional[QPoint],
+        *,
+        inside_toolbar: bool,
+    ) -> None:
+        prev_mode = self._coerce_tool_mode(self.mode)
+        if prev_mode is None:
+            self._clear_navigation_passthrough()
+            return
+        prev_shape = self.current_shape if prev_mode == ToolMode.SHAPE else None
+        if prev_mode in {ToolMode.BRUSH, ToolMode.SHAPE}:
+            self._update_last_tool_snapshot()
+        reference = pointer
+        if reference is None:
+            reference = self._safe_global_cursor_pos()
+        if reference is None:
+            reference = QPoint()
+        restore_on_move = prev_mode != ToolMode.CURSOR and not inside_toolbar
+        self._begin_navigation_passthrough(
+            prev_mode.value,
+            prev_shape,
+            restore_on_move=restore_on_move,
+            cursor_reference=reference,
+        )
+
+    def _handle_toolbar_navigation_enter(self) -> None:
+        if self.mode == ToolMode.CURSOR.value:
+            return
+        pointer = self._safe_global_cursor_pos() or QPoint()
+        self._engage_navigation_transition(pointer, inside_toolbar=True)
+
+    def _handle_toolbar_navigation_leave(self) -> None:
+        origin = self._navigation_origin
+        if not origin or not origin.inside_toolbar:
+            return
+        if self._pending_tool_restore:
+            self._restore_pending_tool()
+            return
+        if origin.mode == ToolMode.CURSOR:
+            self._clear_navigation_passthrough()
+        elif self._interaction_mode == InteractionMode.NAVIGATION.value:
+            self._clear_navigation_passthrough()
+
+    def _handle_pointer_navigation_restore(self, global_pos: QPoint) -> None:
+        pending = self._pending_tool_restore
+        if not pending or not pending.restore_on_move:
+            return
+        origin = self._navigation_origin
+        if origin and origin.inside_toolbar:
+            pending.restore_on_move = False
+            return
+        if not (self.mode == ToolMode.CURSOR.value or self._nav_forced_passthrough):
+            return
+        if self._is_point_inside_toolbar(global_pos):
+            pending.restore_on_move = False
+        else:
+            self._restore_pending_tool()
+
+    def _handle_navigation_wheel_event(self, event: QWheelEvent) -> None:
+        try:
+            global_pos = event.globalPosition().toPoint()
+        except Exception:
+            fallback = self._safe_global_cursor_pos()
+            global_pos = fallback if fallback is not None else QPoint()
+        inside_toolbar = self._is_point_inside_toolbar(global_pos)
+        self.drawing = False
+        self._engage_navigation_transition(global_pos, inside_toolbar=inside_toolbar)
+
+    def _handle_navigation_key_event(self, event: QKeyEvent) -> None:
+        pointer = self._safe_global_cursor_pos() or QPoint()
+        inside_toolbar = self._is_point_inside_toolbar(pointer)
+        self._engage_navigation_transition(pointer, inside_toolbar=inside_toolbar)
+
+    def _handle_navigation_button_trigger(self) -> None:
+        pointer = self._safe_global_cursor_pos() or QPoint()
+        self._engage_navigation_transition(pointer, inside_toolbar=True)
 
     @property
     def navigation_passthrough_active(self) -> bool:
@@ -3667,16 +3807,15 @@ class OverlayWindow(QWidget):
         restore_on_move: bool,
         cursor_reference: Optional[QPoint] = None,
     ) -> None:
-        if prev_mode not in {"brush", "shape", "eraser", "cursor"}:
+        tool_mode = self._coerce_tool_mode(prev_mode)
+        if tool_mode is None:
             self._clear_navigation_passthrough()
             return
         if not self._nav_passthrough_active:
             self._interaction_before_navigation = self._interaction_mode
-        self._interaction_mode = "navigation"
-        self._navigation_origin_mode = prev_mode
-        self._navigation_origin_shape = prev_shape if prev_mode == "shape" else None
-        self._navigation_origin_inside_toolbar = not restore_on_move
-        restore_cursor_passthrough = prev_mode == "cursor" and not self.whiteboard_active
+        self._set_interaction_mode(InteractionMode.NAVIGATION)
+        self._set_navigation_origin(tool_mode, prev_shape, inside_toolbar=not restore_on_move)
+        restore_cursor_passthrough = tool_mode == ToolMode.CURSOR and not self.whiteboard_active
         self._navigation_restore_to_cursor = restore_cursor_passthrough
         self._nav_passthrough_active = True
         if cursor_reference is not None:
@@ -3684,7 +3823,7 @@ class OverlayWindow(QWidget):
         else:
             pos = self._safe_global_cursor_pos()
             self._nav_restore_cursor_pos = QPoint(pos) if isinstance(pos, QPoint) else pos
-        nav_from_drawing = prev_mode != "cursor"
+        nav_from_drawing = tool_mode != ToolMode.CURSOR
         needs_transparent_state = nav_from_drawing or restore_cursor_passthrough
         was_transparent = False
         if needs_transparent_state:
@@ -3707,7 +3846,7 @@ class OverlayWindow(QWidget):
                     self._apply_input_passthrough(False)
                 if not self._keyboard_grabbed:
                     self._ensure_keyboard_capture()
-        if prev_mode == "cursor":
+        if tool_mode == ToolMode.CURSOR:
             self._pending_tool_restore = None
             self._nav_restore_timer.stop()
         else:
@@ -3728,26 +3867,24 @@ class OverlayWindow(QWidget):
         self._nav_restore_cursor_pos = None
         if self._nav_restore_timer.isActive():
             self._nav_restore_timer.stop()
-        if self._nav_forced_passthrough and self.mode != "cursor":
+        if self._nav_forced_passthrough and self.mode != ToolMode.CURSOR.value:
             self._apply_input_passthrough(False)
             self._ensure_keyboard_capture()
         restore_cursor_passthrough = (
             self._navigation_restore_to_cursor
-            and self.mode == "cursor"
+            and self.mode == ToolMode.CURSOR.value
             and not self.whiteboard_active
         )
         self._nav_forced_passthrough = False
         previous = self._interaction_before_navigation
-        if previous in {"drawing", "cursor"}:
+        if previous in {InteractionMode.DRAWING.value, InteractionMode.CURSOR.value}:
             self._interaction_mode = previous
-        elif self.mode == "cursor":
-            self._interaction_mode = "cursor"
+        elif self.mode == ToolMode.CURSOR.value:
+            self._set_interaction_mode(InteractionMode.CURSOR)
         else:
-            self._interaction_mode = "drawing"
+            self._set_interaction_mode(InteractionMode.DRAWING)
         self._interaction_before_navigation = None
-        self._navigation_origin_mode = None
-        self._navigation_origin_shape = None
-        self._navigation_origin_inside_toolbar = False
+        self._clear_navigation_origin()
         if restore_cursor_passthrough:
             self._apply_input_passthrough(True)
         self._navigation_restore_to_cursor = False
@@ -3755,11 +3892,16 @@ class OverlayWindow(QWidget):
 
     def _check_navigation_restore(self) -> None:
         pending = self._pending_tool_restore
+        if pending and pending.restore_on_move and self._navigation_origin_from_toolbar():
+            pending.restore_on_move = False
+            self._nav_restore_timer.stop()
+            return
         if not (
             self._nav_passthrough_active
             and pending
             and pending.restore_on_move
-            and (self.mode == "cursor" or self._nav_forced_passthrough)
+            and not self._navigation_origin_from_toolbar()
+            and (self.mode == ToolMode.CURSOR.value or self._nav_forced_passthrough)
         ):
             if not (pending and pending.restore_on_move):
                 self._nav_restore_timer.stop()
@@ -3789,25 +3931,9 @@ class OverlayWindow(QWidget):
         self._restore_last_tool(pending.mode, shape_type=pending.shape)
 
     def _after_navigation_wheel(self, event: QWheelEvent) -> None:
-        prev_mode = self.mode
-        if prev_mode not in {"brush", "shape", "eraser", "cursor"}:
+        if self._coerce_tool_mode(self.mode) is None:
             return
-        prev_shape = self.current_shape if prev_mode == "shape" else None
-        if prev_mode in {"brush", "shape"}:
-            self._update_last_tool_snapshot()
-        try:
-            global_pos = event.globalPosition().toPoint()
-        except Exception:
-            fallback = self._safe_global_cursor_pos()
-            global_pos = fallback if fallback is not None else QPoint()
-        restore_on_move = prev_mode != "cursor" and not self._is_point_inside_toolbar(global_pos)
-        self.drawing = False
-        self._begin_navigation_passthrough(
-            prev_mode,
-            prev_shape,
-            restore_on_move=restore_on_move,
-            cursor_reference=global_pos,
-        )
+        self._handle_navigation_wheel_event(event)
 
     def _after_navigation_key(self, event: QKeyEvent) -> None:
         key_code = int(event.key())
@@ -3820,22 +3946,9 @@ class OverlayWindow(QWidget):
             | Qt.KeyboardModifier.MetaModifier
         ):
             return
-        prev_mode = self.mode
-        if prev_mode not in {"brush", "shape", "eraser", "cursor"}:
+        if self._coerce_tool_mode(self.mode) is None:
             return
-        prev_shape = self.current_shape if prev_mode == "shape" else None
-        if prev_mode in {"brush", "shape"}:
-            self._update_last_tool_snapshot()
-        pointer = self._safe_global_cursor_pos()
-        if pointer is None:
-            pointer = QPoint()
-        restore_on_move = prev_mode != "cursor" and not self._is_point_inside_toolbar(pointer)
-        self._begin_navigation_passthrough(
-            prev_mode,
-            prev_shape,
-            restore_on_move=restore_on_move,
-            cursor_reference=pointer,
-        )
+        self._handle_navigation_key_event(event)
 
     def _build_scene(self) -> None:
         virtual = QRect()
@@ -3933,32 +4046,30 @@ class OverlayWindow(QWidget):
 
     def set_mode(self, mode: str, shape_type: Optional[str] = None, *, initial: bool = False) -> None:
         prev_mode = getattr(self, "mode", None)
-        if mode != "cursor" or self._nav_passthrough_active:
+        if mode != ToolMode.CURSOR.value or self._nav_passthrough_active:
             self._clear_navigation_passthrough()
         if prev_mode != mode:
             self._release_canvas_painters()
-        focus_on_cursor = bool(self._forwarder) and mode == "cursor" and not initial
+        focus_on_cursor = bool(self._forwarder) and mode == ToolMode.CURSOR.value and not initial
         self.mode = mode
-        if mode == "cursor":
-            self._interaction_mode = "cursor"
-            self._navigation_origin_mode = None
-            self._navigation_origin_shape = None
-            self._navigation_origin_inside_toolbar = False
+        if mode == ToolMode.CURSOR.value:
+            self._set_interaction_mode(InteractionMode.CURSOR)
+            self._clear_navigation_origin()
             self._navigation_restore_to_cursor = False
         else:
-            self._interaction_mode = "drawing"
+            self._set_interaction_mode(InteractionMode.DRAWING)
         if not self._restoring_tool:
             self._pending_tool_restore = None
-        if shape_type is not None or mode != "shape":
+        if shape_type is not None or mode != ToolMode.SHAPE.value:
             self.current_shape = shape_type
-        if mode != "shape":
+        if mode != ToolMode.SHAPE.value:
             self.shape_start_point = None
             self._last_preview_bounds = None
-        if self.mode != "eraser":
+        if self.mode != ToolMode.ERASER.value:
             self._eraser_last_point = None
-        if self._forwarder and mode == "cursor":
+        if self._forwarder and mode == ToolMode.CURSOR.value:
             self._forwarder.clear_cached_target()
-        if self.mode in {"brush", "shape"} and not self._restoring_tool:
+        if self.mode in {ToolMode.BRUSH.value, ToolMode.SHAPE.value} and not self._restoring_tool:
             self._update_last_tool_snapshot()
         self._update_visibility_for_mode(initial=initial)
         if focus_on_cursor and self._forwarder:
@@ -3971,9 +4082,11 @@ class OverlayWindow(QWidget):
     def update_toolbar_state(self) -> None:
         if not getattr(self, 'toolbar', None):
             return
-        interaction = getattr(self, "_interaction_mode", "drawing")
+        interaction = getattr(self, "_interaction_mode", InteractionMode.DRAWING.value)
         navigation_from_cursor = (
-            interaction == "navigation" and self._navigation_origin_mode == "cursor"
+            interaction == InteractionMode.NAVIGATION.value
+            and self._navigation_origin is not None
+            and self._navigation_origin.mode == ToolMode.CURSOR
         )
         self.toolbar.update_tool_states(
             self.mode,
@@ -3987,9 +4100,9 @@ class OverlayWindow(QWidget):
             self._last_brush_color = QColor(self.pen_color)
         if self.pen_size > 0:
             self._last_brush_size = max(1, int(self.pen_size))
-        if self.mode in {"brush", "shape"}:
+        if self.mode in {ToolMode.BRUSH.value, ToolMode.SHAPE.value}:
             self._last_draw_mode = self.mode
-            if self.mode == "shape":
+            if self.mode == ToolMode.SHAPE.value:
                 self._last_shape_type = self.current_shape
 
     def _restore_last_tool(self, preferred_mode: Optional[str] = None, *, shape_type: Optional[str] = None) -> None:
@@ -4018,31 +4131,26 @@ class OverlayWindow(QWidget):
 
     def toggle_eraser_mode(self) -> None:
         """切换橡皮模式；再次点击会恢复上一次的画笔配置。"""
-        if self.mode == "eraser":
+        if self.mode == ToolMode.ERASER.value:
             self._restore_last_tool()
         else:
             self._update_last_tool_snapshot()
-            self.set_mode("eraser")
+            self.set_mode(ToolMode.ERASER.value)
 
     def toggle_cursor_mode(self) -> None:
         """切换光标模式；再次点击在光标与导航之间切换。"""
-        if self.mode == "cursor":
-            pointer = self._safe_global_cursor_pos() or QPoint()
+        if self.mode == ToolMode.CURSOR.value:
             if (
-                self._interaction_mode == "navigation"
-                and self._navigation_origin_mode == "cursor"
+                self._interaction_mode == InteractionMode.NAVIGATION.value
+                and self._navigation_origin is not None
+                and self._navigation_origin.mode == ToolMode.CURSOR
             ):
                 self._clear_navigation_passthrough()
             else:
-                self._begin_navigation_passthrough(
-                    "cursor",
-                    None,
-                    restore_on_move=False,
-                    cursor_reference=pointer,
-                )
+                self._handle_navigation_button_trigger()
             return
         self._update_last_tool_snapshot()
-        self.set_mode("cursor")
+        self.set_mode(ToolMode.CURSOR.value)
 
     def go_to_next_slide(self) -> None:
         self._send_slide_virtual_key(VK_DOWN)
@@ -4050,31 +4158,26 @@ class OverlayWindow(QWidget):
     def go_to_previous_slide(self) -> None:
         self._send_slide_virtual_key(VK_UP)
 
-    def _send_slide_virtual_key(self, vk_code: int, *, repeated: bool = False) -> bool:
+    def _send_slide_virtual_key(
+        self, vk_code: int, *, repeated: bool = False, engaged: bool = False
+    ) -> bool:
         if vk_code == 0:
             return False
         if repeated:
             with self._navigation_injection_guard() as had_keyboard_grab:
                 success = self._dispatch_virtual_key(vk_code)
-            if success and self.mode != "cursor" and not had_keyboard_grab:
+            if success and self.mode != ToolMode.CURSOR.value and not had_keyboard_grab:
                 self._ensure_keyboard_capture()
             if not success:
                 self._pending_tool_restore = None
                 self._clear_navigation_passthrough()
             return success
-        prev_mode = self.mode
-        prev_shape = self.current_shape if prev_mode == "shape" else None
-        if prev_mode in {"brush", "shape"}:
-            self._update_last_tool_snapshot()
-        pointer = self._safe_global_cursor_pos() or QPoint()
-        inside_toolbar = self._is_point_inside_toolbar(pointer)
-        restore_on_move = prev_mode not in {"cursor"} and not inside_toolbar
-        self._begin_navigation_passthrough(
-            prev_mode,
-            prev_shape,
-            restore_on_move=restore_on_move,
-            cursor_reference=pointer,
-        )
+        if not engaged:
+            if self._coerce_tool_mode(self.mode) is None:
+                return False
+            pointer = self._safe_global_cursor_pos() or QPoint()
+            inside_toolbar = self._is_point_inside_toolbar(pointer)
+            self._engage_navigation_transition(pointer, inside_toolbar=inside_toolbar)
         with self._navigation_injection_guard() as had_keyboard_grab:
             success = self._dispatch_virtual_key(vk_code)
         if not success:
@@ -4090,7 +4193,8 @@ class OverlayWindow(QWidget):
         self._nav_repeat_delay_timer.stop()
         self._nav_repeat_timer.stop()
         vk_code = VK_DOWN if direction.lower() == "down" else VK_UP
-        if self._send_slide_virtual_key(vk_code):
+        self._handle_navigation_button_trigger()
+        if self._send_slide_virtual_key(vk_code, engaged=True):
             self._nav_active_vk = vk_code
             self._nav_repeat_delay_timer.start()
         else:
@@ -4107,7 +4211,10 @@ class OverlayWindow(QWidget):
             if getattr(self, "toolbar", None) is not None and self.toolbar.underMouse():
                 return
             self._restore_pending_tool()
-        elif self._interaction_mode == "navigation" and self.mode == "cursor":
+        elif (
+            self._interaction_mode == InteractionMode.NAVIGATION.value
+            and self.mode == ToolMode.CURSOR.value
+        ):
             self._clear_navigation_passthrough()
 
     def _start_navigation_repeat(self) -> None:
@@ -4203,25 +4310,15 @@ class OverlayWindow(QWidget):
         self._clear_navigation_passthrough()
 
     def on_toolbar_mouse_enter(self) -> None:
-        if self.mode == "cursor":
+        if self.mode == ToolMode.CURSOR.value:
             self.raise_toolbar()
             return
-        pointer = self._safe_global_cursor_pos() or QPoint()
-        if self._interaction_mode != "navigation":
-            prev_mode = self.mode
-            prev_shape = self.current_shape if prev_mode == "shape" else None
-            if prev_mode in {"brush", "shape"}:
-                self._update_last_tool_snapshot()
-            self._begin_navigation_passthrough(
-                prev_mode,
-                prev_shape,
-                restore_on_move=False,
-                cursor_reference=pointer,
-            )
+        if self._interaction_mode != InteractionMode.NAVIGATION.value:
+            self._handle_toolbar_navigation_enter()
         else:
             if self._pending_tool_restore:
                 self._pending_tool_restore.restore_on_move = False
-            self._navigation_origin_inside_toolbar = True
+            self._update_navigation_origin_location(inside_toolbar=True)
         self.raise_toolbar()
 
     def on_toolbar_mouse_leave(self) -> None:
@@ -4230,13 +4327,9 @@ class OverlayWindow(QWidget):
         self._nav_active_vk = None
         if getattr(self, "toolbar", None) is not None and self.toolbar.underMouse():
             return
-        if self._interaction_mode != "navigation":
+        if self._interaction_mode != InteractionMode.NAVIGATION.value:
             return
-        if self._pending_tool_restore:
-            self._restore_pending_tool()
-            return
-        if self._navigation_origin_mode == "cursor":
-            self._clear_navigation_passthrough()
+        self._handle_toolbar_navigation_leave()
 
     def _fallback_scroll_with_wheel(self, delta: int) -> bool:
         if delta == 0:
@@ -4812,17 +4905,12 @@ class OverlayWindow(QWidget):
 
     def mouseMoveEvent(self, e) -> None:
         pending = self._pending_tool_restore
-        if pending and pending.restore_on_move and (
-            self.mode == "cursor" or self._nav_forced_passthrough
-        ):
+        if pending and pending.restore_on_move:
             try:
                 global_pos = e.globalPosition().toPoint()
             except Exception:
                 global_pos = QCursor.pos()
-            if self._is_point_inside_toolbar(global_pos):
-                pending.restore_on_move = False
-            else:
-                self._restore_pending_tool()
+            self._handle_pointer_navigation_restore(global_pos)
         if self.drawing and self.mode != "cursor":
             p = e.pos(); pf = e.position()
             dirty_region = None
