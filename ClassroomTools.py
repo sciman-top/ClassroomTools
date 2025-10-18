@@ -26,7 +26,6 @@ import hmac
 from collections import OrderedDict, deque
 from queue import Empty, Queue
 from dataclasses import dataclass
-from enum import Enum
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -39,7 +38,6 @@ from typing import (
     Set,
     Tuple,
     Union,
-    cast,
 )
 
 logger = logging.getLogger(__name__)
@@ -67,59 +65,9 @@ VK_UP = getattr(win32con, "VK_UP", 0x26)
 VK_DOWN = getattr(win32con, "VK_DOWN", 0x28)
 VK_LEFT = getattr(win32con, "VK_LEFT", 0x25)
 VK_RIGHT = getattr(win32con, "VK_RIGHT", 0x27)
-VK_PRIOR = getattr(win32con, "VK_PRIOR", 0x21)
-VK_NEXT = getattr(win32con, "VK_NEXT", 0x22)
-VK_SPACE = getattr(win32con, "VK_SPACE", 0x20)
-VK_RETURN = getattr(win32con, "VK_RETURN", 0x0D)
 KEYEVENTF_EXTENDEDKEY = getattr(win32con, "KEYEVENTF_EXTENDEDKEY", 0x0001)
 KEYEVENTF_KEYUP = getattr(win32con, "KEYEVENTF_KEYUP", 0x0002)
 _NAVIGATION_EXTENDED_KEYS = {VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT}
-WHEEL_DELTA = getattr(win32con, "WHEEL_DELTA", 120)
-
-_NAVIGATION_WHEEL_DELTAS: Dict[int, int] = {
-    VK_UP: WHEEL_DELTA,
-    VK_PRIOR: WHEEL_DELTA,
-    VK_DOWN: -WHEEL_DELTA,
-    VK_NEXT: -WHEEL_DELTA,
-}
-
-NAVIGATION_RESTORE_TIMEOUT = 0.45
-
-
-class ToolMode(str, Enum):
-    BRUSH = "brush"
-    SHAPE = "shape"
-    ERASER = "eraser"
-    CURSOR = "cursor"
-
-
-class InteractionMode(str, Enum):
-    DRAWING = "drawing"
-    NAVIGATION = "navigation"
-    CURSOR = "cursor"
-
-
-@dataclass
-class NavigationOriginState:
-    mode: ToolMode
-    shape: Optional[str]
-    inside_toolbar: bool
-
-
-@dataclass(frozen=True)
-class ModeState:
-    tool: ToolMode
-    interaction: InteractionMode
-    passthrough: bool
-    canvas_hidden: bool
-    keyboard_grabbed: bool = False
-
-
-@dataclass(frozen=True)
-class InputContext:
-    global_pos: Optional["QPoint"]
-    inside_toolbar: bool
-    tool: ToolMode
 
 if _USER32 is not None:
     _WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
@@ -1841,10 +1789,8 @@ class FloatingToolbar(QWidget):
         for color_hex, button in zip([c for c, _ in brush_configs], brush_buttons):
             button.clicked.connect(lambda _checked, c=color_hex: self.overlay.use_brush_color(c))
         self.btn_shape.clicked.connect(self._select_shape)
-        self.btn_slide_down.pressed.connect(lambda: self.overlay.handle_navigation_button_press("down"))
-        self.btn_slide_down.released.connect(self.overlay.handle_navigation_button_release)
-        self.btn_slide_up.pressed.connect(lambda: self.overlay.handle_navigation_button_press("up"))
-        self.btn_slide_up.released.connect(self.overlay.handle_navigation_button_release)
+        self.btn_slide_down.clicked.connect(self.overlay.go_to_next_slide)
+        self.btn_slide_up.clicked.connect(self.overlay.go_to_previous_slide)
         self.btn_undo.clicked.connect(self.overlay.undo_last_action)
         self.btn_eraser.clicked.connect(self.overlay.toggle_eraser_mode)
         self.btn_clear_all.clicked.connect(self.overlay.clear_all)
@@ -1862,67 +1808,31 @@ class FloatingToolbar(QWidget):
         for widget in (self, container, self.title_bar):
             widget.installEventFilter(self)
 
-    def update_tool_states(
-        self,
-        mode: str,
-        interaction_mode: str,
-        pen_color: QColor,
-        *,
-        navigation_from_cursor: bool = False,
-        highlight_mode: Optional[str] = None,
-    ) -> None:
+    def update_tool_states(self, mode: str, pen_color: QColor) -> None:
         color_key = pen_color.name().lower()
-        active_mode: Optional[str] = mode
-        if highlight_mode is not None:
-            active_mode = highlight_mode
-        elif interaction_mode == "cursor":
-            active_mode = "cursor"
-        elif interaction_mode == "navigation" and navigation_from_cursor:
-            active_mode = ""
-        elif interaction_mode == "navigation":
-            active_mode = mode
-        prev_exclusive = self.tool_buttons.exclusive()
-        if prev_exclusive:
-            self.tool_buttons.setExclusive(False)
-        try:
-            for hex_key, button in self.brush_color_buttons.items():
+        for hex_key, button in self.brush_color_buttons.items():
+            prev = button.blockSignals(True)
+            button.setChecked(mode == "brush" and hex_key == color_key)
+            button.blockSignals(prev)
+        for tool, button in (
+            ("cursor", self.btn_cursor),
+            ("shape", self.btn_shape),
+            ("eraser", self.btn_eraser),
+        ):
+            prev = button.blockSignals(True)
+            button.setChecked(mode == tool)
+            button.blockSignals(prev)
+        if mode == "brush" and color_key not in self.brush_color_buttons:
+            for button in (self.btn_cursor, self.btn_shape, self.btn_eraser):
                 prev = button.blockSignals(True)
-                button.setChecked(active_mode == "brush" and hex_key == color_key)
+                button.setChecked(False)
                 button.blockSignals(prev)
-            for tool, button in (
-                ("cursor", self.btn_cursor),
-                ("shape", self.btn_shape),
-                ("eraser", self.btn_eraser),
-            ):
-                prev = button.blockSignals(True)
-                button.setChecked(active_mode == tool)
-                button.blockSignals(prev)
-            if active_mode == "brush" and color_key not in self.brush_color_buttons:
-                for button in (self.btn_cursor, self.btn_shape, self.btn_eraser):
-                    prev = button.blockSignals(True)
-                    button.setChecked(False)
-                    button.blockSignals(prev)
-        finally:
-            if prev_exclusive:
-                self.tool_buttons.setExclusive(True)
 
     def update_undo_state(self, enabled: bool) -> None:
         self.btn_undo.setEnabled(enabled)
 
     def eventFilter(self, obj, event):
         event_type = event.type()
-        if event_type == QEvent.Type.Wheel:
-            wheel_event = cast(QWheelEvent, event)
-            if self.overlay.handle_toolbar_navigation_wheel(wheel_event):
-                return True
-        if event_type == QEvent.Type.KeyPress:
-            key_event = cast(QKeyEvent, event)
-            if self.overlay.handle_toolbar_navigation_key_event(key_event, pressed=True):
-                return True
-        if event_type == QEvent.Type.KeyRelease:
-            key_event = cast(QKeyEvent, event)
-            if self.overlay.handle_toolbar_navigation_key_event(key_event, pressed=False):
-                return True
         if isinstance(obj, QPushButton) and event_type == QEvent.Type.ToolTip:
             try:
                 self.overlay.raise_toolbar()
@@ -1960,10 +1870,6 @@ class FloatingToolbar(QWidget):
 
     def enterEvent(self, event) -> None:
         self.overlay.raise_toolbar()
-        try:
-            self.overlay.on_toolbar_mouse_enter()
-        except Exception:
-            pass
         super().enterEvent(event)
 
     def leaveEvent(self, event) -> None:
@@ -1981,19 +1887,10 @@ class FloatingToolbar(QWidget):
 class _PresentationForwarder:
     """在绘图模式下将特定输入事件转发给下层演示窗口。"""
 
-    __slots__ = (
-        "overlay",
-        "_last_target_hwnd",
-        "_last_target_role",
-        "_last_detected_role",
-        "_child_buffer",
-        "_self_pid",
-        "_injecting_wheel",
-    )
+    __slots__ = ("overlay", "_last_target_hwnd", "_child_buffer")
 
     _SMTO_ABORTIFHUNG = 0x0002
     _MAX_CHILD_FORWARDS = 32
-    _INPUT_MOUSE = 0
     _INPUT_KEYBOARD = 1
     _KEYEVENTF_EXTENDEDKEY = 0x0001
     _KEYEVENTF_KEYUP = 0x0002
@@ -2031,24 +1928,10 @@ class _PresentationForwarder:
                     ]
                 },
             )
-            _MouseInput = type(
-                "_MouseInput",
-                (ctypes.Structure,),
-                {
-                    "_fields_": [
-                        ("dx", wintypes.LONG),
-                        ("dy", wintypes.LONG),
-                        ("mouseData", wintypes.DWORD),
-                        ("dwFlags", wintypes.DWORD),
-                        ("time", wintypes.DWORD),
-                        ("dwExtraInfo", wintypes.ULONG_PTR),
-                    ]
-                },
-            )
             _InputUnion = type(
                 "_InputUnion",
                 (ctypes.Union,),
-                {"_fields_": [("ki", _KeyboardInput), ("mi", _MouseInput)]},
+                {"_fields_": [("ki", _KeyboardInput)]},
             )
             _Input = type(
                 "_Input",
@@ -2071,10 +1954,30 @@ class _PresentationForwarder:
             _fields_: List[Tuple[str, Any]] = []
 
         _KeyboardInput = None  # type: ignore[assignment]
-        _MouseInput = None  # type: ignore[assignment]
         _InputUnion = None  # type: ignore[assignment]
         _Input = None  # type: ignore[assignment]
 
+    _KNOWN_PRESENTATION_CLASSES: Set[str] = (
+        {
+            "screenclass",
+            "pptframeclass",
+            "pptviewwndclass",
+            "powerpntframeclass",
+            "powerpointframeclass",
+            "opusapp",
+            "acrobatsdiwindow",
+            "kwppframeclass",
+            "kwppmainframe",
+            "kwpsframeclass",
+            "wpsframeclass",
+            "wpsmainframe",
+        }
+        if win32gui is not None
+        else set()
+    )
+    _KNOWN_PRESENTATION_PREFIXES: Tuple[str, ...] = (
+        ("kwpp", "kwps", "wpsframe", "wpsmain") if win32gui is not None else tuple()
+    )
     _SLIDESHOW_PRIORITY_CLASSES: Set[str] = {"screenclass"}
     _SLIDESHOW_SECONDARY_CLASSES: Set[str] = {
         "pptviewwndclass",
@@ -2083,27 +1986,6 @@ class _PresentationForwarder:
         "kwppshowwndclass",
         "kwpsshowframe",
     }
-    _SLIDESHOW_PREFIXES: Tuple[str, ...] = ("kwppshow", "kwpsshow", "pptslideshow", "mspptslideshow")
-    _DOCUMENT_WINDOW_CLASSES: Set[str] = {
-        "opusapp",
-        "kwpsmainframe",
-        "kwpsframeclass",
-        "wpsframeclass",
-        "wpsmainframe",
-        "wpsframewindow",
-    }
-    _DOCUMENT_WINDOW_PREFIXES: Tuple[str, ...] = ("opusapp", "kwps", "wpsframe", "wpsmain")
-    _FORCE_WHEEL_INJECTION_CLASSES: Set[str] = set()
-    _KNOWN_PRESENTATION_CLASSES: Set[str] = (
-        _SLIDESHOW_PRIORITY_CLASSES
-        | _SLIDESHOW_SECONDARY_CLASSES
-        | _DOCUMENT_WINDOW_CLASSES
-        if win32gui is not None
-        else set()
-    )
-    _KNOWN_PRESENTATION_PREFIXES: Tuple[str, ...] = (
-        _SLIDESHOW_PREFIXES + _DOCUMENT_WINDOW_PREFIXES if win32gui is not None else tuple()
-    )
     _KEY_FORWARD_MAP: Dict[int, int] = (
         {
             int(Qt.Key.Key_PageUp): win32con.VK_PRIOR,
@@ -2115,16 +1997,6 @@ class _PresentationForwarder:
             int(Qt.Key.Key_Space): win32con.VK_SPACE,
             int(Qt.Key.Key_Return): win32con.VK_RETURN,
             int(Qt.Key.Key_Enter): win32con.VK_RETURN,
-        }
-        if win32con is not None
-        else {}
-    )
-    _DOCUMENT_NAVIGATION_KEYS: Dict[int, int] = (
-        {
-            VK_UP: WHEEL_DELTA,
-            VK_PRIOR: WHEEL_DELTA,
-            VK_DOWN: -WHEEL_DELTA,
-            VK_NEXT: -WHEEL_DELTA,
         }
         if win32con is not None
         else {}
@@ -2147,11 +2019,7 @@ class _PresentationForwarder:
     def __init__(self, overlay: "OverlayWindow") -> None:
         self.overlay = overlay
         self._last_target_hwnd: Optional[int] = None
-        self._last_target_role: Optional[str] = None
-        self._last_detected_role: Optional[str] = None
         self._child_buffer: List[int] = []
-        self._self_pid = os.getpid()
-        self._injecting_wheel = False
 
     def _log_debug(self, message: str, *args: Any) -> None:
         if logger.isEnabledFor(logging.DEBUG):
@@ -2159,8 +2027,6 @@ class _PresentationForwarder:
 
     def clear_cached_target(self) -> None:
         self._last_target_hwnd = None
-        self._last_target_role = None
-        self._last_detected_role = None
 
     def _window_class_name(self, hwnd: int) -> str:
         if hwnd == 0:
@@ -2179,37 +2045,11 @@ class _PresentationForwarder:
             return True
         if class_name in self._SLIDESHOW_SECONDARY_CLASSES:
             return True
-        if any(class_name.startswith(prefix) for prefix in self._SLIDESHOW_PREFIXES):
-            return True
         return False
 
-    def _is_document_class(self, class_name: str) -> bool:
-        if not class_name:
-            return False
-        if class_name in self._DOCUMENT_WINDOW_CLASSES:
-            return True
-        return any(class_name.startswith(prefix) for prefix in self._DOCUMENT_WINDOW_PREFIXES)
-
-    def _classify_role_from_class_name(self, class_name: str) -> Optional[str]:
-        if not class_name:
-            return None
-        if self._is_slideshow_class(class_name):
-            return "slideshow"
-        if self._is_document_class(class_name):
-            return "document"
-        return None
-
     def _should_refresh_cached_target(self, hwnd: int) -> bool:
-        if self._last_target_role == "document":
-            return True
         class_name = self._window_class_name(hwnd)
         return not self._is_slideshow_class(class_name)
-
-    def _set_cached_target(self, hwnd: int, role: Optional[str]) -> None:
-        self._last_target_hwnd = hwnd
-        resolved_role = role or self._classify_role_from_class_name(self._window_class_name(hwnd))
-        self._last_target_role = resolved_role
-        self._last_detected_role = resolved_role
 
     def get_presentation_target(self) -> Optional[int]:
         hwnd = self._resolve_presentation_target()
@@ -2230,15 +2070,10 @@ class _PresentationForwarder:
                     activated = True
                 except Exception:
                     pass
-            if activated and not self._wait_for_target_foreground(hwnd):
-                activated = False
         finally:
             self._detach_from_target_thread(attach_pair)
         if activated:
-            role = self._last_target_role or self._classify_role_from_class_name(
-                self._window_class_name(hwnd)
-            )
-            self._set_cached_target(hwnd, role)
+            self._last_target_hwnd = hwnd
         return activated
 
     # ---- 公共接口 ----
@@ -2256,18 +2091,12 @@ class _PresentationForwarder:
         finally:
             self._detach_from_target_thread(attach_pair)
         if activated:
-            self._set_cached_target(
-                target,
-                self._last_detected_role or self._classify_role_from_class_name(self._window_class_name(target)),
-            )
+            self._last_target_hwnd = target
         return activated
 
     def forward_wheel(self, event: QWheelEvent) -> bool:
         if not self._can_forward():
             self.clear_cached_target()
-            return False
-        if self._injecting_wheel:
-            self._injecting_wheel = False
             return False
         delta_vec = event.angleDelta()
         delta = int(delta_vec.y() or delta_vec.x())
@@ -2280,28 +2109,26 @@ class _PresentationForwarder:
         if not target:
             self.clear_cached_target()
             return False
-        role = self._last_target_role or self._classify_role_from_class_name(
-            self._window_class_name(target)
-        )
-        if role == "document":
-            modifiers = self._translate_mouse_modifiers(event) if win32con is not None else 0
-            delivered = self._send_document_wheel(
-                target,
-                delta,
-                modifiers=modifiers,
-                source_event=event,
-            )
-            if not delivered:
-                self.clear_cached_target()
-            return delivered
-        modifiers = self._translate_mouse_modifiers(event) if win32con is not None else 0
-        delivered = self._send_navigation_wheel_impl(
-            target,
-            delta,
-            role_hint=role or "slideshow",
-            modifiers=modifiers,
-            source_event=event,
-        )
+        keys = self._translate_mouse_modifiers(event)
+        delta_word = ctypes.c_short(delta).value & 0xFFFF
+        w_param = (ctypes.c_ushort(keys).value & 0xFFFF) | (delta_word << 16)
+        global_pos = event.globalPosition().toPoint()
+        x_word = ctypes.c_short(global_pos.x()).value & 0xFFFF
+        y_word = ctypes.c_short(global_pos.y()).value & 0xFFFF
+        l_param = x_word | (y_word << 16)
+        with self._keyboard_capture_guard():
+            focus_ok = self.bring_target_to_foreground(target)
+            if not focus_ok:
+                focus_ok = self._activate_window_for_input(target)
+            try:
+                delivered = bool(win32api.PostMessage(target, win32con.WM_MOUSEWHEEL, w_param, l_param))
+            except Exception:
+                delivered = False
+            if not delivered and focus_ok:
+                try:
+                    delivered = bool(win32api.PostMessage(target, win32con.WM_MOUSEWHEEL, w_param, l_param))
+                except Exception:
+                    delivered = False
         if not delivered:
             self.clear_cached_target()
         return delivered
@@ -2318,19 +2145,6 @@ class _PresentationForwarder:
             self._log_debug("forward_key: target window not found for key=%s", event.key())
             self.clear_cached_target()
             return False
-        role = self._last_target_role or self._classify_role_from_class_name(
-            self._window_class_name(target)
-        )
-        if role == "document":
-            delta = self._document_nav_delta(vk_code)
-            if delta:
-                if not is_press:
-                    return True
-                delivered = self._send_document_wheel(target, delta)
-                if delivered:
-                    return True
-                self.clear_cached_target()
-                return False
         for hwnd, update_cache in self._iter_key_targets(target):
             if self._send_key_to_window(
                 hwnd, vk_code, event, is_press=is_press, update_cache=update_cache
@@ -2355,16 +2169,6 @@ class _PresentationForwarder:
         if not target:
             self._log_debug("send_virtual_key: target not found vk=%s", vk_code)
             return False
-        role = self._last_target_role or self._classify_role_from_class_name(
-            self._window_class_name(target)
-        )
-        if role == "document":
-            delta = self._document_nav_delta(vk_code)
-            if delta:
-                success = self._send_document_wheel(target, delta)
-                if not success:
-                    self.clear_cached_target()
-                return success
         press = release = False
         with self._keyboard_capture_guard():
             attach_pair = self._attach_to_target_thread(target)
@@ -2378,7 +2182,7 @@ class _PresentationForwarder:
                 self._detach_from_target_thread(attach_pair)
         success = press and release
         if success:
-            self._set_cached_target(target, role)
+            self._last_target_hwnd = target
         else:
             self._log_debug(
                 "send_virtual_key: send input failed vk=%s press=%s release=%s",
@@ -2388,80 +2192,11 @@ class _PresentationForwarder:
             )
         return success
 
-    def send_navigation_wheel_message(self, delta: int) -> bool:
-        if not self.is_supported() or delta == 0:
-            return False
-        target = self._resolve_presentation_target()
-        if not target:
-            target = self._detect_presentation_window()
-        if not target:
-            return False
-        role = self._last_target_role or self._classify_role_from_class_name(
-            self._window_class_name(target)
-        )
-        if self._should_force_wheel_injection(target, role):
-            return False
-        delivered = self._deliver_wheel_messages(target, delta)
-        if delivered:
-            self._set_cached_target(target, role)
-        else:
-            self.clear_cached_target()
-        return delivered
-
-    def send_navigation_wheel(self, delta: int, *, injection_only: bool = False) -> bool:
-        if not self.is_supported() or delta == 0:
-            return False
-        target = self._resolve_presentation_target()
-        if not target:
-            target = self._detect_presentation_window()
-        if not target:
-            return False
-        role = self._last_target_role or self._classify_role_from_class_name(
-            self._window_class_name(target)
-        )
-        role_hint = role or "slideshow"
-        delivered = self._send_navigation_wheel_impl(
-            target,
-            delta,
-            role_hint=role_hint,
-            injection_only=injection_only,
-        )
-        if not delivered and role_hint != "slideshow":
-            delivered = self._send_navigation_wheel_impl(
-                target,
-                delta,
-                role_hint="slideshow",
-                injection_only=injection_only,
-            )
-        if not delivered:
-            self.clear_cached_target()
-        return delivered
-
-    def get_last_target_role(self) -> Optional[str]:
-        return self._last_target_role
-
-    def send_document_scroll_for_vk(self, vk_code: int) -> bool:
-        delta = self._document_nav_delta(vk_code)
-        if not delta:
-            return False
-        target = self._resolve_presentation_target()
-        if not target:
-            return False
-        role = self._last_target_role or self._classify_role_from_class_name(
-            self._window_class_name(target)
-        )
-        if role != "document":
-            return False
-        return self._send_document_wheel(target, delta)
-
     # ---- 内部工具方法 ----
     def _can_forward(self) -> bool:
         if not self.is_supported():
             return False
-        mode = getattr(self.overlay, "mode", "cursor")
-        if mode == "cursor" and not getattr(
-            self.overlay, "navigation_passthrough_active", False
-        ):
+        if getattr(self.overlay, "mode", "cursor") == "cursor":
             return False
         if getattr(self.overlay, "whiteboard_active", False):
             return False
@@ -2629,34 +2364,6 @@ class _PresentationForwarder:
             thread_id = 0
         return thread_id
 
-    def _wait_for_target_foreground(self, hwnd: int, *, timeout: float = 0.3) -> bool:
-        if hwnd == 0:
-            return False
-        class_name = self._window_class_name(hwnd)
-        if not self._is_slideshow_class(class_name):
-            return True
-        deadline = time.time() + max(0.0, float(timeout))
-        target_top = self._top_level_hwnd(hwnd)
-        while time.time() < deadline:
-            foreground = 0
-            if win32gui is not None:
-                try:
-                    fg = win32gui.GetForegroundWindow()
-                    if fg:
-                        foreground = int(fg)
-                except Exception:
-                    foreground = 0
-            if not foreground:
-                foreground = _user32_get_foreground_window()
-            if foreground:
-                if foreground == hwnd or foreground == target_top:
-                    return True
-                fg_class = self._window_class_name(foreground)
-                if self._is_slideshow_class(fg_class) and self._top_level_hwnd(foreground) == target_top:
-                    return True
-            time.sleep(0.01)
-        return False
-
     def _activate_window_for_input(self, hwnd: int) -> bool:
         if _USER32 is None:
             return False
@@ -2681,10 +2388,7 @@ class _PresentationForwarder:
                 focus_ok = bool(_USER32.SetFocus(wintypes.HWND(root_hwnd)))
             except Exception:
                 focus_ok = False
-        success = activated or focus_ok
-        if success and not self._wait_for_target_foreground(hwnd):
-            success = False
-        return success
+        return activated or focus_ok
 
     def _top_level_hwnd(self, hwnd: int) -> int:
         if win32gui is None or hwnd == 0:
@@ -2733,101 +2437,6 @@ class _PresentationForwarder:
             sent = 0
         return bool(sent)
 
-    def _send_wheel_input(self, delta: int) -> bool:
-        if (
-            _USER32 is None
-            or self._Input is None
-            or getattr(self, "_MouseInput", None) is None
-            or self._MouseInput is None
-        ):
-            return False
-        mouse_input = self._MouseInput()
-        mouse_input.dx = 0
-        mouse_input.dy = 0
-        try:
-            mouse_input.mouseData = ctypes.c_int(delta).value & 0xFFFFFFFF
-        except Exception:
-            mouse_input.mouseData = ctypes.c_int(delta).value
-        mouse_input.dwFlags = getattr(win32con, "MOUSEEVENTF_WHEEL", 0x0800)
-        mouse_input.time = 0
-        try:
-            mouse_input.dwExtraInfo = 0
-        except Exception:
-            pass
-        input_record = self._Input()
-        input_record.type = self._INPUT_MOUSE
-        try:
-            input_record.data.mi = mouse_input
-        except Exception:
-            return False
-        try:
-            sent = int(_USER32.SendInput(1, ctypes.byref(input_record), ctypes.sizeof(self._Input)))
-        except Exception:
-            sent = 0
-        return bool(sent)
-
-    def _get_cursor_pos(self) -> Optional[Tuple[int, int]]:
-        if win32api is not None:
-            try:
-                pos = win32api.GetCursorPos()
-                if isinstance(pos, tuple) and len(pos) == 2:
-                    return int(pos[0]), int(pos[1])
-            except Exception:
-                pass
-        if _USER32 is not None:
-            pt = wintypes.POINT()
-            try:
-                if _USER32.GetCursorPos(ctypes.byref(pt)):
-                    return int(pt.x), int(pt.y)
-            except Exception:
-                pass
-        return None
-
-    def _set_cursor_pos(self, point: Tuple[int, int]) -> bool:
-        x, y = point
-        if win32api is not None:
-            try:
-                win32api.SetCursorPos((int(x), int(y)))
-                return True
-            except Exception:
-                pass
-        if _USER32 is not None:
-            try:
-                return bool(_USER32.SetCursorPos(int(x), int(y)))
-            except Exception:
-                return False
-        return False
-
-    def _set_overlay_passthrough(self, enable: bool) -> bool:
-        overlay = getattr(self, "overlay", None)
-        if overlay is None:
-            return False
-        method = getattr(overlay, "_apply_input_passthrough", None)
-        if not callable(method):
-            return False
-        try:
-            method(enable)
-        except Exception:
-            return False
-        return True
-
-    def _restore_overlay_interaction(self) -> None:
-        overlay = getattr(self, "overlay", None)
-        if overlay is None:
-            return
-        try:
-            overlay._apply_input_passthrough(False)
-        except Exception:
-            pass
-        try:
-            overlay._ensure_keyboard_capture()
-        except Exception:
-            pass
-        try:
-            QApplication.processEvents()
-        except Exception:
-            pass
-
     def _map_virtual_key(self, vk_code: int) -> int:
         map_vk = getattr(win32api, "MapVirtualKey", None) if win32api is not None else None
         if callable(map_vk):
@@ -2861,27 +2470,6 @@ class _PresentationForwarder:
         for child_hwnd in self._collect_descendant_windows(target):
             for candidate in _push(child_hwnd, cache=False, require_visible=False):
                 yield candidate
-    
-    def _iter_wheel_targets(self, target: int) -> Iterable[int]:
-        seen: Set[int] = set()
-
-        for focus_hwnd in self._gather_thread_focus_handles(target):
-            if focus_hwnd in seen:
-                continue
-            if self._is_keyboard_target(focus_hwnd, require_visible=False):
-                seen.add(focus_hwnd)
-                yield focus_hwnd
-
-        if self._is_keyboard_target(target, require_visible=True) and target not in seen:
-            seen.add(target)
-            yield target
-
-        for child_hwnd in self._collect_descendant_windows(target):
-            if child_hwnd in seen:
-                continue
-            if self._is_keyboard_target(child_hwnd, require_visible=False):
-                seen.add(child_hwnd)
-                yield child_hwnd
 
     def _build_key_lparam(self, vk_code: int, event: QKeyEvent, is_press: bool) -> int:
         repeat_getter = getattr(event, "count", None)
@@ -3040,8 +2628,6 @@ class _PresentationForwarder:
     def _fallback_is_target_window_valid(self, hwnd: int) -> bool:
         if _USER32 is None or hwnd == 0:
             return False
-        if self._belongs_to_current_process(hwnd):
-            return False
         overlay_hwnd = int(self.overlay.winId()) if self.overlay.winId() else 0
         if hwnd == overlay_hwnd:
             return False
@@ -3057,18 +2643,16 @@ class _PresentationForwarder:
     def _fallback_is_candidate_window(self, hwnd: int) -> bool:
         if _USER32 is None or hwnd == 0:
             return False
-        if self._belongs_to_current_process(hwnd):
-            return False
         class_name = _user32_window_class_name(hwnd)
-        rect = _user32_window_rect(hwnd)
-        if not class_name or not rect:
+        if not class_name:
             return False
-        class_name = class_name.strip().lower()
-        role = self._classify_role_from_class_name(class_name)
-        if role == "slideshow":
+        if class_name in self._KNOWN_PRESENTATION_CLASSES:
             return True
-        if role == "document":
-            return self._is_document_window_valid(hwnd, rect=rect, index=0, foreground=None)
+        if any(class_name.startswith(prefix) for prefix in self._KNOWN_PRESENTATION_PREFIXES):
+            return True
+        rect = _user32_window_rect(hwnd)
+        if not rect:
+            return False
         left, top, right, bottom = rect
         width = max(0, right - left)
         height = max(0, bottom - top)
@@ -3124,15 +2708,8 @@ class _PresentationForwarder:
                 pass
         return _user32_window_rect(hwnd)
 
-    def _candidate_score(
-        self,
-        hwnd: int,
-        *,
-        class_name: Optional[str] = None,
-        rect: Optional[Tuple[int, int, int, int]] = None,
-    ) -> int:
-        if rect is None:
-            rect = self._get_window_rect_generic(hwnd)
+    def _candidate_score(self, hwnd: int) -> int:
+        rect = self._get_window_rect_generic(hwnd)
         if rect is None:
             return -1
         left, top, right, bottom = rect
@@ -3140,25 +2717,24 @@ class _PresentationForwarder:
         height = max(0, bottom - top)
         if width == 0 or height == 0:
             return -1
-        if class_name is None:
-            if win32gui is not None:
-                try:
-                    class_name = win32gui.GetClassName(hwnd)
-                except Exception:
-                    class_name = ""
-            if not class_name:
-                class_name = _user32_window_class_name(hwnd)
-        class_name = (class_name or "").strip().lower()
+        class_name = ""
+        if win32gui is not None:
+            try:
+                class_name = win32gui.GetClassName(hwnd)
+            except Exception:
+                class_name = ""
+        if not class_name:
+            class_name = _user32_window_class_name(hwnd)
+        class_name = class_name.strip().lower()
 
         score = 0
         if class_name in self._SLIDESHOW_PRIORITY_CLASSES:
             score += 400
-        elif self._is_slideshow_class(class_name):
-            if class_name in self._SLIDESHOW_SECONDARY_CLASSES:
-                score += 240
-            else:
-                score += 200
-        elif class_name in self._DOCUMENT_WINDOW_CLASSES:
+        elif "screen" in class_name or "slide" in class_name or "show" in class_name:
+            score += 260
+        elif class_name in self._SLIDESHOW_SECONDARY_CLASSES:
+            score += 180
+        elif class_name in self._KNOWN_PRESENTATION_CLASSES:
             score += 120
 
         has_caption = self._has_window_caption(hwnd)
@@ -3193,422 +2769,57 @@ class _PresentationForwarder:
 
         return score
 
-    def _is_top_level_candidate(self, hwnd: int) -> bool:
-        if hwnd == 0:
-            return False
-        if win32gui is not None:
-            try:
-                if not win32gui.IsWindow(hwnd) or not win32gui.IsWindowVisible(hwnd):
-                    return False
-                if win32gui.IsIconic(hwnd):
-                    return False
-            except Exception:
-                return False
-            return True
-        if _USER32 is None:
-            return False
-        if not _user32_is_window(hwnd):
-            return False
-        if not _user32_is_window_visible(hwnd):
-            return False
-        if _user32_is_window_iconic(hwnd):
-            return False
-        return True
-
-    def _gather_target_candidates(self) -> List[Tuple[int, str, str, Tuple[int, int, int, int]]]:
-        overlay_hwnd = int(self.overlay.winId()) if self.overlay.winId() else 0
-        results: List[Tuple[int, str, str, Tuple[int, int, int, int]]] = []
-        seen: Set[int] = set()
-
-        def _append(hwnd: int) -> None:
-            if hwnd in seen or hwnd == 0:
-                return
-            seen.add(hwnd)
-            if hwnd == overlay_hwnd:
-                return
-            if self._belongs_to_current_process(hwnd):
-                return
-            if not self._is_top_level_candidate(hwnd):
-                return
-            rect = self._get_window_rect_generic(hwnd)
-            if not rect or not self._rect_intersects_overlay(rect):
-                return
-            class_name = self._window_class_name(hwnd)
-            role = self._classify_role_from_class_name(class_name)
-            if role is None:
-                return
-            results.append((hwnd, role, class_name, rect))
-
-        if win32gui is not None:
-            def _enum(hwnd: int, _unused) -> bool:
-                _append(hwnd)
-                return True
-
-            try:
-                win32gui.EnumWindows(_enum, None)
-            except Exception:
-                pass
-        elif _USER32 is not None and _WNDENUMPROC is not None:
-            def _enum(hwnd: int, _l_param: int) -> int:
-                _append(int(hwnd))
-                return True
-
-            try:
-                _USER32.EnumWindows(_WNDENUMPROC(_enum), 0)
-            except Exception:
-                pass
-        return results
-
-    def _is_document_window_valid(
-        self,
-        self_hwnd: int,
-        *,
-        rect: Tuple[int, int, int, int],
-        index: int,
-        foreground: Optional[int],
-    ) -> bool:
-        hwnd = self_hwnd
-        if not self._is_target_window_valid(hwnd):
-            return False
-        if foreground:
-            foreground_top = self._top_level_hwnd(foreground)
-            if foreground_top == 0:
-                foreground_top = foreground
-            if self._top_level_hwnd(hwnd) != foreground_top:
-                return False
-        elif index != 0:
-            return False
-        if not self._is_window_maximized(hwnd):
-            return False
-        left, top, right, bottom = rect
-        width = max(0, right - left)
-        height = max(0, bottom - top)
-        if width < 400 or height < 300:
-            return False
-        return True
-
-    def _document_candidate_score(
-        self,
-        hwnd: int,
-        rect: Tuple[int, int, int, int],
-        index: int,
-    ) -> int:
-        if index != 0:
-            return -1
-        left, top, right, bottom = rect
-        width = max(0, right - left)
-        height = max(0, bottom - top)
-        overlay_rect = self._overlay_rect_tuple()
-        score = 320
-        if overlay_rect is not None:
-            o_width = max(0, overlay_rect[2] - overlay_rect[0])
-            o_height = max(0, overlay_rect[3] - overlay_rect[1])
-            if o_width > 0 and o_height > 0:
-                width_diff = abs(width - o_width)
-                height_diff = abs(height - o_height)
-                size_penalty = min(width_diff + height_diff, 800)
-                score += max(0, 240 - size_penalty // 2)
-                area = width * height
-                overlay_area = o_width * o_height
-                if overlay_area > 0 and area > 0:
-                    ratio = min(area, overlay_area) / max(area, overlay_area)
-                    score += int(ratio * 80)
-        return score
-
-    def _belongs_to_current_process(self, hwnd: int) -> bool:
-        if _USER32 is None or hwnd == 0:
-            return False
-        pid = wintypes.DWORD()
-        try:
-            _USER32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(pid))
-        except Exception:
-            return False
-        return int(pid.value) == self._self_pid
-
-    def _next_window_in_z_order(self, hwnd: int) -> int:
-        if hwnd == 0:
-            return 0
-        if win32gui is not None:
-            command = getattr(win32con, "GW_HWNDNEXT", 2) if win32con is not None else 2
-            try:
-                nxt = win32gui.GetWindow(hwnd, command)
-                if nxt:
-                    return int(nxt)
-            except Exception:
-                pass
-        if _USER32 is not None:
-            command = getattr(win32con, "GW_HWNDNEXT", 2) if win32con is not None else 2
-            try:
-                nxt = _USER32.GetWindow(wintypes.HWND(hwnd), command)
-                if nxt:
-                    return int(nxt)
-            except Exception:
-                pass
-        return 0
-
-    def _effective_foreground_window(self) -> int:
-        overlay_hwnd = int(self.overlay.winId()) if self.overlay.winId() else 0
-        foreground = 0
-        if win32gui is not None:
-            try:
-                fg = win32gui.GetForegroundWindow()
-                if fg:
-                    foreground = int(fg)
-            except Exception:
-                foreground = 0
-        if not foreground:
-            foreground = _user32_get_foreground_window()
-        visited: Set[int] = set()
-        hwnd = foreground
-        while hwnd and hwnd not in visited:
-            visited.add(hwnd)
-            top = self._top_level_hwnd(hwnd)
-            if top == overlay_hwnd or self._belongs_to_current_process(top):
-                hwnd = self._next_window_in_z_order(top)
-                continue
-            if self._is_top_level_candidate(top):
-                return top
-            hwnd = self._next_window_in_z_order(top)
-        return 0
-
-    def _is_window_maximized(self, hwnd: int) -> bool:
-        if win32gui is not None:
-            try:
-                if win32gui.IsZoomed(hwnd):
-                    return True
-            except Exception:
-                pass
-            try:
-                placement = win32gui.GetWindowPlacement(hwnd)
-                if placement and placement[1] == getattr(win32con, "SW_SHOWMAXIMIZED", 3):
-                    return True
-            except Exception:
-                pass
-        if _USER32 is not None:
-            try:
-                if _USER32.IsZoomed(wintypes.HWND(hwnd)):
-                    return True
-            except Exception:
-                pass
-        return False
-
-    def _document_nav_delta(self, vk_code: int) -> int:
-        return self._DOCUMENT_NAVIGATION_KEYS.get(vk_code, 0)
-
-    def _get_default_wheel_point(self, hwnd: int) -> Optional[Tuple[int, int]]:
-        rect = self._get_window_rect_generic(hwnd)
-        if not rect:
-            return None
-        left, top, right, bottom = rect
-        width = max(0, right - left)
-        height = max(0, bottom - top)
-        return left + width // 2, top + height // 2
-
-    def _send_wheel_message(
-        self,
-        hwnd: int,
-        delta: int,
-        *,
-        modifiers: int = 0,
-        point: Optional[Tuple[int, int]] = None,
-    ) -> bool:
-        if hwnd == 0:
-            return False
-        if point is None:
-            point = self._get_default_wheel_point(hwnd)
-            if point is None:
-                return False
-        x, y = point
-        delta_word = ctypes.c_short(delta).value & 0xFFFF
-        w_param = (ctypes.c_ushort(modifiers).value & 0xFFFF) | (delta_word << 16)
-        x_word = ctypes.c_short(int(x)).value & 0xFFFF
-        y_word = ctypes.c_short(int(y)).value & 0xFFFF
-        l_param = x_word | (y_word << 16)
-        delivered = False
-        if win32api is not None and win32con is not None:
-            try:
-                delivered = bool(win32api.PostMessage(hwnd, win32con.WM_MOUSEWHEEL, w_param, l_param))
-            except Exception:
-                delivered = False
-        if not delivered and _USER32 is not None and win32con is not None:
-            result = ctypes.c_size_t()
-            try:
-                sent = _USER32.SendMessageTimeoutW(
-                    hwnd,
-                    win32con.WM_MOUSEWHEEL,
-                    wintypes.WPARAM(w_param),
-                    wintypes.LPARAM(l_param),
-                    self._SMTO_ABORTIFHUNG,
-                    30,
-                    ctypes.byref(result),
-                )
-                delivered = bool(sent)
-            except Exception:
-                delivered = False
-        return delivered
-
-    def _should_force_wheel_injection(self, hwnd: int, role_hint: Optional[str]) -> bool:
-        if hwnd == 0:
-            return False
-        if role_hint == "document":
-            return False
-        class_name = self._window_class_name(hwnd)
-        if not class_name:
-            return False
-        return class_name in self._FORCE_WHEEL_INJECTION_CLASSES
-
-    def _deliver_wheel_messages(
-        self,
-        hwnd: int,
-        delta: int,
-        *,
-        modifiers: int = 0,
-        point: Optional[Tuple[int, int]] = None,
-    ) -> bool:
-        if hwnd == 0:
-            return False
-        effective_point = point or self._get_default_wheel_point(hwnd)
-        if effective_point is None:
-            return False
-        for candidate in self._iter_wheel_targets(hwnd):
-            if self._send_wheel_message(
-                candidate,
-                delta,
-                modifiers=modifiers,
-                point=effective_point,
-            ):
-                return True
-        return self._send_wheel_message(
-            hwnd,
-            delta,
-            modifiers=modifiers,
-            point=effective_point,
-        )
-
-    def _send_wheel_via_injection(
-        self,
-        hwnd: int,
-        delta: int,
-        *,
-        modifiers: int = 0,
-        point: Optional[Tuple[int, int]] = None,
-        allow_message_fallback: bool = False,
-    ) -> bool:
-        if hwnd == 0:
-            return False
-        delivered = False
-        passthrough_applied = False
-        original_cursor: Optional[Tuple[int, int]] = None
-        with self._keyboard_capture_guard():
-            focus_ok = self.bring_target_to_foreground(hwnd)
-            if not focus_ok:
-                focus_ok = self._activate_window_for_input(hwnd)
-            attach_pair = self._attach_to_target_thread(hwnd)
-            try:
-                injected = False
-                if focus_ok:
-                    original_cursor = self._get_cursor_pos()
-                    passthrough_applied = self._set_overlay_passthrough(True)
-                    if passthrough_applied:
-                        QApplication.processEvents()
-                    if point is not None:
-                        self._set_cursor_pos(point)
-                    self._injecting_wheel = True
-                    try:
-                        injected = self._send_wheel_input(delta)
-                    finally:
-                        if not injected:
-                            self._injecting_wheel = False
-                    if injected:
-                        delivered = True
-                if not delivered and allow_message_fallback:
-                    delivered = self._deliver_wheel_messages(
-                        hwnd,
-                        delta,
-                        modifiers=modifiers,
-                        point=point,
-                    )
-            finally:
-                self._detach_from_target_thread(attach_pair)
-        if passthrough_applied:
-            self._restore_overlay_interaction()
-        if original_cursor is not None:
-            self._set_cursor_pos(original_cursor)
-        self._injecting_wheel = False
-        return delivered
-
-    def _send_navigation_wheel_impl(
-        self,
-        hwnd: int,
-        delta: int,
-        *,
-        role_hint: str,
-        modifiers: int = 0,
-        source_event: Optional[QWheelEvent] = None,
-        injection_only: bool = False,
-    ) -> bool:
-        if hwnd == 0:
-            return False
-        point: Optional[Tuple[int, int]] = None
-        if source_event is not None:
-            try:
-                global_pos = source_event.globalPosition().toPoint()
-                point = (int(global_pos.x()), int(global_pos.y()))
-            except Exception:
-                point = None
-        default_point = point if point is not None else self._get_default_wheel_point(hwnd)
-        force_injection = self._should_force_wheel_injection(hwnd, role_hint)
-        delivered = False
-        message_attempted = injection_only
-        if not force_injection and not injection_only:
-            delivered = self._deliver_wheel_messages(
-                hwnd,
-                delta,
-                modifiers=modifiers,
-                point=default_point,
-            )
-            message_attempted = True
-        if not delivered:
-            delivered = self._send_wheel_via_injection(
-                hwnd,
-                delta,
-                modifiers=modifiers,
-                point=default_point,
-                allow_message_fallback=not message_attempted,
-            )
-        if delivered:
-            self._set_cached_target(hwnd, role_hint)
-        else:
-            self.clear_cached_target()
-        return delivered
-
-    def _send_document_wheel(
-        self,
-        hwnd: int,
-        delta: int,
-        *,
-        modifiers: int = 0,
-        source_event: Optional[QWheelEvent] = None,
-    ) -> bool:
-        return self._send_navigation_wheel_impl(
-            hwnd,
-            delta,
-            role_hint="document",
-            modifiers=modifiers,
-            source_event=source_event,
-        )
-
     def _fallback_detect_presentation_window_user32(self) -> Optional[int]:
-        return self._detect_presentation_window()
+        if _USER32 is None:
+            return None
+        overlay_hwnd = int(self.overlay.winId()) if self.overlay.winId() else 0
+        best_hwnd: Optional[int] = None
+        best_score = -1
+        foreground = _user32_get_foreground_window()
+        if (
+            foreground
+            and foreground != overlay_hwnd
+            and self._fallback_is_candidate_window(foreground)
+        ):
+            score = self._candidate_score(foreground)
+            if score > best_score:
+                best_score = score
+                best_hwnd = foreground
+        if _WNDENUMPROC is None:
+            return best_hwnd
+        candidates: List[int] = []
+
+        def _enum_callback(hwnd: int, _l_param: int) -> int:
+            if hwnd == overlay_hwnd:
+                return True
+            if not _user32_is_window_visible(hwnd) or _user32_is_window_iconic(hwnd):
+                return True
+            rect = _user32_window_rect(hwnd)
+            if not rect or not self._rect_intersects_overlay(rect):
+                return True
+            candidates.append(int(hwnd))
+            return True
+
+        enum_proc = _WNDENUMPROC(_enum_callback)
+        try:
+            _USER32.EnumWindows(enum_proc, 0)
+        except Exception:
+            return best_hwnd
+        for hwnd in candidates:
+            if not self._fallback_is_candidate_window(hwnd):
+                continue
+            score = self._candidate_score(hwnd)
+            if score > best_score:
+                best_score = score
+                best_hwnd = hwnd
+        return best_hwnd
 
     def _is_target_window_valid(self, hwnd: int) -> bool:
-        if hwnd == 0:
-            return False
-        if self._belongs_to_current_process(hwnd):
-            return False
         if win32gui is None:
             return self._fallback_is_target_window_valid(hwnd)
         try:
+            if hwnd == 0:
+                return False
             if hwnd == int(self.overlay.winId()):
                 return False
             if not win32gui.IsWindow(hwnd) or not win32gui.IsWindowVisible(hwnd):
@@ -3625,8 +2836,6 @@ class _PresentationForwarder:
     def _is_candidate_window(self, hwnd: int) -> bool:
         if win32gui is None:
             return self._fallback_is_candidate_window(hwnd)
-        if self._belongs_to_current_process(hwnd):
-            return False
         try:
             class_name = win32gui.GetClassName(hwnd)
         except Exception:
@@ -3634,10 +2843,9 @@ class _PresentationForwarder:
         class_name = class_name.strip().lower()
         if not class_name:
             return False
-        role = self._classify_role_from_class_name(class_name)
-        if role == "slideshow":
+        if class_name in self._KNOWN_PRESENTATION_CLASSES:
             return True
-        if role == "document":
+        if any(class_name.startswith(prefix) for prefix in self._KNOWN_PRESENTATION_PREFIXES):
             return True
         try:
             rect = win32gui.GetWindowRect(hwnd)
@@ -3660,59 +2868,84 @@ class _PresentationForwarder:
         return width >= 400 and height >= 300 and width_diff <= 64 and height_diff <= 64
 
     def _detect_presentation_window(self) -> Optional[int]:
-        candidates = self._gather_target_candidates()
-        foreground_hwnd = self._effective_foreground_window()
-        self._last_detected_role = None
-        if not candidates:
-            return None
-        best_slideshow: Tuple[Optional[int], int] = (None, -1)
-        best_document: Tuple[Optional[int], int] = (None, -1)
-        for index, (hwnd, role, class_name, rect) in enumerate(candidates):
-            if role == "slideshow":
-                score = self._candidate_score(hwnd, class_name=class_name, rect=rect)
-                if score > best_slideshow[1]:
-                    best_slideshow = (hwnd, score)
-            elif role == "document":
-                if not self._is_document_window_valid(
-                    hwnd,
-                    rect=rect,
-                    index=index,
-                    foreground=foreground_hwnd,
-                ):
-                    continue
-                score = self._document_candidate_score(hwnd, rect, index)
-                if score > best_document[1]:
-                    best_document = (hwnd, score)
-        if best_slideshow[0] is not None:
-            self._last_detected_role = "slideshow"
-            return best_slideshow[0]
-        if best_document[0] is not None:
-            self._last_detected_role = "document"
-            return best_document[0]
-        return None
+        if win32gui is None:
+            return self._fallback_detect_presentation_window_user32()
+        overlay_hwnd = int(self.overlay.winId()) if self.overlay.winId() else 0
+        try:
+            foreground = win32gui.GetForegroundWindow()
+        except Exception:
+            foreground = 0
+        best_hwnd: Optional[int] = None
+        best_score = -1
+        if foreground and foreground != overlay_hwnd and self._is_candidate_window(foreground):
+            score = self._candidate_score(foreground)
+            if score > best_score:
+                best_score = score
+                best_hwnd = foreground
+
+        candidates: List[int] = []
+
+        def _enum_callback(hwnd: int, acc: List[int]) -> bool:
+            if hwnd == overlay_hwnd:
+                return True
+            try:
+                if not win32gui.IsWindowVisible(hwnd) or win32gui.IsIconic(hwnd):
+                    return True
+                rect = win32gui.GetWindowRect(hwnd)
+            except Exception:
+                return True
+            if not rect or not self._rect_intersects_overlay(rect):
+                return True
+            acc.append(hwnd)
+            return True
+
+        try:
+            win32gui.EnumWindows(_enum_callback, candidates)
+        except Exception:
+            return best_hwnd
+        for hwnd in candidates:
+            if not self._is_candidate_window(hwnd):
+                continue
+            score = self._candidate_score(hwnd)
+            if score > best_score:
+                best_score = score
+                best_hwnd = hwnd
+        return best_hwnd
 
     def _resolve_presentation_target(self) -> Optional[int]:
+        if win32gui is None:
+            hwnd = self._last_target_hwnd
+            if hwnd and self._fallback_is_target_window_valid(hwnd):
+                if self._should_refresh_cached_target(hwnd):
+                    refreshed = self._fallback_detect_presentation_window_user32()
+                    if (
+                        refreshed
+                        and refreshed != hwnd
+                        and self._fallback_is_target_window_valid(refreshed)
+                    ):
+                        self._last_target_hwnd = refreshed
+                        return refreshed
+                return hwnd
+            hwnd = self._fallback_detect_presentation_window_user32()
+            if hwnd and self._fallback_is_target_window_valid(hwnd):
+                self._last_target_hwnd = hwnd
+                return hwnd
+            self._last_target_hwnd = None
+            return None
         hwnd = self._last_target_hwnd
         if hwnd and self._is_target_window_valid(hwnd):
             if self._should_refresh_cached_target(hwnd):
                 refreshed = self._detect_presentation_window()
                 if refreshed and refreshed != hwnd and self._is_target_window_valid(refreshed):
-                    self._set_cached_target(refreshed, self._last_detected_role)
+                    self._last_target_hwnd = refreshed
                     return refreshed
             return hwnd
-        refreshed = self._detect_presentation_window()
-        if refreshed and self._is_target_window_valid(refreshed):
-            self._set_cached_target(refreshed, self._last_detected_role)
-            return refreshed
-        self.clear_cached_target()
+        hwnd = self._detect_presentation_window()
+        if hwnd and self._is_target_window_valid(hwnd):
+            self._last_target_hwnd = hwnd
+            return hwnd
+        self._last_target_hwnd = None
         return None
-
-
-@dataclass
-class _PendingToolRestoreState:
-    mode: str
-    shape: Optional[str]
-    restore_on_move: bool
 
 
 class OverlayWindow(QWidget):
@@ -3720,8 +2953,6 @@ class OverlayWindow(QWidget):
     _KNOWN_PRESENTATION_PREFIXES = _PresentationForwarder._KNOWN_PRESENTATION_PREFIXES
     _SLIDESHOW_PRIORITY_CLASSES = _PresentationForwarder._SLIDESHOW_PRIORITY_CLASSES
     _SLIDESHOW_SECONDARY_CLASSES = _PresentationForwarder._SLIDESHOW_SECONDARY_CLASSES
-    _DOCUMENT_WINDOW_CLASSES = _PresentationForwarder._DOCUMENT_WINDOW_CLASSES
-    _DOCUMENT_WINDOW_PREFIXES = _PresentationForwarder._DOCUMENT_WINDOW_PREFIXES
 
     def __init__(self, settings_manager: SettingsManager) -> None:
         super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
@@ -3730,14 +2961,7 @@ class OverlayWindow(QWidget):
         s = self.settings_manager.load_settings().get("Paint", {})
         self.pen_size = int(s.get("brush_size", "12"))
         self.pen_color = QColor(s.get("brush_color", "#ff0000"))
-        self._mode_state = ModeState(
-            tool=ToolMode.BRUSH,
-            interaction=InteractionMode.DRAWING,
-            passthrough=False,
-            canvas_hidden=False,
-            keyboard_grabbed=False,
-        )
-        self.mode = self._mode_state.tool.value
+        self.mode = "brush"
         self.current_shape: Optional[str] = None
         self.shape_start_point: Optional[QPoint] = None
         self.drawing = False
@@ -3757,12 +2981,7 @@ class OverlayWindow(QWidget):
         self._brush_painter: Optional[QPainter] = None
         self._eraser_painter: Optional[QPainter] = None
         self._last_target_hwnd: Optional[int] = None
-        self._pending_tool_restore: Optional[_PendingToolRestoreState] = None
-        self._scroll_restore_pending = False
-        self._scroll_restore_policy: Optional[str] = None
-        self._scroll_restore_info: Optional[Tuple[str, Optional[str]]] = None
-        self._last_scroll_cursor_inside_toolbar = False
-        self._toolbar_hover_restore: Optional[Tuple[str, Optional[str]]] = None
+        self._pending_tool_restore: Optional[Tuple[str, Optional[str]]] = None
         base_width = float(max(1, self.pen_size))
         self._brush_pen = QPen(
             self.pen_color,
@@ -3784,8 +3003,6 @@ class OverlayWindow(QWidget):
         self.whiteboard_active = False
         self.whiteboard_color = QColor(0, 0, 0, 0); self.last_board_color = QColor("#ffffff")
         self.cursor_pixmap = QPixmap()
-        self._canvas_hidden = False
-        self._mode_canvas_visible = True
         self._eraser_stroker = QPainterPathStroker()
         self._eraser_stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
         self._eraser_stroker.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
@@ -3801,642 +3018,13 @@ class OverlayWindow(QWidget):
         self.history: List[QPixmap] = []
         self._history_limit = 30
         self.toolbar = FloatingToolbar(self, self.settings_manager)
-        self._nav_repeat_timer = QTimer(self)
-        self._nav_repeat_timer.setInterval(120)
-        self._nav_repeat_timer.timeout.connect(self._on_navigation_repeat_timeout)
-        self._nav_repeat_delay_timer = QTimer(self)
-        self._nav_repeat_delay_timer.setSingleShot(True)
-        self._nav_repeat_delay_timer.setInterval(280)
-        self._nav_repeat_delay_timer.timeout.connect(self._start_navigation_repeat)
-        self._nav_active_vk: Optional[int] = None
-        self._nav_passthrough_active = False
-        self._nav_restore_cursor_pos: Optional[QPoint] = None
-        self._nav_restore_timer = QTimer(self)
-        self._nav_restore_timer.setInterval(80)
-        self._nav_restore_timer.timeout.connect(self._check_navigation_restore)
-        self._nav_forced_passthrough = False
-        self._nav_restore_deadline: Optional[float] = None
-        self._nav_direct_keys: Set[int] = set()
-        self._nav_cursor_canvas_override = False
-        self._interaction_mode = "drawing"
-        self._interaction_before_navigation: Optional[str] = None
-        self._navigation_origin: Optional[NavigationOriginState] = None
-        self._navigation_restore_to_cursor = False
-        self.set_mode(ToolMode.BRUSH.value, initial=True)
+        self.set_mode("brush", initial=True)
         self.toolbar.update_undo_state(False)
 
     def raise_toolbar(self) -> None:
         if getattr(self, "toolbar", None) is not None:
             self.toolbar.show()
             self.toolbar.raise_()
-
-    def _is_point_inside_toolbar(self, global_point: QPoint) -> bool:
-        toolbar = getattr(self, "toolbar", None)
-        if toolbar is None or not toolbar.isVisible():
-            return False
-        try:
-            top_left = toolbar.mapToGlobal(QPoint(0, 0))
-        except Exception:
-            return False
-        rect = QRect(top_left, toolbar.size())
-        return rect.contains(global_point)
-
-    def _schedule_tool_restore(
-        self,
-        mode: Optional[str],
-        shape: Optional[str],
-        *,
-        restore_on_move: bool,
-    ) -> None:
-        if mode not in {"brush", "shape", "eraser"}:
-            self._pending_tool_restore = None
-            return
-        tracked_shape = shape if mode == "shape" else None
-        self._pending_tool_restore = _PendingToolRestoreState(
-            mode=mode,
-            shape=tracked_shape,
-            restore_on_move=restore_on_move,
-        )
-
-    def _set_interaction_mode(self, mode: InteractionMode) -> None:
-        if self._interaction_mode != mode.value:
-            self._interaction_mode = mode.value
-
-    def _coerce_tool_mode(self, mode: Optional[Union[str, ToolMode]]) -> Optional[ToolMode]:
-        if not mode:
-            return None
-        if isinstance(mode, ToolMode):
-            return mode
-        try:
-            return ToolMode(str(mode))
-        except ValueError:
-            return None
-
-    def _build_mode_state(self, tool: ToolMode) -> ModeState:
-        passthrough = tool == ToolMode.CURSOR
-        interaction = InteractionMode.CURSOR if tool == ToolMode.CURSOR else InteractionMode.DRAWING
-        canvas_hidden = tool == ToolMode.CURSOR
-        keyboard_grabbed = not passthrough
-        return ModeState(
-            tool=tool,
-            interaction=interaction,
-            passthrough=passthrough,
-            canvas_hidden=canvas_hidden,
-            keyboard_grabbed=keyboard_grabbed,
-        )
-
-    def _snapshot_mode_state(self, template: ModeState) -> ModeState:
-        return ModeState(
-            tool=template.tool,
-            interaction=template.interaction,
-            passthrough=template.passthrough,
-            canvas_hidden=bool(self._canvas_hidden),
-            keyboard_grabbed=bool(self._keyboard_grabbed),
-        )
-
-    def _apply_mode_visibility(
-        self,
-        previous: ModeState,
-        target: ModeState,
-        *,
-        initial: bool = False,
-    ) -> None:
-        self._apply_input_passthrough(target.passthrough)
-        self._set_canvas_hidden(target.canvas_hidden)
-        if target.passthrough:
-            if not self.isVisible():
-                self.show()
-            if not initial:
-                self._release_keyboard_capture()
-            return
-        if not self.isVisible():
-            self.show()
-        self._ensure_keyboard_capture()
-        if initial:
-            return
-
-    def _refresh_mode_visibility(self, *, initial: bool = False) -> None:
-        current_state = getattr(self, "_mode_state", None)
-        if not isinstance(current_state, ModeState):
-            return
-        target_state = self._build_mode_state(current_state.tool)
-        self._apply_mode_visibility(current_state, target_state, initial=initial)
-        self._mode_canvas_visible = not target_state.canvas_hidden
-        self._mode_state = self._snapshot_mode_state(target_state)
-
-    def _event_global_point(self, event: Optional[Any]) -> Optional[QPoint]:
-        if event is None:
-            return self._safe_global_cursor_pos()
-        for attr in ("globalPosition", "globalPos", "globalPosF"):
-            candidate = getattr(event, attr, None)
-            if candidate is None:
-                continue
-            try:
-                value = candidate() if callable(candidate) else candidate
-            except Exception:
-                continue
-            if isinstance(value, QPoint):
-                return QPoint(value)
-            if isinstance(value, QPointF):
-                return value.toPoint()
-        return self._safe_global_cursor_pos()
-
-    def _build_input_context(
-        self,
-        event: Optional[Any],
-        *,
-        force_toolbar: bool = False,
-    ) -> InputContext:
-        global_pos = self._event_global_point(event)
-        inside_toolbar = True if force_toolbar else bool(
-            global_pos and self._is_point_inside_toolbar(global_pos)
-        )
-        return InputContext(
-            global_pos=global_pos,
-            inside_toolbar=inside_toolbar,
-            tool=self._mode_state.tool,
-        )
-
-    def _maybe_restore_tool_for_press(self, context: InputContext) -> None:
-        pending = self._pending_tool_restore
-        if not pending:
-            return
-        if context.tool == ToolMode.CURSOR or self._nav_forced_passthrough:
-            if not context.inside_toolbar:
-                self._restore_pending_tool()
-
-    def _handle_move_restore(self, context: InputContext) -> None:
-        pending = self._pending_tool_restore
-        if not (pending and pending.restore_on_move):
-            return
-        if context.global_pos is None:
-            return
-        self._handle_pointer_navigation_restore(context.global_pos)
-
-    def _prepare_navigation_for_pointer(self, context: InputContext, *, reason: str) -> None:
-        if self._coerce_tool_mode(self.mode) is None:
-            return
-        if reason == "wheel":
-            self.drawing = False
-        self._engage_navigation_for_context(context)
-
-    def _engage_navigation_for_context(self, context: InputContext) -> None:
-        pointer = context.global_pos or self._safe_global_cursor_pos() or QPoint()
-        self._engage_navigation_transition(pointer, inside_toolbar=context.inside_toolbar)
-
-    def _set_navigation_origin(
-        self,
-        mode: ToolMode,
-        shape: Optional[str],
-        *,
-        inside_toolbar: bool,
-    ) -> None:
-        tracked_shape = shape if mode == ToolMode.SHAPE else None
-        self._navigation_origin = NavigationOriginState(
-            mode=mode,
-            shape=tracked_shape,
-            inside_toolbar=inside_toolbar,
-        )
-
-    def _update_navigation_origin_location(self, *, inside_toolbar: bool) -> None:
-        origin = self._navigation_origin
-        if not origin:
-            return
-        self._navigation_origin = NavigationOriginState(
-            mode=origin.mode,
-            shape=origin.shape,
-            inside_toolbar=inside_toolbar,
-        )
-
-    def _clear_navigation_origin(self) -> None:
-        self._navigation_origin = None
-
-    def _navigation_origin_from_toolbar(self) -> bool:
-        origin = self._navigation_origin
-        return bool(origin and origin.inside_toolbar)
-
-    def _engage_navigation_transition(
-        self,
-        pointer: Optional[QPoint],
-        *,
-        inside_toolbar: bool,
-    ) -> None:
-        prev_mode = self._coerce_tool_mode(self.mode)
-        if prev_mode is None:
-            self._clear_navigation_passthrough()
-            return
-        prev_shape = self.current_shape if prev_mode == ToolMode.SHAPE else None
-        if prev_mode in {ToolMode.BRUSH, ToolMode.SHAPE}:
-            self._update_last_tool_snapshot()
-        reference = pointer
-        if reference is None:
-            reference = self._safe_global_cursor_pos()
-        if reference is None:
-            reference = QPoint()
-        restore_on_move = prev_mode != ToolMode.CURSOR and not inside_toolbar
-        self._begin_navigation_passthrough(
-            prev_mode.value,
-            prev_shape,
-            restore_on_move=restore_on_move,
-            cursor_reference=reference,
-            origin_inside_toolbar=inside_toolbar,
-        )
-
-    def _handle_toolbar_navigation_enter(self) -> None:
-        if self.mode == ToolMode.CURSOR.value:
-            return
-        pointer = self._safe_global_cursor_pos() or QPoint()
-        self._engage_navigation_transition(pointer, inside_toolbar=True)
-
-    def _handle_toolbar_navigation_leave(self) -> None:
-        origin = self._navigation_origin
-        if not origin or not origin.inside_toolbar:
-            return
-        if self._pending_tool_restore:
-            self._restore_pending_tool()
-            return
-        if origin.mode == ToolMode.CURSOR:
-            self._clear_navigation_passthrough()
-        elif self._interaction_mode == InteractionMode.NAVIGATION.value:
-            self._clear_navigation_passthrough()
-
-    def handle_toolbar_navigation_wheel(self, event: QWheelEvent) -> bool:
-        if self.mode not in {"brush", "shape", "eraser", "cursor"}:
-            return False
-        self.wheelEvent(event)
-        return event.isAccepted()
-
-    def handle_toolbar_navigation_key_event(
-        self, event: QKeyEvent, *, pressed: bool
-    ) -> bool:
-        if self._interaction_mode != InteractionMode.NAVIGATION.value:
-            return False
-        key_code = int(event.key())
-        if key_code not in self._NAVIGATION_KEY_CODES:
-            return False
-        if pressed:
-            self.keyPressEvent(event)
-        else:
-            self.keyReleaseEvent(event)
-        return event.isAccepted()
-
-    def _schedule_toolbar_navigation_cleanup(self) -> None:
-        if not self._navigation_origin_from_toolbar():
-            return
-        if self._pending_tool_restore:
-            QTimer.singleShot(0, self._restore_pending_tool)
-            return
-        if (
-            self.mode == ToolMode.CURSOR.value
-            and self._interaction_mode == InteractionMode.NAVIGATION.value
-        ):
-            QTimer.singleShot(0, self._clear_navigation_passthrough)
-
-    def _handle_pointer_navigation_restore(self, global_pos: QPoint) -> None:
-        pending = self._pending_tool_restore
-        if not pending or not pending.restore_on_move:
-            return
-        origin = self._navigation_origin
-        if origin and origin.inside_toolbar:
-            pending.restore_on_move = False
-            if self._nav_restore_timer.isActive():
-                self._nav_restore_timer.stop()
-            self._nav_restore_deadline = None
-            return
-        if not (self.mode == ToolMode.CURSOR.value or self._nav_forced_passthrough):
-            return
-        if self._is_point_inside_toolbar(global_pos):
-            pending.restore_on_move = False
-            if self._nav_restore_timer.isActive():
-                self._nav_restore_timer.stop()
-            self._nav_restore_deadline = None
-        else:
-            self._restore_pending_tool()
-
-    def _handle_navigation_key_event(self, event: QKeyEvent) -> None:
-        context = self._build_input_context(event)
-        self._engage_navigation_for_context(context)
-
-    def _handle_navigation_button_trigger(self) -> None:
-        context = self._build_input_context(None, force_toolbar=True)
-        self._engage_navigation_for_context(context)
-
-    @property
-    def navigation_passthrough_active(self) -> bool:
-        return bool(self._nav_passthrough_active)
-
-    def _safe_global_cursor_pos(self) -> Optional[QPoint]:
-        try:
-            return QCursor.pos()
-        except Exception:
-            return None
-
-    _NAVIGATION_KEY_CODES: Set[int] = {
-        int(Qt.Key.Key_Up),
-        int(Qt.Key.Key_Down),
-        int(Qt.Key.Key_Left),
-        int(Qt.Key.Key_Right),
-        int(Qt.Key.Key_PageUp),
-        int(Qt.Key.Key_PageDown),
-        int(Qt.Key.Key_Space),
-        int(Qt.Key.Key_Return),
-        int(Qt.Key.Key_Enter),
-    }
-
-    _NAVIGATION_QT_TO_VK: Dict[int, int] = {
-        int(Qt.Key.Key_Up): VK_UP,
-        int(Qt.Key.Key_Down): VK_DOWN,
-        int(Qt.Key.Key_Left): VK_LEFT,
-        int(Qt.Key.Key_Right): VK_RIGHT,
-        int(Qt.Key.Key_PageUp): VK_PRIOR,
-        int(Qt.Key.Key_PageDown): VK_NEXT,
-        int(Qt.Key.Key_Space): VK_SPACE,
-        int(Qt.Key.Key_Return): VK_RETURN,
-        int(Qt.Key.Key_Enter): VK_RETURN,
-    }
-
-    _NAVIGATION_WHEEL_MAP: Dict[int, int] = {
-        VK_UP: WHEEL_DELTA,
-        VK_LEFT: WHEEL_DELTA,
-        VK_PRIOR: WHEEL_DELTA,
-        VK_DOWN: -WHEEL_DELTA,
-        VK_RIGHT: -WHEEL_DELTA,
-        VK_NEXT: -WHEEL_DELTA,
-        VK_SPACE: -WHEEL_DELTA,
-        VK_RETURN: -WHEEL_DELTA,
-    }
-
-    def _begin_navigation_passthrough(
-        self,
-        prev_mode: str,
-        prev_shape: Optional[str],
-        *,
-        restore_on_move: bool,
-        cursor_reference: Optional[QPoint] = None,
-        origin_inside_toolbar: Optional[bool] = None,
-    ) -> None:
-        tool_mode = self._coerce_tool_mode(prev_mode)
-        if tool_mode is None:
-            self._clear_navigation_passthrough()
-            return
-        inside_toolbar = (
-            bool(origin_inside_toolbar)
-            if origin_inside_toolbar is not None
-            else not restore_on_move
-        )
-        if (
-            self._nav_passthrough_active
-            and self._navigation_origin_mode == prev_mode
-            and self._navigation_origin_inside_toolbar == inside_toolbar
-            and (
-                prev_mode != "shape"
-                or self._navigation_origin_shape == (prev_shape if prev_mode == "shape" else None)
-            )
-        ):
-            if prev_mode == "cursor" and self._canvas_hidden:
-                self._nav_cursor_canvas_override = True
-                self._set_canvas_hidden(False)
-            if cursor_reference is not None:
-                self._nav_restore_cursor_pos = QPoint(cursor_reference)
-            return
-
-        self._set_navigation_origin(tool_mode, prev_shape, inside_toolbar=inside_toolbar)
-        if not self._nav_passthrough_active:
-            self._interaction_before_navigation = self._interaction_mode
-        # 保持光标模式的交互状态，避免在光标场景下误切换为导航模式。
-        self._interaction_mode = (
-            InteractionMode.NAVIGATION.value
-            if prev_mode != ToolMode.CURSOR.value
-            else InteractionMode.CURSOR.value
-        )
-        self._navigation_origin_mode = prev_mode
-        self._navigation_origin_shape = prev_shape if prev_mode == "shape" else None
-        self._navigation_origin_inside_toolbar = inside_toolbar
-        restore_cursor_passthrough = prev_mode == "cursor" and not self.whiteboard_active
-        self._navigation_restore_to_cursor = restore_cursor_passthrough
-        self._nav_passthrough_active = True
-        if cursor_reference is not None:
-            self._nav_restore_cursor_pos = QPoint(cursor_reference)
-        else:
-            pos = self._safe_global_cursor_pos()
-            self._nav_restore_cursor_pos = QPoint(pos) if isinstance(pos, QPoint) else pos
-        nav_from_drawing = prev_mode != "cursor"
-        needs_transparent_state = nav_from_drawing or restore_cursor_passthrough
-        was_transparent = False
-        if needs_transparent_state:
-            was_transparent = self.testAttribute(
-                Qt.WidgetAttribute.WA_TransparentForMouseEvents
-            ) or bool(
-                self.windowFlags()
-                & Qt.WindowType.WindowTransparentForInput
-            )
-        if nav_from_drawing:
-            if was_transparent:
-                self._apply_input_passthrough(False)
-            self._nav_forced_passthrough = True
-            if not self._keyboard_grabbed:
-                self._ensure_keyboard_capture()
-        else:
-            self._nav_forced_passthrough = False
-            if restore_cursor_passthrough:
-                if was_transparent:
-                    self._apply_input_passthrough(False)
-                if not self._keyboard_grabbed:
-                    self._ensure_keyboard_capture()
-        if prev_mode == "cursor":
-            should_restore_canvas = bool(self._canvas_hidden) or self._nav_cursor_canvas_override
-            self._nav_cursor_canvas_override = should_restore_canvas
-            if should_restore_canvas and self._canvas_hidden:
-                self._set_canvas_hidden(False)
-            restore_mode, restore_shape = self._cursor_navigation_restore_target()
-            if restore_mode:
-                self._schedule_tool_restore(
-                    restore_mode,
-                    restore_shape,
-                    restore_on_move=False,
-                )
-            else:
-                self._pending_tool_restore = None
-            self._nav_restore_timer.stop()
-        else:
-            self._nav_cursor_canvas_override = False
-            self._schedule_tool_restore(prev_mode, prev_shape, restore_on_move=restore_on_move)
-            pending = self._pending_tool_restore
-            if restore_on_move and pending:
-                if self._nav_restore_cursor_pos is None:
-                    pos = self._safe_global_cursor_pos()
-                    self._nav_restore_cursor_pos = QPoint(pos) if isinstance(pos, QPoint) else pos
-                self._nav_restore_deadline = time.monotonic() + NAVIGATION_RESTORE_TIMEOUT
-                if not self._nav_restore_timer.isActive():
-                    self._nav_restore_timer.start()
-            else:
-                self._nav_restore_deadline = None
-                self._nav_restore_timer.stop()
-        self.update_toolbar_state()
-
-    def _is_passthrough_enabled(self) -> bool:
-        try:
-            attr_passthrough = self.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        except Exception:
-            attr_passthrough = False
-        window_passthrough = False
-        if hasattr(Qt.WindowType, "WindowTransparentForInput"):
-            try:
-                window_passthrough = self._has_window_input_passthrough()
-            except Exception:
-                window_passthrough = False
-        return bool(attr_passthrough or window_passthrough)
-
-    @contextlib.contextmanager
-    def _navigation_input_transfer(self):
-        original_passthrough = self._is_passthrough_enabled()
-        had_keyboard = self._keyboard_grabbed
-        if original_passthrough:
-            if had_keyboard:
-                self._release_keyboard_capture()
-        else:
-            self._apply_input_passthrough(True)
-        try:
-            yield
-        finally:
-            if original_passthrough:
-                if had_keyboard and not self._keyboard_grabbed and self.mode != "cursor":
-                    self._ensure_keyboard_capture()
-            else:
-                self._apply_input_passthrough(False)
-                if had_keyboard and self.mode != "cursor":
-                    self._ensure_keyboard_capture()
-                if self.mode != "cursor":
-                    self.update()
-
-    def _clear_navigation_passthrough(self) -> None:
-        self._nav_passthrough_active = False
-        self._nav_restore_cursor_pos = None
-        if self._nav_restore_timer.isActive():
-            self._nav_restore_timer.stop()
-        self._nav_restore_deadline = None
-        if self._nav_forced_passthrough and self.mode != ToolMode.CURSOR.value:
-            self._apply_input_passthrough(False)
-            self._ensure_keyboard_capture()
-        restore_cursor_passthrough = (
-            self._navigation_restore_to_cursor
-            and self.mode == "cursor"
-            and not self.whiteboard_active
-        )
-        self._nav_forced_passthrough = False
-        previous = self._interaction_before_navigation
-        if previous in {InteractionMode.DRAWING.value, InteractionMode.CURSOR.value}:
-            self._interaction_mode = previous
-        elif self.mode == ToolMode.CURSOR.value:
-            self._set_interaction_mode(InteractionMode.CURSOR)
-        else:
-            self._set_interaction_mode(InteractionMode.DRAWING)
-        self._interaction_before_navigation = None
-        self._navigation_origin_mode = None
-        self._navigation_origin_shape = None
-        self._navigation_origin_inside_toolbar = False
-        self._clear_navigation_origin()
-        if restore_cursor_passthrough:
-            self._apply_input_passthrough(True)
-        self._navigation_restore_to_cursor = False
-        if self._nav_cursor_canvas_override and self.mode == ToolMode.CURSOR.value:
-            self._set_canvas_hidden(True)
-        self._nav_cursor_canvas_override = False
-        self.update_toolbar_state()
-
-    def _check_navigation_restore(self) -> None:
-        pending = self._pending_tool_restore
-        if pending and pending.restore_on_move and self._navigation_origin_from_toolbar():
-            pending.restore_on_move = False
-            self._nav_restore_timer.stop()
-            self._nav_restore_deadline = None
-            return
-        if not (
-            self._nav_passthrough_active
-            and pending
-            and pending.restore_on_move
-            and not self._navigation_origin_from_toolbar()
-            and (self.mode == ToolMode.CURSOR.value or self._nav_forced_passthrough)
-        ):
-            if not (pending and pending.restore_on_move):
-                self._nav_restore_timer.stop()
-                self._nav_restore_deadline = None
-            return
-        current_pos = self._safe_global_cursor_pos()
-        if current_pos is None:
-            self._nav_restore_timer.stop()
-            self._nav_restore_deadline = None
-            self._restore_pending_tool()
-            return
-        if self._nav_restore_cursor_pos is None:
-            self._nav_restore_cursor_pos = QPoint(current_pos)
-            return
-        if current_pos == self._nav_restore_cursor_pos:
-            deadline = self._nav_restore_deadline
-            if deadline is not None and time.monotonic() >= deadline:
-                self._nav_restore_timer.stop()
-                self._nav_restore_deadline = None
-                self._restore_pending_tool()
-            return
-        if self._is_point_inside_toolbar(current_pos):
-            pending.restore_on_move = False
-            self._nav_restore_timer.stop()
-            self._nav_restore_deadline = None
-            return
-        self._nav_restore_deadline = None
-        self._restore_pending_tool()
-
-    def _restore_pending_tool(self) -> None:
-        pending = self._pending_tool_restore
-        if not pending:
-            return
-        self._pending_tool_restore = None
-        self._clear_navigation_passthrough()
-        self._restore_last_tool(pending.mode, shape_type=pending.shape)
-
-    def _after_navigation_wheel(self, event: QWheelEvent) -> None:
-        if self.whiteboard_active:
-            return
-        prev_mode = self.mode
-        if prev_mode not in {"brush", "shape", "eraser", "cursor"}:
-            return
-        prev_shape = self.current_shape if prev_mode == "shape" else None
-        if prev_mode in {"brush", "shape"}:
-            self._update_last_tool_snapshot()
-        try:
-            global_pos = event.globalPosition().toPoint()
-        except Exception:
-            fallback = self._safe_global_cursor_pos()
-            global_pos = fallback if fallback is not None else QPoint()
-        inside_toolbar = self._is_point_inside_toolbar(global_pos)
-        restore_on_move = prev_mode != "cursor" and not inside_toolbar
-        self.drawing = False
-        self._begin_navigation_passthrough(
-            prev_mode,
-            prev_shape,
-            restore_on_move=restore_on_move,
-            cursor_reference=global_pos,
-            origin_inside_toolbar=inside_toolbar,
-        )
-
-    def _after_navigation_key(self, event: QKeyEvent) -> None:
-        if self.whiteboard_active:
-            return
-        key_code = int(event.key())
-        if key_code not in self._NAVIGATION_KEY_CODES:
-            return
-        modifiers = event.modifiers()
-        if modifiers & (
-            Qt.KeyboardModifier.ControlModifier
-            | Qt.KeyboardModifier.AltModifier
-            | Qt.KeyboardModifier.MetaModifier
-        ):
-            return
-        prev_mode = self.mode
-        if prev_mode not in {"brush", "shape", "eraser", "cursor"}:
-            return
-        context = self._build_input_context(event)
-        self._engage_navigation_for_context(context)
 
     def _build_scene(self) -> None:
         virtual = QRect()
@@ -4445,7 +3033,6 @@ class OverlayWindow(QWidget):
         self.setGeometry(virtual)
         self.canvas = QPixmap(self.size()); self.canvas.fill(Qt.GlobalColor.transparent)
         self.temp_canvas = QPixmap(self.size()); self.temp_canvas.fill(Qt.GlobalColor.transparent)
-        self._canvas_hidden = False
 
     # ---- ͼ��ͼ����� ----
     def _ensure_brush_painter(self) -> QPainter:
@@ -4478,15 +3065,6 @@ class OverlayWindow(QWidget):
     def _release_canvas_painters(self) -> None:
         self._release_brush_painter()
         self._release_eraser_painter()
-
-    def _set_canvas_hidden(self, hidden: bool) -> None:
-        """Switch rendering visibility for the main canvas without losing content."""
-        hidden = bool(hidden)
-        if hidden == self._canvas_hidden and self._mode_canvas_visible == (not hidden):
-            return
-        self._canvas_hidden = hidden
-        self._mode_canvas_visible = not hidden
-        self.update()
 
     def _update_brush_pen_appearance(self, width: float, fade_alpha: int) -> None:
         width = max(0.6, float(width))
@@ -4528,7 +3106,7 @@ class OverlayWindow(QWidget):
                 if self._forwarder:
                     self._forwarder.clear_cached_target()
                 self.toolbar.update_whiteboard_button_state(True)
-                self._refresh_mode_visibility(initial=False)
+                self._update_visibility_for_mode(initial=False)
                 self.raise_toolbar()
                 self.update()
 
@@ -4537,53 +3115,31 @@ class OverlayWindow(QWidget):
         self.whiteboard_color = self.last_board_color if self.whiteboard_active else QColor(0, 0, 0, 0)
         if self._forwarder and self.whiteboard_active:
             self._forwarder.clear_cached_target()
-        self._refresh_mode_visibility(initial=False)
+        self._update_visibility_for_mode(initial=False)
         self.raise_toolbar()
         self.toolbar.update_whiteboard_button_state(self.whiteboard_active)
         self.update()
 
-    def set_mode(
-        self,
-        mode: Union[str, ToolMode],
-        shape_type: Optional[str] = None,
-        *,
-        initial: bool = False,
-    ) -> None:
-        target_mode = self._coerce_tool_mode(mode)
-        if target_mode is None:
-            return
-        prev_state = getattr(self, "_mode_state", None)
-        if not isinstance(prev_state, ModeState):
-            prev_state = self._build_mode_state(target_mode)
-        if target_mode != ToolMode.CURSOR or self._nav_passthrough_active:
-            self._clear_navigation_passthrough()
-        if prev_state.tool != target_mode:
+    def set_mode(self, mode: str, shape_type: Optional[str] = None, *, initial: bool = False) -> None:
+        prev_mode = getattr(self, "mode", None)
+        if prev_mode != mode:
             self._release_canvas_painters()
-        focus_on_cursor = bool(self._forwarder) and target_mode == ToolMode.CURSOR and not initial
-        state_template = self._build_mode_state(target_mode)
-        self.mode = state_template.tool.value
-        if state_template.interaction == InteractionMode.CURSOR:
-            self._set_interaction_mode(InteractionMode.CURSOR)
-            self._clear_navigation_origin()
-            self._navigation_restore_to_cursor = False
-        else:
-            self._set_interaction_mode(InteractionMode.DRAWING)
+        focus_on_cursor = bool(self._forwarder) and mode == "cursor" and not initial
+        self.mode = mode
         if not self._restoring_tool:
             self._pending_tool_restore = None
-        if shape_type is not None or state_template.tool != ToolMode.SHAPE:
+        if shape_type is not None or mode != "shape":
             self.current_shape = shape_type
-        if state_template.tool != ToolMode.SHAPE:
+        if mode != "shape":
             self.shape_start_point = None
             self._last_preview_bounds = None
-        if state_template.tool != ToolMode.ERASER:
+        if self.mode != "eraser":
             self._eraser_last_point = None
-        if self._forwarder and state_template.tool == ToolMode.CURSOR:
+        if self._forwarder and mode == "cursor":
             self._forwarder.clear_cached_target()
-        if state_template.tool in {ToolMode.BRUSH, ToolMode.SHAPE} and not self._restoring_tool:
+        if self.mode in {"brush", "shape"} and not self._restoring_tool:
             self._update_last_tool_snapshot()
-        self._apply_mode_visibility(prev_state, state_template, initial=initial)
-        self._mode_canvas_visible = not state_template.canvas_hidden
-        self._mode_state = self._snapshot_mode_state(state_template)
+        self._update_visibility_for_mode(initial=initial)
         if focus_on_cursor and self._forwarder:
             self._forwarder.focus_presentation_window()
         if not initial:
@@ -4594,50 +3150,17 @@ class OverlayWindow(QWidget):
     def update_toolbar_state(self) -> None:
         if not getattr(self, 'toolbar', None):
             return
-        interaction = getattr(self, "_interaction_mode", InteractionMode.DRAWING.value)
-        navigation_from_cursor = (
-            interaction == InteractionMode.NAVIGATION.value
-            and self._navigation_origin is not None
-            and self._navigation_origin.mode == ToolMode.CURSOR
-        )
-        highlight_mode: Optional[str] = None
-        if (
-            interaction == InteractionMode.NAVIGATION.value
-            and navigation_from_cursor
-        ):
-            restore_mode, _ = self._cursor_navigation_restore_target()
-            highlight_mode = restore_mode if restore_mode is not None else ""
-        self.toolbar.update_tool_states(
-            self.mode,
-            interaction,
-            self.pen_color,
-            navigation_from_cursor=navigation_from_cursor,
-            highlight_mode=highlight_mode,
-        )
+        self.toolbar.update_tool_states(self.mode, self.pen_color)
 
     def _update_last_tool_snapshot(self) -> None:
         if self.pen_color.isValid():
             self._last_brush_color = QColor(self.pen_color)
         if self.pen_size > 0:
             self._last_brush_size = max(1, int(self.pen_size))
-        if self.mode in {ToolMode.BRUSH.value, ToolMode.SHAPE.value}:
+        if self.mode in {"brush", "shape"}:
             self._last_draw_mode = self.mode
-            if self.mode == ToolMode.SHAPE.value:
+            if self.mode == "shape":
                 self._last_shape_type = self.current_shape
-
-    def _cursor_navigation_restore_target(self) -> Tuple[Optional[str], Optional[str]]:
-        last_mode = getattr(self, "_last_draw_mode", None)
-        restore_mode: Optional[str]
-        restore_shape: Optional[str] = None
-        if last_mode in {"brush", "shape", "eraser"}:
-            restore_mode = last_mode
-            if restore_mode == "shape":
-                restore_shape = self._last_shape_type or self.current_shape
-        else:
-            restore_mode = "brush"
-        if restore_mode == "shape" and not restore_shape:
-            restore_shape = self.current_shape or self._last_shape_type
-        return restore_mode, restore_shape
 
     def _restore_last_tool(self, preferred_mode: Optional[str] = None, *, shape_type: Optional[str] = None) -> None:
         self._pending_tool_restore = None
@@ -4665,32 +3188,19 @@ class OverlayWindow(QWidget):
 
     def toggle_eraser_mode(self) -> None:
         """切换橡皮模式；再次点击会恢复上一次的画笔配置。"""
-        if self.mode == ToolMode.ERASER.value:
+        if self.mode == "eraser":
             self._restore_last_tool()
         else:
             self._update_last_tool_snapshot()
-            self.set_mode(ToolMode.ERASER.value)
+            self.set_mode("eraser")
 
     def toggle_cursor_mode(self) -> None:
-        """切换光标模式；再次点击在光标与导航之间切换。"""
+        """切换光标模式；再次点击恢复最近的画笔或图形设置。"""
         if self.mode == "cursor":
-            pointer = self._safe_global_cursor_pos() or QPoint()
-            if (
-                self._interaction_mode == "navigation"
-                and self._navigation_origin_mode == "cursor"
-            ):
-                self._clear_navigation_passthrough()
-            else:
-                self._begin_navigation_passthrough(
-                    "cursor",
-                    None,
-                    restore_on_move=False,
-                    cursor_reference=pointer,
-                    origin_inside_toolbar=self._is_point_inside_toolbar(pointer),
-                )
+            self._restore_last_tool()
             return
         self._update_last_tool_snapshot()
-        self.set_mode(ToolMode.CURSOR.value)
+        self.set_mode("cursor")
 
     def go_to_next_slide(self) -> None:
         self._send_slide_virtual_key(VK_DOWN)
@@ -4698,217 +3208,93 @@ class OverlayWindow(QWidget):
     def go_to_previous_slide(self) -> None:
         self._send_slide_virtual_key(VK_UP)
 
-    def _send_slide_virtual_key(
-        self, vk_code: int, *, repeated: bool = False, engaged: bool = False
-    ) -> bool:
-        if self.whiteboard_active:
-            return False
+    def _send_slide_virtual_key(self, vk_code: int) -> None:
         if vk_code == 0:
-            return False
-        if repeated:
-            success, had_grab = self._dispatch_navigation_session(vk_code=vk_code)
-            if success and self.mode != ToolMode.CURSOR.value and not had_grab:
-                QTimer.singleShot(100, self._ensure_keyboard_capture)
-            if not success:
-                self._pending_tool_restore = None
-                self._clear_navigation_passthrough()
-            return success
-        if not engaged:
-            if self._coerce_tool_mode(self.mode) is None:
-                return False
-            context = self._build_input_context(None)
-            self._engage_navigation_for_context(context)
-        success, had_grab = self._dispatch_navigation_session(vk_code=vk_code)
+            return
+        prev_mode = self.mode
+        prev_shape = self.current_shape if prev_mode == "shape" else None
+        if prev_mode in {"brush", "shape"}:
+            self._update_last_tool_snapshot()
+        with self._temporarily_release_keyboard() as had_keyboard_grab:
+            success = self._dispatch_virtual_key(vk_code)
+        self._pending_tool_restore = None
         if not success:
-            self._pending_tool_restore = None
-            self._clear_navigation_passthrough()
-            return False
-        if self.mode != ToolMode.CURSOR.value and not had_grab:
-            QTimer.singleShot(100, self._ensure_keyboard_capture)
-        self.raise_toolbar()
-        return True
-
-    def handle_navigation_button_press(self, direction: str) -> None:
-        self._nav_repeat_delay_timer.stop()
-        self._nav_repeat_timer.stop()
-        if self.whiteboard_active:
-            self._nav_active_vk = None
             return
-        vk_code = VK_DOWN if direction.lower() == "down" else VK_UP
-        self._handle_navigation_button_trigger()
-        if self._send_slide_virtual_key(vk_code, engaged=True):
-            self._nav_active_vk = vk_code
-            self._nav_repeat_delay_timer.start()
-        else:
-            self._nav_active_vk = None
-            self._nav_repeat_delay_timer.stop()
-            self._nav_repeat_timer.stop()
-
-    def handle_navigation_button_release(self) -> None:
-        self._nav_repeat_delay_timer.stop()
-        self._nav_repeat_timer.stop()
-        self._nav_active_vk = None
-        pending = self._pending_tool_restore
-        if pending:
+        if not had_keyboard_grab and self.mode != "cursor":
+            self._ensure_keyboard_capture()
+        restore_mode = prev_mode if prev_mode in {"brush", "shape", "eraser"} else None
+        if prev_mode != "cursor" and restore_mode:
             if getattr(self, "toolbar", None) is not None and self.toolbar.underMouse():
-                return
-            self._restore_pending_tool()
-        elif (
-            self._interaction_mode == InteractionMode.NAVIGATION.value
-            and self.mode == ToolMode.CURSOR.value
-        ):
-            self._clear_navigation_passthrough()
-
-    def _start_navigation_repeat(self) -> None:
-        if self._nav_active_vk is None:
-            return
-        if not self._nav_repeat_timer.isActive():
-            self._nav_repeat_timer.start()
-
-    def _on_navigation_repeat_timeout(self) -> None:
-        vk_code = self._nav_active_vk
-        if vk_code is None:
-            self._nav_repeat_timer.stop()
-            return
-        if not self._send_slide_virtual_key(vk_code, repeated=True):
-            self._nav_repeat_timer.stop()
-            self._nav_active_vk = None
-
-    def _navigation_wheel_delta(self, vk_code: int) -> int:
-        return self._NAVIGATION_WHEEL_MAP.get(vk_code, 0)
-
-    def _send_navigation_wheel_message_only(self, delta: int) -> bool:
-        if delta == 0 or self._forwarder is None:
-            return False
-        try:
-            return self._forwarder.send_navigation_wheel_message(delta)
-        except Exception:
-            return False
-
-    def _send_navigation_wheel(
-        self,
-        vk_code: int,
-        delta: int,
-        *,
-        injection_only: bool = False,
-    ) -> bool:
-        if delta == 0:
-            return False
-        delivered = False
-        if self._forwarder is not None:
-            try:
-                delivered = self._forwarder.send_navigation_wheel(
-                    delta,
-                    injection_only=injection_only,
-                )
-            except Exception:
-                delivered = False
-            if delivered:
-                return True
-            if not injection_only:
-                try:
-                    if self._forwarder.get_last_target_role() == "document":
-                        delivered = self._forwarder.send_document_scroll_for_vk(vk_code)
-                except Exception:
-                    delivered = False
-                if delivered:
-                    return True
-        focused = self._focus_presentation_window_fallback()
-        if not focused:
-            self._focus_presentation_window_fallback()
-        return self._fallback_scroll_with_wheel(delta)
-
-    def _send_virtual_key_direct(self, vk_code: int) -> bool:
-        if vk_code == 0:
-            return False
-        if self._forwarder is not None:
-            try:
-                delivered = self._forwarder.send_virtual_key(vk_code)
-            except Exception:
-                delivered = False
+                self._pending_tool_restore = (restore_mode, prev_shape)
             else:
-                if delivered:
-                    return True
-            try:
-                self._forwarder.clear_cached_target()
-            except Exception:
-                pass
-        self._focus_presentation_window_fallback()
-        return self._fallback_send_virtual_key(vk_code)
+                self._pending_tool_restore = None
+                self._restore_last_tool(restore_mode, shape_type=prev_shape)
+        else:
+            self._pending_tool_restore = None
+        self.raise_toolbar()
 
     def _dispatch_virtual_key(self, vk_code: int) -> bool:
         if vk_code == 0:
             return False
-        wheel_delta = self._navigation_wheel_delta(vk_code)
-        with self._navigation_input_transfer():
-            success = self._perform_navigation_dispatch(
-                vk_code,
-                wheel_delta=wheel_delta,
-                prefer_scroll=bool(wheel_delta),
-            )
+        success = False
+        if self._forwarder is not None:
+            qt_key_map = {
+                VK_UP: Qt.Key.Key_Up,
+                VK_DOWN: Qt.Key.Key_Down,
+                VK_LEFT: Qt.Key.Key_Left,
+                VK_RIGHT: Qt.Key.Key_Right,
+            }
+            qt_key = qt_key_map.get(vk_code)
+            if qt_key is not None:
+                press_event = QKeyEvent(QEvent.Type.KeyPress, qt_key, Qt.KeyboardModifier.NoModifier)
+                release_event = QKeyEvent(QEvent.Type.KeyRelease, qt_key, Qt.KeyboardModifier.NoModifier)
+                press_ok = self._forwarder.forward_key(press_event, is_press=True)
+                release_ok = self._forwarder.forward_key(release_event, is_press=False) if press_ok else False
+                if press_ok and release_ok:
+                    success = True
+            if not success:
+                target_hwnd = self._forwarder.get_presentation_target()
+                focus_ok = False
+                if target_hwnd:
+                    try:
+                        focus_ok = self._forwarder.focus_presentation_window()
+                    except Exception:
+                        focus_ok = False
+                    if not focus_ok:
+                        try:
+                            if self._forwarder.bring_target_to_foreground(target_hwnd):
+                                QApplication.processEvents()
+                                time.sleep(0.05)
+                                focus_ok = True
+                        except Exception:
+                            focus_ok = False
+                else:
+                    self._forwarder.clear_cached_target()
+                success = self._forwarder.send_virtual_key(vk_code)
+                if not success:
+                    self._forwarder.clear_cached_target()
+        if not success:
+            self._focus_presentation_window_fallback()
+            success = self._fallback_send_virtual_key(vk_code)
         if success and self.mode != "cursor":
             QTimer.singleShot(100, self._ensure_keyboard_capture)
         return success
 
     def cancel_pending_tool_restore(self) -> None:
         self._pending_tool_restore = None
-        self._clear_navigation_passthrough()
-
-    def on_toolbar_mouse_enter(self) -> None:
-        if self.mode == ToolMode.CURSOR.value:
-            self.raise_toolbar()
-            return
-        if self._interaction_mode != InteractionMode.NAVIGATION.value:
-            self._handle_toolbar_navigation_enter()
-        else:
-            if self._pending_tool_restore:
-                self._pending_tool_restore.restore_on_move = False
-                if self._nav_restore_timer.isActive():
-                    self._nav_restore_timer.stop()
-                self._nav_restore_deadline = None
-            self._update_navigation_origin_location(inside_toolbar=True)
-        self.raise_toolbar()
 
     def on_toolbar_mouse_leave(self) -> None:
-        self._nav_repeat_delay_timer.stop()
-        self._nav_repeat_timer.stop()
-        self._nav_active_vk = None
+        if not self._pending_tool_restore:
+            return
         if getattr(self, "toolbar", None) is not None and self.toolbar.underMouse():
             return
-        if self._interaction_mode != InteractionMode.NAVIGATION.value:
-            return
-        self._handle_toolbar_navigation_leave()
-
-    def _fallback_scroll_with_wheel(self, delta: int) -> bool:
-        if delta == 0:
-            return False
-        if win32api is not None and win32con is not None:
-            try:
-                win32api.mouse_event(win32con.MOUSEEVENTF_WHEEL, 0, 0, delta, 0)
-                return True
-            except Exception:
-                pass
-        if _USER32 is None:
-            return False
-        try:
-            _USER32.mouse_event(0x0800, 0, 0, delta, 0)
-            return True
-        except Exception:
-            return False
+        mode, shape = self._pending_tool_restore
+        self._pending_tool_restore = None
+        self._restore_last_tool(mode, shape_type=shape)
 
     def _fallback_send_virtual_key(self, vk_code: int) -> bool:
         if vk_code == 0 or _USER32 is None:
             return False
-        if self._forwarder and self._forwarder.get_last_target_role() == "document":
-            if self._forwarder.send_document_scroll_for_vk(vk_code):
-                return True
-        wheel_delta = 0
-        if vk_code in {VK_UP, VK_PRIOR}:
-            wheel_delta = WHEEL_DELTA
-        elif vk_code in {VK_DOWN, VK_NEXT}:
-            wheel_delta = -WHEEL_DELTA
-        if wheel_delta and self._fallback_scroll_with_wheel(wheel_delta):
-            return True
         try:
             scan_code = _USER32.MapVirtualKeyW(vk_code, 0) if hasattr(_USER32, "MapVirtualKeyW") else 0
         except Exception:
@@ -4971,40 +3357,13 @@ class OverlayWindow(QWidget):
         return rect.adjusted(-margin, -margin, margin, margin)
 
     # ---- 系统级穿透 ----
-    def _has_window_input_passthrough(self) -> bool:
-        """Return whether the overlay currently ignores input at the window level."""
-        try:
-            flag_value = Qt.WindowType.WindowTransparentForInput
-        except AttributeError:
-            return False
-        try:
-            flags = self.windowFlags()
-        except Exception:
-            return False
-        try:
-            flags_int = int(flags)
-        except (TypeError, ValueError):
-            try:
-                flags_int = int(Qt.WindowType(flags))
-            except Exception:
-                return False
-        return bool(flags_int & int(flag_value))
-
     def _apply_input_passthrough(self, enabled: bool) -> None:
-        """Toggle system-level input passthrough for cursor/navigation mode."""
-        attr_changed = self.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents) != enabled
-        if attr_changed:
-            self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, enabled)
-        flag_supported = hasattr(Qt.WindowType, "WindowTransparentForInput")
-        flag_changed = False
-        if flag_supported:
-            has_flag = self._has_window_input_passthrough()
-            if has_flag != enabled:
-                self.setWindowFlag(Qt.WindowType.WindowTransparentForInput, enabled)
-                flag_changed = True
-        if enabled and self._keyboard_grabbed:
+        # Toggle input passthrough flags and force a refresh
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, enabled)
+        self.setWindowFlag(Qt.WindowType.WindowTransparentForInput, enabled)
+        if enabled:
             self._release_keyboard_capture()
-        if (attr_changed or flag_changed) and self.isVisible():
+        if self.isVisible():
             super().show()  # Force Qt to apply the new flags
 
     def _ensure_keyboard_capture(self) -> None:
@@ -5041,178 +3400,6 @@ class OverlayWindow(QWidget):
             if had_keyboard_grab:
                 self._ensure_keyboard_capture()
 
-    @contextlib.contextmanager
-    def _navigation_injection_guard(self):
-        """Maintain keyboard grab state while navigation events are dispatched."""
-        had_keyboard_grab = self._keyboard_grabbed
-        try:
-            yield had_keyboard_grab
-        finally:
-            if had_keyboard_grab and not self._keyboard_grabbed:
-                self._ensure_keyboard_capture()
-
-    def _extract_wheel_delta(self, event: Optional[QWheelEvent]) -> int:
-        if event is None:
-            return 0
-        delta = 0
-        try:
-            angle_delta = event.angleDelta()
-        except Exception:
-            angle_delta = QPoint()
-        if isinstance(angle_delta, QPoint):
-            delta = int(angle_delta.y() or angle_delta.x() or 0)
-        if delta == 0:
-            try:
-                pixel_delta = event.pixelDelta()
-            except Exception:
-                pixel_delta = QPoint()
-            if isinstance(pixel_delta, QPoint):
-                delta = int(pixel_delta.y() or pixel_delta.x() or 0)
-        return delta
-
-    def _forward_wheel_event(self, event: QWheelEvent) -> bool:
-        delivered = False
-        if self._forwarder is not None:
-            try:
-                delivered = self._forwarder.forward_wheel(event)
-            except Exception:
-                delivered = False
-            if delivered:
-                return True
-            try:
-                self._forwarder.clear_cached_target()
-            except Exception:
-                pass
-        delta = self._extract_wheel_delta(event)
-        if delta == 0:
-            return False
-        focused = self._focus_presentation_window_fallback()
-        if not focused:
-            self._focus_presentation_window_fallback()
-        return self._fallback_scroll_with_wheel(delta)
-
-    def _perform_navigation_dispatch(
-        self,
-        vk_code: Optional[int],
-        *,
-        wheel_delta: int,
-        prefer_scroll: bool,
-    ) -> bool:
-        if vk_code is None or vk_code == 0:
-            return False
-        attempts: List[Callable[[], bool]] = []
-        added_attempts: Set[Tuple[Any, ...]] = set()
-
-        def add_attempt(key: Tuple[Any, ...], func: Callable[[], bool]) -> None:
-            if key in added_attempts:
-                return
-            added_attempts.add(key)
-            attempts.append(func)
-
-        if wheel_delta and prefer_scroll:
-            add_attempt(
-                ("wheel_message", wheel_delta),
-                lambda delta=wheel_delta: self._send_navigation_wheel_message_only(delta),
-            )
-            add_attempt(
-                ("wheel_injection", vk_code, wheel_delta, True),
-                lambda code=vk_code, delta=wheel_delta: self._send_navigation_wheel(
-                    code,
-                    delta,
-                    injection_only=True,
-                ),
-            )
-
-        if wheel_delta:
-            add_attempt(
-                ("wheel_injection", vk_code, wheel_delta, False),
-                lambda code=vk_code, delta=wheel_delta: self._send_navigation_wheel(
-                    code,
-                    delta,
-                ),
-            )
-
-        add_attempt(
-            ("virtual_key", vk_code),
-            lambda code=vk_code: self._send_virtual_key_direct(code),
-        )
-
-        for attempt in attempts:
-            try:
-                delivered = attempt()
-            except Exception:
-                delivered = False
-            if delivered:
-                return True
-        return False
-
-    @dataclass
-    class _NavigationActionSession:
-        overlay: "OverlayWindow"
-        vk_code: Optional[int]
-        wheel_delta: int
-        wheel_event: Optional[QWheelEvent]
-        prefer_scroll: bool
-        had_keyboard_grab: bool
-        success: bool = False
-
-        def execute(self) -> bool:
-            if self.wheel_event is not None:
-                self.success = self.overlay._forward_wheel_event(self.wheel_event)
-                return self.success
-            if self.vk_code is None:
-                self.success = False
-                return False
-            self.success = self.overlay._perform_navigation_dispatch(
-                self.vk_code,
-                wheel_delta=self.wheel_delta,
-                prefer_scroll=self.prefer_scroll,
-            )
-            return self.success
-
-    @contextlib.contextmanager
-    def _navigation_action_context(
-        self,
-        *,
-        vk_code: Optional[int] = None,
-        wheel_event: Optional[QWheelEvent] = None,
-        prefer_scroll: Optional[bool] = None,
-    ) -> Iterable["OverlayWindow._NavigationActionSession"]:
-        wheel_delta = self._navigation_wheel_delta(vk_code) if vk_code else 0
-        resolved_prefer_scroll = prefer_scroll
-        if vk_code is not None and resolved_prefer_scroll is None:
-            resolved_prefer_scroll = bool(wheel_delta) and (
-                self.mode == ToolMode.CURSOR.value
-                or self._interaction_mode == InteractionMode.NAVIGATION.value
-            )
-        with self._navigation_injection_guard() as had_keyboard_grab:
-            session = self._NavigationActionSession(
-                overlay=self,
-                vk_code=vk_code,
-                wheel_delta=wheel_delta,
-                wheel_event=wheel_event,
-                prefer_scroll=bool(resolved_prefer_scroll) if resolved_prefer_scroll is not None else False,
-                had_keyboard_grab=had_keyboard_grab,
-            )
-            yield session
-
-    def _dispatch_navigation_session(
-        self,
-        *,
-        vk_code: Optional[int] = None,
-        wheel_event: Optional[QWheelEvent] = None,
-        prefer_scroll: Optional[bool] = None,
-    ) -> Tuple[bool, bool]:
-        if self.whiteboard_active:
-            return False, self._keyboard_grabbed
-        with self._navigation_action_context(
-            vk_code=vk_code,
-            wheel_event=wheel_event,
-            prefer_scroll=prefer_scroll,
-        ) as session:
-            handled = session.execute()
-        return handled, session.had_keyboard_grab
-
     def _overlay_rect_tuple(self) -> Optional[Tuple[int, int, int, int]]:
         rect = self.geometry()
         if rect.isNull():
@@ -5231,111 +3418,11 @@ class OverlayWindow(QWidget):
         o_left, o_top, o_right, o_bottom = overlay
         return not (right <= o_left or left >= o_right or bottom <= o_top or top >= o_bottom)
 
-    def _fallback_belongs_to_current_process(self, hwnd: int) -> bool:
-        if _USER32 is None or hwnd == 0:
-            return False
-        pid = wintypes.DWORD()
-        try:
-            _USER32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(pid))
-        except Exception:
-            return False
-        return pid.value == os.getpid()
-
-    def _fallback_next_window_in_z_order(self, hwnd: int) -> int:
-        if _USER32 is None or hwnd == 0:
-            return 0
-        try:
-            command = getattr(win32con, "GW_HWNDNEXT", 2) if win32con is not None else 2
-        except Exception:
-            command = 2
-        try:
-            nxt = _USER32.GetWindow(wintypes.HWND(hwnd), command)
-        except Exception:
-            nxt = 0
-        return int(nxt) if nxt else 0
-
-    def _fallback_effective_foreground_window(self) -> int:
-        if _USER32 is None:
-            return 0
-        overlay_hwnd = int(self.winId()) if self.winId() else 0
-        foreground = _user32_get_foreground_window()
-        visited: Set[int] = set()
-        hwnd = foreground
-        while hwnd and hwnd not in visited:
-            visited.add(hwnd)
-            top = _user32_top_level_hwnd(hwnd)
-            if top == overlay_hwnd or self._fallback_belongs_to_current_process(top):
-                hwnd = self._fallback_next_window_in_z_order(top)
-                continue
-            if self._fallback_is_target_window_valid(top):
-                return top
-            hwnd = self._fallback_next_window_in_z_order(top)
-        return 0
-
-    def _fallback_is_window_maximized(self, hwnd: int) -> bool:
-        if _USER32 is None or hwnd == 0:
-            return False
-        try:
-            return bool(_USER32.IsZoomed(wintypes.HWND(hwnd)))
-        except Exception:
-            return False
-
-    def _fallback_candidate_role(self, hwnd: int) -> Optional[str]:
-        if _USER32 is None or hwnd == 0:
-            return None
-        if not self._fallback_is_target_window_valid(hwnd):
-            return None
-        class_name = _user32_window_class_name(hwnd)
-        if not class_name:
-            return None
-        role: Optional[str] = None
-        if class_name in self._KNOWN_PRESENTATION_CLASSES or any(
-            class_name.startswith(prefix) for prefix in self._KNOWN_PRESENTATION_PREFIXES
-        ):
-            role = "slideshow"
-        elif class_name in self._DOCUMENT_WINDOW_CLASSES or any(
-            class_name.startswith(prefix) for prefix in self._DOCUMENT_WINDOW_PREFIXES
-        ):
-            role = "document"
-        if role is None:
-            return None
-        rect = _user32_window_rect(hwnd)
-        if not rect:
-            return None
-        left, top, right, bottom = rect
-        width = max(0, right - left)
-        height = max(0, bottom - top)
-        if width < 400 or height < 300:
-            return None
-        overlay = self._overlay_rect_tuple()
-        if overlay is None:
-            return None
-        o_width = overlay[2] - overlay[0]
-        o_height = overlay[3] - overlay[1]
-        if o_width <= 0 or o_height <= 0:
-            return None
-        width_diff = abs(width - o_width)
-        height_diff = abs(height - o_height)
-        if width_diff > 64 or height_diff > 64:
-            return None
-        if role == "document":
-            if not self._fallback_is_window_maximized(hwnd):
-                return None
-            foreground = self._fallback_effective_foreground_window()
-            if foreground:
-                target_top = _user32_top_level_hwnd(hwnd)
-                foreground_top = _user32_top_level_hwnd(foreground)
-                if target_top and foreground_top and target_top != foreground_top:
-                    return None
-        return role
-
     def _fallback_is_target_window_valid(self, hwnd: int) -> bool:
         if _USER32 is None or hwnd == 0:
             return False
         overlay_hwnd = int(self.winId()) if self.winId() else 0
         if hwnd == overlay_hwnd:
-            return False
-        if self._fallback_belongs_to_current_process(hwnd):
             return False
         if not _user32_is_window(hwnd):
             return False
@@ -5347,20 +3434,42 @@ class OverlayWindow(QWidget):
         return self._rect_intersects_overlay(rect)
 
     def _fallback_is_candidate_window(self, hwnd: int) -> bool:
-        return self._fallback_candidate_role(hwnd) is not None
+        if _USER32 is None or hwnd == 0:
+            return False
+        class_name = _user32_window_class_name(hwnd)
+        if not class_name:
+            return False
+        if class_name in self._KNOWN_PRESENTATION_CLASSES:
+            return True
+        if any(class_name.startswith(prefix) for prefix in self._KNOWN_PRESENTATION_PREFIXES):
+            return True
+        rect = _user32_window_rect(hwnd)
+        if not rect:
+            return False
+        left, top, right, bottom = rect
+        width = max(0, right - left)
+        height = max(0, bottom - top)
+        overlay = self._overlay_rect_tuple()
+        if overlay is None:
+            return False
+        o_width = overlay[2] - overlay[0]
+        o_height = overlay[3] - overlay[1]
+        if o_width <= 0 or o_height <= 0:
+            return False
+        width_diff = abs(width - o_width)
+        height_diff = abs(height - o_height)
+        return width >= 400 and height >= 300 and width_diff <= 64 and height_diff <= 64
 
     def _fallback_detect_presentation_window_user32(self) -> Optional[int]:
         if _USER32 is None:
             return None
         overlay_hwnd = int(self.winId()) if self.winId() else 0
-        foreground = self._fallback_effective_foreground_window()
-        if foreground and foreground != overlay_hwnd:
-            role = self._fallback_candidate_role(foreground)
-            if role is not None:
-                return foreground
+        foreground = _user32_get_foreground_window()
+        if foreground and foreground != overlay_hwnd and self._fallback_is_candidate_window(foreground):
+            return foreground
         if _WNDENUMPROC is None:
             return None
-        candidates: List[Tuple[int, str]] = []
+        candidates: List[int] = []
 
         def _enum_callback(hwnd: int, _l_param: int) -> int:
             if hwnd == overlay_hwnd:
@@ -5370,9 +3479,7 @@ class OverlayWindow(QWidget):
             rect = _user32_window_rect(hwnd)
             if not rect or not self._rect_intersects_overlay(rect):
                 return True
-            role = self._fallback_candidate_role(int(hwnd))
-            if role is not None:
-                candidates.append((int(hwnd), role))
+            candidates.append(int(hwnd))
             return True
 
         enum_proc = _WNDENUMPROC(_enum_callback)
@@ -5380,11 +3487,8 @@ class OverlayWindow(QWidget):
             _USER32.EnumWindows(enum_proc, 0)
         except Exception:
             return None
-        for hwnd, role in candidates:
-            if role == "slideshow":
-                return hwnd
-        for hwnd, role in candidates:
-            if role == "document":
+        for hwnd in candidates:
+            if self._fallback_is_candidate_window(hwnd):
                 return hwnd
         return None
 
@@ -5546,6 +3650,21 @@ class OverlayWindow(QWidget):
         height_diff = abs(height - o_height)
         return width >= 400 and height >= 300 and width_diff <= 64 and height_diff <= 64
 
+    def _update_visibility_for_mode(self, *, initial: bool = False) -> None:
+        passthrough = (self.mode == "cursor") and (not self.whiteboard_active)
+        self._apply_input_passthrough(passthrough)
+        if passthrough:
+            if not self.isVisible():
+                self.show()
+            if not initial:
+                self._release_keyboard_capture()
+            return
+        if not self.isVisible():
+            self.show()
+        self._ensure_keyboard_capture()
+        if initial:
+            return
+
     def _push_history(self) -> None:
         if not isinstance(self.canvas, QPixmap):
             return
@@ -5620,24 +3739,8 @@ class OverlayWindow(QWidget):
         self.settings_manager.save_settings(settings)
 
     # ---- 画图事件 ----
-    def wheelEvent(self, e: QWheelEvent) -> None:
-        handled = False
-        had_grab = False
-        if self.mode in {"brush", "shape", "eraser", "cursor"} and not self.whiteboard_active:
-            self._after_navigation_wheel(e)
-            handled, had_grab = self._dispatch_navigation_session(
-                wheel_event=e,
-                prefer_scroll=True,
-            )
-            if handled and self.mode != ToolMode.CURSOR.value and not had_grab:
-                QTimer.singleShot(100, self._ensure_keyboard_capture)
-        if not handled and self._forwarder is not None:
-            try:
-                handled = self._forwarder.forward_wheel(e)
-            except Exception:
-                handled = False
-        if handled:
-            self._schedule_toolbar_navigation_cleanup()
+    def wheelEvent(self, e) -> None:
+        if self._forwarder and self._forwarder.forward_wheel(e):
             e.accept()
             return
         super().wheelEvent(e)
@@ -5688,9 +3791,7 @@ class OverlayWindow(QWidget):
         return dirty_region
 
     def mousePressEvent(self, e) -> None:
-        context = self._build_input_context(e)
-        self._maybe_restore_tool_for_press(context)
-        if e.button() == Qt.MouseButton.LeftButton and context.tool != ToolMode.CURSOR:
+        if e.button() == Qt.MouseButton.LeftButton and self.mode != "cursor":
             self._ensure_keyboard_capture()
             self._start_paint_session(e)
             self.raise_toolbar()
@@ -5698,9 +3799,7 @@ class OverlayWindow(QWidget):
         super().mousePressEvent(e)
 
     def mouseMoveEvent(self, e) -> None:
-        context = self._build_input_context(e)
-        self._handle_move_restore(context)
-        if self.drawing and context.tool != ToolMode.CURSOR:
+        if self.drawing and self.mode != "cursor":
             p = e.pos(); pf = e.position()
             dirty_region = None
             if self.mode == "brush":
@@ -5723,21 +3822,7 @@ class OverlayWindow(QWidget):
         super().mouseReleaseEvent(e)
 
     def keyPressEvent(self, e: QKeyEvent) -> None:
-        key_code = int(e.key())
-        nav_key = key_code in self._NAVIGATION_KEY_CODES
-        handled = False
-        if nav_key:
-            self._nav_direct_keys.discard(key_code)
-            vk_code = self._NAVIGATION_QT_TO_VK.get(key_code, 0)
-            if vk_code:
-                handled = self._send_slide_virtual_key(vk_code)
-                if handled:
-                    self._nav_direct_keys.add(key_code)
-        if not handled and not nav_key and self._forwarder and self._forwarder.forward_key(
-            e, is_press=True
-        ):
-            handled = True
-        if handled:
+        if self._forwarder and self._forwarder.forward_key(e, is_press=True):
             e.accept()
             return
         if e.key() == Qt.Key.Key_Escape:
@@ -5745,19 +3830,6 @@ class OverlayWindow(QWidget):
         super().keyPressEvent(e)
 
     def keyReleaseEvent(self, e: QKeyEvent) -> None:
-        key_code = int(e.key())
-        nav_key = key_code in self._NAVIGATION_KEY_CODES
-        if nav_key:
-            if key_code in self._nav_direct_keys:
-                self._nav_direct_keys.discard(key_code)
-                if self.mode == "cursor" and self._interaction_mode == "navigation":
-                    QTimer.singleShot(0, self._clear_navigation_passthrough)
-                e.accept()
-                return
-            if self.mode == "cursor" and self._interaction_mode == "navigation":
-                QTimer.singleShot(0, self._clear_navigation_passthrough)
-            e.accept()
-            return
         if self._forwarder and self._forwarder.forward_key(e, is_press=False):
             e.accept()
             return
@@ -5921,17 +3993,12 @@ class OverlayWindow(QWidget):
 
     def paintEvent(self, e) -> None:
         p = QPainter(self)
-        canvas_visible = self._mode_canvas_visible and not self._canvas_hidden
-        if canvas_visible and self.whiteboard_active:
+        if self.whiteboard_active:
             p.fillRect(self.rect(), self.whiteboard_color)
-        elif canvas_visible:
-            p.fillRect(self.rect(), QColor(0, 0, 0, 1))
         else:
-            p.fillRect(self.rect(), QColor(0, 0, 0, 0))
-        if canvas_visible:
-            p.drawPixmap(0, 0, self.canvas)
-            if self.drawing and self.mode == "shape":
-                p.drawPixmap(0, 0, self.temp_canvas)
+            p.fillRect(self.rect(), QColor(0, 0, 0, 1))
+        p.drawPixmap(0, 0, self.canvas)
+        if self.drawing and self.mode == "shape": p.drawPixmap(0, 0, self.temp_canvas)
         p.end()
 
     def showEvent(self, e) -> None:
@@ -10501,8 +8568,6 @@ class LauncherBubble(QWidget):
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
         ensure_widget_within_screen(self)
-        self.raise_()
-        QTimer.singleShot(0, self.raise_)
 
 
 class LauncherWindow(QWidget):
@@ -10665,19 +8730,6 @@ class LauncherWindow(QWidget):
         self._last_position = self.pos()
         if self._minimized_on_start:
             QTimer.singleShot(0, self._restore_minimized_state)
-        self.ensure_launcher_topmost()
-
-    def ensure_launcher_topmost(self) -> None:
-        if self._minimized:
-            if self.bubble is not None and self.bubble.isVisible():
-                self.bubble.raise_()
-                QTimer.singleShot(0, self.bubble.raise_)
-            return
-        self.raise_()
-        QTimer.singleShot(0, self.raise_)
-        if self.bubble is not None and self.bubble.isVisible():
-            self.bubble.raise_()
-            QTimer.singleShot(0, self.bubble.raise_)
 
     def eventFilter(self, obj, e) -> bool:
         if e.type() == QEvent.Type.MouseButtonPress and e.button() == Qt.MouseButton.LeftButton:
@@ -10711,7 +8763,6 @@ class LauncherWindow(QWidget):
             self.overlay.hide_overlay(); self.paint_button.setText("画笔")
         else:
             self.overlay.show_overlay(); self.paint_button.setText("隐藏画笔")
-        self.ensure_launcher_topmost()
 
     def toggle_roll_call(self) -> None:
         """切换点名/计时窗口的显示状态，必要时先创建窗口。"""
@@ -10812,10 +8863,8 @@ class LauncherWindow(QWidget):
         self.bubble.setWindowOpacity(0.74)
         self.bubble.show()
         self.bubble.raise_()
-        QTimer.singleShot(0, self.bubble.raise_)
         self._minimized = True
         self.save_position()
-        self.ensure_launcher_topmost()
 
     def _restore_minimized_state(self) -> None:
         if not self._minimized_on_start:
@@ -10872,7 +8921,6 @@ class LauncherWindow(QWidget):
         ensure_widget_within_screen(self)
         self._last_position = self.pos()
         self.save_position()
-        self.ensure_launcher_topmost()
 
     def _on_bubble_position_changed(self, pos: QPoint) -> None:
         self._bubble_position = QPoint(pos.x(), pos.y())
