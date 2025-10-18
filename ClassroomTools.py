@@ -3703,6 +3703,7 @@ class OverlayWindow(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)
         self._keyboard_grabbed = False
+        self._suppress_flash_count = 0
 
         self._build_scene()
         self.history: List[QPixmap] = []
@@ -3724,6 +3725,9 @@ class OverlayWindow(QWidget):
         self._nav_forced_passthrough = False
         self._nav_restore_deadline: Optional[float] = None
         self._nav_direct_keys: Set[int] = set()
+        self._keyboard_reacquire_timer = QTimer(self)
+        self._keyboard_reacquire_timer.setSingleShot(True)
+        self._keyboard_reacquire_timer.timeout.connect(self._on_keyboard_reacquire_timeout)
         self._nav_cursor_canvas_override = False
         self._interaction_mode = "drawing"
         self._interaction_before_navigation: Optional[str] = None
@@ -4872,28 +4876,52 @@ class OverlayWindow(QWidget):
             self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, enabled)
         flag_supported = hasattr(Qt.WindowType, "WindowTransparentForInput")
         flag_changed = False
+        used_window_handle = False
         if flag_supported:
+            window = self.windowHandle()
+            if window is not None:
+                try:
+                    current_flags = int(window.flags())
+                except Exception:
+                    current_flags = 0
+                target_mask = int(Qt.WindowType.WindowTransparentForInput)
+                if bool(current_flags & target_mask) != enabled:
+                    try:
+                        window.setFlag(Qt.WindowType.WindowTransparentForInput, enabled)
+                        flag_changed = True
+                        used_window_handle = True
+                    except Exception:
+                        used_window_handle = False
+        if flag_supported and not used_window_handle:
             has_flag = self._has_window_input_passthrough()
             if has_flag != enabled:
                 self.setWindowFlag(Qt.WindowType.WindowTransparentForInput, enabled)
                 flag_changed = True
         if enabled and self._keyboard_grabbed:
             self._release_keyboard_capture()
-        if (attr_changed or flag_changed) and self.isVisible():
-            super().show()  # Force Qt to apply the new flags
+        if (
+            attr_changed or flag_changed
+        ) and self.isVisible() and not (flag_supported and used_window_handle):
+            with self._suppress_canvas_flash():
+                super().show()  # Force Qt to apply the new flags
+        elif flag_changed and used_window_handle:
+            self.update()
 
-    def _ensure_keyboard_capture(self) -> None:
+    def _ensure_keyboard_capture(self, *, raise_window: bool = True) -> None:
+        if self._keyboard_reacquire_timer.isActive():
+            self._keyboard_reacquire_timer.stop()
         if not self._keyboard_grabbed:
             try:
                 self.grabKeyboard()
                 self._keyboard_grabbed = True
             except Exception:
                 self._keyboard_grabbed = False
-        try:
-            self.raise_()
-            self.activateWindow()
-        except Exception:
-            pass
+        if raise_window:
+            try:
+                self.raise_()
+                self.activateWindow()
+            except Exception:
+                pass
         self.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
 
     def _release_keyboard_capture(self) -> None:
@@ -4904,6 +4932,25 @@ class OverlayWindow(QWidget):
         except Exception:
             pass
         self._keyboard_grabbed = False
+
+    def _schedule_keyboard_reacquire(self, delay_ms: int = 60) -> None:
+        if delay_ms < 0:
+            delay_ms = 0
+        if self._keyboard_reacquire_timer.isActive():
+            self._keyboard_reacquire_timer.stop()
+        self._keyboard_reacquire_timer.start(max(1, delay_ms))
+
+    def _on_keyboard_reacquire_timeout(self) -> None:
+        self._ensure_keyboard_capture(raise_window=False)
+
+    @contextlib.contextmanager
+    def _suppress_canvas_flash(self):
+        self._suppress_flash_count += 1
+        try:
+            yield
+        finally:
+            if self._suppress_flash_count > 0:
+                self._suppress_flash_count -= 1
 
     @contextlib.contextmanager
     def _temporarily_release_keyboard(self):
@@ -4933,13 +4980,23 @@ class OverlayWindow(QWidget):
             enable_passthrough and flag_supported and not prev_window_passthrough
         )
         had_keyboard_grab = self._keyboard_grabbed
+        window = self.windowHandle() if toggle_window_passthrough else None
+        used_window_handle = False
         if toggle_mouse_passthrough:
             self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         if toggle_window_passthrough:
-            self.setWindowFlag(Qt.WindowType.WindowTransparentForInput, True)
-        if toggle_mouse_passthrough or toggle_window_passthrough:
+            if window is not None:
+                try:
+                    window.setFlag(Qt.WindowType.WindowTransparentForInput, True)
+                    used_window_handle = True
+                except Exception:
+                    used_window_handle = False
+            if not used_window_handle:
+                self.setWindowFlag(Qt.WindowType.WindowTransparentForInput, True)
+        if (toggle_mouse_passthrough or toggle_window_passthrough) and not used_window_handle:
             if self.isVisible():
-                super().show()
+                with self._suppress_canvas_flash():
+                    super().show()
         if had_keyboard_grab and enable_passthrough:
             self._release_keyboard_capture()
         try:
@@ -4951,15 +5008,22 @@ class OverlayWindow(QWidget):
                     prev_mouse_passthrough,
                 )
             if toggle_window_passthrough:
-                self.setWindowFlag(
-                    Qt.WindowType.WindowTransparentForInput,
-                    prev_window_passthrough,
-                )
-            if toggle_mouse_passthrough or toggle_window_passthrough:
+                if used_window_handle and window is not None:
+                    try:
+                        window.setFlag(Qt.WindowType.WindowTransparentForInput, prev_window_passthrough)
+                    except Exception:
+                        used_window_handle = False
+                if not used_window_handle:
+                    self.setWindowFlag(
+                        Qt.WindowType.WindowTransparentForInput,
+                        prev_window_passthrough,
+                    )
+            if (toggle_mouse_passthrough or toggle_window_passthrough) and not used_window_handle:
                 if self.isVisible():
-                    super().show()
+                    with self._suppress_canvas_flash():
+                        super().show()
             if had_keyboard_grab and enable_passthrough:
-                self._ensure_keyboard_capture()
+                self._schedule_keyboard_reacquire(80)
 
     def _extract_wheel_delta(self, event: Optional[QWheelEvent]) -> int:
         if event is None:
@@ -5725,11 +5789,12 @@ class OverlayWindow(QWidget):
     def paintEvent(self, e) -> None:
         p = QPainter(self)
         canvas_visible = self._mode_canvas_visible and not self._canvas_hidden
+        suppress_flash = self._suppress_flash_count > 0
         if canvas_visible and self.whiteboard_active:
             p.fillRect(self.rect(), self.whiteboard_color)
-        elif canvas_visible:
+        elif canvas_visible and not suppress_flash:
             p.fillRect(self.rect(), QColor(0, 0, 0, 1))
-        else:
+        elif not canvas_visible:
             p.fillRect(self.rect(), QColor(0, 0, 0, 0))
         if canvas_visible:
             p.drawPixmap(0, 0, self.canvas)
