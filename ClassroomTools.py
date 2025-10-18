@@ -4072,13 +4072,16 @@ class OverlayWindow(QWidget):
 
     def _is_passthrough_enabled(self) -> bool:
         try:
-            flags = self.windowFlags()
+            attr_passthrough = self.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         except Exception:
-            flags = Qt.WindowType.Widget
-        return bool(
-            self.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-            or (flags & Qt.WindowType.WindowTransparentForInput)
-        )
+            attr_passthrough = False
+        window_passthrough = False
+        if hasattr(Qt.WindowType, "WindowTransparentForInput"):
+            try:
+                window_passthrough = self._has_window_input_passthrough()
+            except Exception:
+                window_passthrough = False
+        return bool(attr_passthrough or window_passthrough)
 
     @contextlib.contextmanager
     def _navigation_input_transfer(self):
@@ -4099,6 +4102,8 @@ class OverlayWindow(QWidget):
                 self._apply_input_passthrough(False)
                 if had_keyboard and self.mode != "cursor":
                     self._ensure_keyboard_capture()
+                if self.mode != "cursor":
+                    self.update()
 
     def _clear_navigation_passthrough(self) -> None:
         self._nav_passthrough_active = False
@@ -4544,6 +4549,27 @@ class OverlayWindow(QWidget):
 
     def _send_virtual_key_direct(self, vk_code: int) -> bool:
         success = False
+        if self._forwarder is not None:
+            try:
+                delivered = self._forwarder.send_navigation_wheel(delta)
+            except Exception:
+                delivered = False
+            if delivered:
+                return True
+            try:
+                if self._forwarder.get_last_target_role() == "document":
+                    delivered = self._forwarder.send_document_scroll_for_vk(vk_code)
+            except Exception:
+                delivered = False
+            if delivered:
+                return True
+        focused = self._focus_presentation_window_fallback()
+        if not focused:
+            self._focus_presentation_window_fallback()
+        return self._fallback_scroll_with_wheel(delta)
+
+    def _send_virtual_key_direct(self, vk_code: int) -> bool:
+        success = False
         if prefer_scroll and wheel_delta:
             success = self._send_navigation_scroll(vk_code, wheel_delta)
         if not success and self._forwarder is not None:
@@ -4679,6 +4705,23 @@ class OverlayWindow(QWidget):
         except Exception:
             return False
 
+    def _fallback_scroll_with_wheel(self, delta: int) -> bool:
+        if delta == 0:
+            return False
+        if win32api is not None and win32con is not None:
+            try:
+                win32api.mouse_event(win32con.MOUSEEVENTF_WHEEL, 0, 0, delta, 0)
+                return True
+            except Exception:
+                pass
+        if _USER32 is None:
+            return False
+        try:
+            _USER32.mouse_event(0x0800, 0, 0, delta, 0)
+            return True
+        except Exception:
+            return False
+
     def _fallback_send_virtual_key(self, vk_code: int) -> bool:
         if vk_code == 0 or _USER32 is None:
             return False
@@ -4754,13 +4797,40 @@ class OverlayWindow(QWidget):
         return rect.adjusted(-margin, -margin, margin, margin)
 
     # ---- 系统级穿透 ----
+    def _has_window_input_passthrough(self) -> bool:
+        """Return whether the overlay currently ignores input at the window level."""
+        try:
+            flag_value = Qt.WindowType.WindowTransparentForInput
+        except AttributeError:
+            return False
+        try:
+            flags = self.windowFlags()
+        except Exception:
+            return False
+        try:
+            flags_int = int(flags)
+        except (TypeError, ValueError):
+            try:
+                flags_int = int(Qt.WindowType(flags))
+            except Exception:
+                return False
+        return bool(flags_int & int(flag_value))
+
     def _apply_input_passthrough(self, enabled: bool) -> None:
         """Toggle system-level input passthrough for cursor/navigation mode."""
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, enabled)
-        self.setWindowFlag(Qt.WindowType.WindowTransparentForInput, enabled)
-        if enabled:
+        attr_changed = self.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents) != enabled
+        if attr_changed:
+            self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, enabled)
+        flag_supported = hasattr(Qt.WindowType, "WindowTransparentForInput")
+        flag_changed = False
+        if flag_supported:
+            has_flag = self._has_window_input_passthrough()
+            if has_flag != enabled:
+                self.setWindowFlag(Qt.WindowType.WindowTransparentForInput, enabled)
+                flag_changed = True
+        if enabled and self._keyboard_grabbed:
             self._release_keyboard_capture()
-        if self.isVisible():
+        if (attr_changed or flag_changed) and self.isVisible():
             super().show()  # Force Qt to apply the new flags
 
     def _ensure_keyboard_capture(self) -> None:
