@@ -3631,6 +3631,7 @@ class OverlayWindow(QWidget):
         self.whiteboard_color = QColor(0, 0, 0, 0); self.last_board_color = QColor("#ffffff")
         self.cursor_pixmap = QPixmap()
         self._canvas_hidden = False
+        self._mode_canvas_visible = True
         self._eraser_stroker = QPainterPathStroker()
         self._eraser_stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
         self._eraser_stroker.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
@@ -3716,9 +3717,9 @@ class OverlayWindow(QWidget):
             return None
 
     def _build_mode_state(self, tool: ToolMode) -> ModeState:
-        passthrough = tool == ToolMode.CURSOR and not self.whiteboard_active
+        passthrough = tool == ToolMode.CURSOR
         interaction = InteractionMode.CURSOR if tool == ToolMode.CURSOR else InteractionMode.DRAWING
-        canvas_hidden = passthrough
+        canvas_hidden = tool == ToolMode.CURSOR
         keyboard_grabbed = not passthrough
         return ModeState(
             tool=tool,
@@ -3764,6 +3765,7 @@ class OverlayWindow(QWidget):
             return
         target_state = self._build_mode_state(current_state.tool)
         self._apply_mode_visibility(current_state, target_state, initial=initial)
+        self._mode_canvas_visible = not target_state.canvas_hidden
         self._mode_state = self._snapshot_mode_state(target_state)
 
     def _event_global_point(self, event: Optional[Any]) -> Optional[QPoint]:
@@ -3974,7 +3976,7 @@ class OverlayWindow(QWidget):
             self._interaction_before_navigation = self._interaction_mode
         self._set_interaction_mode(InteractionMode.NAVIGATION)
         self._set_navigation_origin(tool_mode, prev_shape, inside_toolbar=not restore_on_move)
-        restore_cursor_passthrough = tool_mode == ToolMode.CURSOR and not self.whiteboard_active
+        restore_cursor_passthrough = tool_mode == ToolMode.CURSOR
         self._navigation_restore_to_cursor = restore_cursor_passthrough
         self._nav_passthrough_active = True
         if cursor_reference is not None:
@@ -4030,9 +4032,7 @@ class OverlayWindow(QWidget):
             self._apply_input_passthrough(False)
             self._ensure_keyboard_capture()
         restore_cursor_passthrough = (
-            self._navigation_restore_to_cursor
-            and self.mode == ToolMode.CURSOR.value
-            and not self.whiteboard_active
+            self._navigation_restore_to_cursor and self.mode == ToolMode.CURSOR.value
         )
         self._nav_forced_passthrough = False
         previous = self._interaction_before_navigation
@@ -4149,9 +4149,10 @@ class OverlayWindow(QWidget):
     def _set_canvas_hidden(self, hidden: bool) -> None:
         """Switch rendering visibility for the main canvas without losing content."""
         hidden = bool(hidden)
-        if hidden == self._canvas_hidden:
+        if hidden == self._canvas_hidden and self._mode_canvas_visible == (not hidden):
             return
         self._canvas_hidden = hidden
+        self._mode_canvas_visible = not hidden
         self.update()
 
     def _update_brush_pen_appearance(self, width: float, fade_alpha: int) -> None:
@@ -4248,6 +4249,7 @@ class OverlayWindow(QWidget):
         if state_template.tool in {ToolMode.BRUSH, ToolMode.SHAPE} and not self._restoring_tool:
             self._update_last_tool_snapshot()
         self._apply_mode_visibility(prev_state, state_template, initial=initial)
+        self._mode_canvas_visible = not state_template.canvas_hidden
         self._mode_state = self._snapshot_mode_state(state_template)
         if focus_on_cursor and self._forwarder:
             self._forwarder.focus_presentation_window()
@@ -4623,8 +4625,10 @@ class OverlayWindow(QWidget):
     # ---- 系统级穿透 ----
     def _apply_input_passthrough(self, enabled: bool) -> None:
         """Toggle system-level input passthrough for cursor/navigation mode."""
-        hide_canvas = bool(enabled) and self.mode == ToolMode.CURSOR.value and not self.whiteboard_active
-        self._set_canvas_hidden(hide_canvas)
+        if self.mode == ToolMode.CURSOR.value:
+            self._set_canvas_hidden(True)
+        else:
+            self._set_canvas_hidden(False)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, enabled)
         self.setWindowFlag(Qt.WindowType.WindowTransparentForInput, enabled)
         if enabled:
@@ -5387,11 +5391,14 @@ class OverlayWindow(QWidget):
 
     def paintEvent(self, e) -> None:
         p = QPainter(self)
-        if self.whiteboard_active:
+        canvas_visible = self._mode_canvas_visible and not self._canvas_hidden
+        if canvas_visible and self.whiteboard_active:
             p.fillRect(self.rect(), self.whiteboard_color)
-        else:
+        elif canvas_visible:
             p.fillRect(self.rect(), QColor(0, 0, 0, 1))
-        if not self._canvas_hidden:
+        else:
+            p.fillRect(self.rect(), QColor(0, 0, 0, 0))
+        if canvas_visible:
             p.drawPixmap(0, 0, self.canvas)
             if self.drawing and self.mode == "shape":
                 p.drawPixmap(0, 0, self.temp_canvas)
