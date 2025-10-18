@@ -3636,6 +3636,9 @@ class OverlayWindow(QWidget):
     _KNOWN_PRESENTATION_PREFIXES = _PresentationForwarder._KNOWN_PRESENTATION_PREFIXES
     _SLIDESHOW_PRIORITY_CLASSES = _PresentationForwarder._SLIDESHOW_PRIORITY_CLASSES
     _SLIDESHOW_SECONDARY_CLASSES = _PresentationForwarder._SLIDESHOW_SECONDARY_CLASSES
+    _SLIDESHOW_PREFIXES = _PresentationForwarder._SLIDESHOW_PREFIXES
+    _DOCUMENT_WINDOW_CLASSES = _PresentationForwarder._DOCUMENT_WINDOW_CLASSES
+    _DOCUMENT_WINDOW_PREFIXES = _PresentationForwarder._DOCUMENT_WINDOW_PREFIXES
 
     def __init__(self, settings_manager: SettingsManager) -> None:
         super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
@@ -3739,6 +3742,22 @@ class OverlayWindow(QWidget):
         self._navigation_restore_to_cursor = False
         self.set_mode(ToolMode.BRUSH.value, initial=True)
         self.toolbar.update_undo_state(False)
+
+    def _is_slideshow_class(self, class_name: str) -> bool:
+        if not class_name:
+            return False
+        if class_name in self._SLIDESHOW_PRIORITY_CLASSES:
+            return True
+        if class_name in self._SLIDESHOW_SECONDARY_CLASSES:
+            return True
+        return any(class_name.startswith(prefix) for prefix in self._SLIDESHOW_PREFIXES)
+
+    def _is_document_class(self, class_name: str) -> bool:
+        if not class_name:
+            return False
+        if class_name in self._DOCUMENT_WINDOW_CLASSES:
+            return True
+        return any(class_name.startswith(prefix) for prefix in self._DOCUMENT_WINDOW_PREFIXES)
 
     def raise_toolbar(self) -> None:
         if getattr(self, "toolbar", None) is not None:
