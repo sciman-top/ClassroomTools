@@ -3384,6 +3384,8 @@ class OverlayWindow(QWidget):
                 self._restore_last_tool(restore_mode, shape_type=prev_shape)
         else:
             self._pending_tool_restore = None
+            if via_toolbar:
+                self._cancel_navigation_cursor_hold()
         self.raise_toolbar()
 
     def _apply_navigation_cursor_hold(self, restore_mode: str, restore_shape: Optional[str]) -> None:
