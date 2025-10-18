@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import base64
@@ -2463,8 +2463,6 @@ class _PresentationForwarder:
             self.overlay, "navigation_passthrough_active", False
         ):
             return False
-        if getattr(self.overlay, "whiteboard_active", False):
-            return False
         return True
 
     def _translate_mouse_modifiers(self, event: QWheelEvent) -> int:
@@ -3124,14 +3122,6 @@ class _PresentationForwarder:
                 pass
         return _user32_window_rect(hwnd)
 
-    def _point_within_window(self, hwnd: int, point: Tuple[int, int]) -> bool:
-        rect = self._get_window_rect_generic(hwnd)
-        if rect is None:
-            return False
-        left, top, right, bottom = rect
-        x, y = point
-        return left <= x < right and top <= y < bottom
-
     def _candidate_score(
         self,
         hwnd: int,
@@ -3500,65 +3490,49 @@ class _PresentationForwarder:
         *,
         modifiers: int = 0,
         point: Optional[Tuple[int, int]] = None,
+        allow_message_fallback: bool = False,
     ) -> bool:
         if hwnd == 0:
             return False
         delivered = False
         passthrough_applied = False
         original_cursor: Optional[Tuple[int, int]] = None
-        cursor_moved = False
-        effective_point = point or self._get_default_wheel_point(hwnd)
-        target_top = self._top_level_hwnd(hwnd)
         with self._keyboard_capture_guard():
-            original_cursor = self._get_cursor_pos()
-            passthrough_applied = self._set_overlay_passthrough(True)
-            if passthrough_applied:
-                try:
-                    QApplication.processEvents()
-                except Exception:
-                    pass
             focus_ok = self.bring_target_to_foreground(hwnd)
             if not focus_ok:
                 focus_ok = self._activate_window_for_input(hwnd)
-            if not focus_ok and passthrough_applied:
-                focus_ok = self.bring_target_to_foreground(hwnd)
             attach_pair = self._attach_to_target_thread(hwnd)
             try:
-                allow_injection = focus_ok
-                if not allow_injection and original_cursor is not None:
-                    if self._point_within_window(hwnd, original_cursor):
-                        foreground = _user32_get_foreground_window()
-                        if foreground and self._top_level_hwnd(foreground) == target_top:
-                            allow_injection = True
-                if allow_injection:
-                    cursor_target: Optional[Tuple[int, int]] = None
-                    if (
-                        effective_point is not None
-                        and (
-                            original_cursor is None
-                            or not self._point_within_window(hwnd, original_cursor)
-                        )
-                    ):
-                        cursor_target = effective_point
-                    if (
-                        cursor_target is not None
-                        and (original_cursor is None or cursor_target != original_cursor)
-                    ):
-                        if self._set_cursor_pos(cursor_target):
-                            cursor_moved = True
+                injected = False
+                if focus_ok:
+                    original_cursor = self._get_cursor_pos()
+                    passthrough_applied = self._set_overlay_passthrough(True)
+                    if passthrough_applied:
+                        QApplication.processEvents()
+                    if point is not None:
+                        self._set_cursor_pos(point)
                     self._injecting_wheel = True
                     try:
-                        delivered = self._send_wheel_input(delta)
+                        injected = self._send_wheel_input(delta)
                     finally:
-                        self._injecting_wheel = False
+                        if not injected:
+                            self._injecting_wheel = False
+                    if injected:
+                        delivered = True
+                if not delivered and allow_message_fallback:
+                    delivered = self._deliver_wheel_messages(
+                        hwnd,
+                        delta,
+                        modifiers=modifiers,
+                        point=point,
+                    )
             finally:
                 self._detach_from_target_thread(attach_pair)
-        if cursor_moved and original_cursor is not None:
-            self._set_cursor_pos(original_cursor)
         if passthrough_applied:
             self._restore_overlay_interaction()
-        if cursor_moved and original_cursor is not None:
+        if original_cursor is not None:
             self._set_cursor_pos(original_cursor)
+        self._injecting_wheel = False
         return delivered
 
     def _send_navigation_wheel_impl(
@@ -3583,36 +3557,23 @@ class _PresentationForwarder:
         default_point = point if point is not None else self._get_default_wheel_point(hwnd)
         force_injection = self._should_force_wheel_injection(hwnd, role_hint)
         delivered = False
-        injection_first = injection_only or force_injection or role_hint == "document"
-        if injection_first:
-            delivered = self._send_wheel_via_injection(
+        message_attempted = injection_only
+        if not force_injection and not injection_only:
+            delivered = self._deliver_wheel_messages(
                 hwnd,
                 delta,
                 modifiers=modifiers,
                 point=default_point,
             )
-            if not delivered and not injection_only:
-                delivered = self._deliver_wheel_messages(
-                    hwnd,
-                    delta,
-                    modifiers=modifiers,
-                    point=default_point,
-                )
-        else:
-            if not injection_only:
-                delivered = self._deliver_wheel_messages(
-                    hwnd,
-                    delta,
-                    modifiers=modifiers,
-                    point=default_point,
-                )
-            if not delivered:
-                delivered = self._send_wheel_via_injection(
-                    hwnd,
-                    delta,
-                    modifiers=modifiers,
-                    point=default_point,
-                )
+            message_attempted = True
+        if not delivered:
+            delivered = self._send_wheel_via_injection(
+                hwnd,
+                delta,
+                modifiers=modifiers,
+                point=default_point,
+                allow_message_fallback=not message_attempted,
+            )
         if delivered:
             self._set_cached_target(hwnd, role_hint)
         else:
@@ -4379,7 +4340,6 @@ class OverlayWindow(QWidget):
         if pending and pending.restore_on_move and self._navigation_origin_from_toolbar():
             pending.restore_on_move = False
             self._nav_restore_timer.stop()
-            self._nav_restore_deadline = None
             return
         if not (
             self._nav_passthrough_active
@@ -4390,30 +4350,21 @@ class OverlayWindow(QWidget):
         ):
             if not (pending and pending.restore_on_move):
                 self._nav_restore_timer.stop()
-                self._nav_restore_deadline = None
             return
         current_pos = self._safe_global_cursor_pos()
         if current_pos is None:
             self._nav_restore_timer.stop()
-            self._nav_restore_deadline = None
             self._restore_pending_tool()
             return
         if self._nav_restore_cursor_pos is None:
             self._nav_restore_cursor_pos = QPoint(current_pos)
             return
         if current_pos == self._nav_restore_cursor_pos:
-            deadline = self._nav_restore_deadline
-            if deadline is not None and time.monotonic() >= deadline:
-                self._nav_restore_timer.stop()
-                self._nav_restore_deadline = None
-                self._restore_pending_tool()
             return
         if self._is_point_inside_toolbar(current_pos):
             pending.restore_on_move = False
             self._nav_restore_timer.stop()
-            self._nav_restore_deadline = None
             return
-        self._nav_restore_deadline = None
         self._restore_pending_tool()
 
     def _restore_pending_tool(self) -> None:
@@ -4425,8 +4376,6 @@ class OverlayWindow(QWidget):
         self._restore_last_tool(pending.mode, shape_type=pending.shape)
 
     def _after_navigation_wheel(self, event: QWheelEvent) -> None:
-        if self.whiteboard_active:
-            return
         prev_mode = self.mode
         if prev_mode not in {"brush", "shape", "eraser", "cursor"}:
             return
@@ -4450,8 +4399,6 @@ class OverlayWindow(QWidget):
         )
 
     def _after_navigation_key(self, event: QKeyEvent) -> None:
-        if self.whiteboard_active:
-            return
         key_code = int(event.key())
         if key_code not in self._NAVIGATION_KEY_CODES:
             return
@@ -4731,8 +4678,6 @@ class OverlayWindow(QWidget):
     def _send_slide_virtual_key(
         self, vk_code: int, *, repeated: bool = False, engaged: bool = False
     ) -> bool:
-        if self.whiteboard_active:
-            return False
         if vk_code == 0:
             return False
         if repeated:
@@ -4761,9 +4706,6 @@ class OverlayWindow(QWidget):
     def handle_navigation_button_press(self, direction: str) -> None:
         self._nav_repeat_delay_timer.stop()
         self._nav_repeat_timer.stop()
-        if self.whiteboard_active:
-            self._nav_active_vk = None
-            return
         vk_code = VK_DOWN if direction.lower() == "down" else VK_UP
         self._handle_navigation_button_trigger()
         if self._send_slide_virtual_key(vk_code, engaged=True):
@@ -5212,8 +5154,6 @@ class OverlayWindow(QWidget):
         wheel_event: Optional[QWheelEvent] = None,
         prefer_scroll: Optional[bool] = None,
     ) -> Tuple[bool, bool]:
-        if self.whiteboard_active:
-            return False, self._keyboard_grabbed
         with self._navigation_action_context(
             vk_code=vk_code,
             wheel_event=wheel_event,
@@ -5549,7 +5489,7 @@ class OverlayWindow(QWidget):
     def wheelEvent(self, e: QWheelEvent) -> None:
         handled = False
         had_grab = False
-        if self.mode in {"brush", "shape", "eraser", "cursor"} and not self.whiteboard_active:
+        if self.mode in {"brush", "shape", "eraser", "cursor"}:
             self._after_navigation_wheel(e)
             handled, had_grab = self._dispatch_navigation_session(
                 wheel_event=e,
@@ -5563,7 +5503,6 @@ class OverlayWindow(QWidget):
             except Exception:
                 handled = False
         if handled:
-            self._schedule_toolbar_navigation_cleanup()
             e.accept()
             return
         super().wheelEvent(e)
@@ -5652,17 +5591,20 @@ class OverlayWindow(QWidget):
         key_code = int(e.key())
         nav_key = key_code in self._NAVIGATION_KEY_CODES
         handled = False
-        if nav_key:
+        
+        # 对于导航键，优先尝试 forward_key（适用于 Word 文档）
+        if nav_key and self._forwarder and self._forwarder.forward_key(e, is_press=True):
+            self._after_navigation_key(e)
+            handled = True
+        elif nav_key:
+            # 如果 forward_key 失败，再尝试 _send_slide_virtual_key（适用于幻灯片）
             self._nav_direct_keys.discard(key_code)
             vk_code = self._NAVIGATION_QT_TO_VK.get(key_code, 0)
             if vk_code:
                 handled = self._send_slide_virtual_key(vk_code)
                 if handled:
                     self._nav_direct_keys.add(key_code)
-        if not handled and self._forwarder and self._forwarder.forward_key(e, is_press=True):
-            if nav_key:
-                self._after_navigation_key(e)
-            handled = True
+        
         if handled:
             e.accept()
             return
