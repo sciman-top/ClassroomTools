@@ -2991,14 +2991,37 @@ class _PresentationForwarder:
         "worddocument",
         "_wwg",
         "_wwb",
+        "kwpsframeclass",
+        "kwpsmainframe",
+        "wpsframeclass",
+        "wpsmainframe",
+        "kwpsviewclass",
+        "wpsviewclass",
+        "kwpspageview",
+        "wpspageview",
     }
-    _WORD_CONTENT_CLASSES: Set[str] = {"worddocument", "paneclassdc", "_wwg", "_wwb"}
+    _WORD_CONTENT_CLASSES: Set[str] = {
+        "worddocument",
+        "paneclassdc",
+        "_wwg",
+        "_wwb",
+        "kwpsviewclass",
+        "wpsviewclass",
+        "kwpspageview",
+        "wpspageview",
+        "kwpsdocview",
+        "wpsdocview",
+    }
     _WORD_HOST_CLASSES: Set[str] = {
         "opusapp",
         "nuidocumentwindow",
         "netuihwnd",
         "documentwindow",
         "mdiclient",
+        "kwpsframeclass",
+        "kwpsmainframe",
+        "wpsframeclass",
+        "wpsmainframe",
     }
     _PRESENTATION_EDITOR_CLASSES: Set[str] = {
         "pptframeclass",
@@ -3010,6 +3033,9 @@ class _PresentationForwarder:
         "wpsframeclass",
         "wpsmainframe",
     }
+    _WPS_WRITER_PREFIXES: Tuple[str, ...] = ("kwps", "wps")
+    _WPS_WRITER_KEYWORDS: Tuple[str, ...] = ("frame", "view", "doc", "page")
+    _WPS_WRITER_EXCLUDE_KEYWORDS: Tuple[str, ...] = ("show", "slideshow")
     _KEY_FORWARD_MAP: Dict[int, int] = (
         {
             int(Qt.Key.Key_PageUp): win32con.VK_PRIOR,
@@ -3525,6 +3551,11 @@ class _PresentationForwarder:
             return True
         if "word" in class_name:
             return True
+        if any(class_name.startswith(prefix) for prefix in self._WPS_WRITER_PREFIXES):
+            if any(excluded in class_name for excluded in self._WPS_WRITER_EXCLUDE_KEYWORDS):
+                return False
+            if any(keyword in class_name for keyword in self._WPS_WRITER_KEYWORDS):
+                return True
         return False
 
     def _locate_word_content_window(self, hwnd: int) -> Optional[int]:
@@ -4354,6 +4385,11 @@ class OverlayWindow(QWidget):
     _WORD_WINDOW_CLASSES: Set[str] = _PresentationForwarder._WORD_WINDOW_CLASSES
     _WORD_CONTENT_CLASSES: Set[str] = _PresentationForwarder._WORD_CONTENT_CLASSES
     _WORD_HOST_CLASSES: Set[str] = _PresentationForwarder._WORD_HOST_CLASSES
+    _WPS_WRITER_PREFIXES: Tuple[str, ...] = _PresentationForwarder._WPS_WRITER_PREFIXES
+    _WPS_WRITER_KEYWORDS: Tuple[str, ...] = _PresentationForwarder._WPS_WRITER_KEYWORDS
+    _WPS_WRITER_EXCLUDE_KEYWORDS: Tuple[str, ...] = (
+        _PresentationForwarder._WPS_WRITER_EXCLUDE_KEYWORDS
+    )
 
     def __init__(self, settings_manager: SettingsManager) -> None:
         super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
@@ -4893,6 +4929,11 @@ class OverlayWindow(QWidget):
             return True
         if "word" in class_name:
             return True
+        if any(class_name.startswith(prefix) for prefix in self._WPS_WRITER_PREFIXES):
+            if any(excluded in class_name for excluded in self._WPS_WRITER_EXCLUDE_KEYWORDS):
+                return False
+            if any(keyword in class_name for keyword in self._WPS_WRITER_KEYWORDS):
+                return True
         return False
 
     def _word_navigation_vk(self, vk_code: int, target_hwnd: Optional[int]) -> int:
