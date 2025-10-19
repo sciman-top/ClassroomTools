@@ -5323,9 +5323,28 @@ class OverlayWindow(QWidget):
             return bool(getattr(self, attr))
         return True
 
+    def _process_control_disallowed(self, hwnd: Optional[int]) -> bool:
+        if not hwnd:
+            return False
+        process_name = self._window_process_name(_user32_top_level_hwnd(hwnd) or hwnd)
+        if not process_name:
+            return False
+        name = process_name.lower()
+        if name.startswith("wpp"):
+            return not getattr(self, "control_wps_ppt", True)
+        if name.startswith("wps"):
+            return not getattr(self, "control_wps_word", True)
+        if "powerpnt" in name:
+            return not getattr(self, "control_ms_ppt", True)
+        if "winword" in name:
+            return not getattr(self, "control_ms_word", True)
+        return False
+
     def _presentation_control_allowed(self, hwnd: Optional[int], *, log: bool = True) -> bool:
         category = self._presentation_target_category(hwnd)
         allowed = self._is_presentation_category_allowed(category)
+        if allowed and self._process_control_disallowed(hwnd):
+            allowed = False
         if not allowed and log:
             self._log_navigation_debug(
                 "control_disabled",
@@ -5333,6 +5352,50 @@ class OverlayWindow(QWidget):
                 category=category,
             )
         return allowed
+
+    def _find_wps_slideshow_target(self) -> Optional[int]:
+        if not getattr(self, "control_wps_ppt", True):
+            return None
+        candidates: List[int] = []
+        sources: List[Callable[[], Optional[int]]] = []
+        forwarder = getattr(self, "_forwarder", None)
+        if forwarder is not None:
+            sources.append(forwarder.get_presentation_target)
+            detector = getattr(forwarder, "_detect_presentation_window", None)
+            if callable(detector):
+                sources.append(detector)  # type: ignore[arg-type]
+        sources.append(self._resolve_presentation_target)
+        sources.append(self._fallback_detect_presentation_window_user32)
+        if _USER32 is not None:
+            sources.append(lambda: _user32_get_foreground_window())
+        for getter in sources:
+            if not callable(getter):
+                continue
+            try:
+                hwnd = getter()
+            except Exception:
+                hwnd = None
+            if not hwnd:
+                continue
+            normalized = self._normalize_presentation_target(hwnd)
+            for candidate in (normalized, hwnd):
+                if not candidate or candidate in candidates:
+                    continue
+                candidates.append(candidate)
+                if not self._presentation_control_allowed(candidate, log=False):
+                    continue
+                if self._is_wps_slideshow_target(candidate):
+                    if forwarder is not None:
+                        try:
+                            forwarder._last_target_hwnd = candidate  # type: ignore[attr-defined]
+                        except Exception:
+                            pass
+                    try:
+                        self._last_target_hwnd = candidate
+                    except Exception:
+                        pass
+                    return candidate
+        return None
 
     def _resolve_control_target(self) -> Optional[int]:
         target = self._current_navigation_target()
@@ -5367,6 +5430,28 @@ class OverlayWindow(QWidget):
             if any(excluded in class_name for excluded in self._WPS_WRITER_EXCLUDE_KEYWORDS):
                 return False
             if any(keyword in class_name for keyword in self._WPS_WRITER_KEYWORDS):
+                return True
+        return False
+
+    def _is_wps_slideshow_class(self, class_name: str) -> bool:
+        if not class_name:
+            return False
+        if class_name in self._WPS_SLIDESHOW_CLASSES:
+            return True
+        return class_name.startswith("kwppshow")
+
+    def _is_wps_slideshow_target(self, hwnd: Optional[int] = None) -> bool:
+        if hwnd is None:
+            hwnd = self._current_navigation_target()
+        if not hwnd:
+            return False
+        class_name = self._presentation_window_class(hwnd)
+        if self._is_wps_slideshow_class(class_name):
+            return True
+        if class_name in self._SLIDESHOW_PRIORITY_CLASSES or class_name in self._SLIDESHOW_SECONDARY_CLASSES:
+            top_hwnd = _user32_top_level_hwnd(hwnd)
+            process_name = self._window_process_name(top_hwnd or hwnd)
+            if process_name.startswith("wpp"):
                 return True
         return False
 
@@ -5472,6 +5557,10 @@ class OverlayWindow(QWidget):
         effective_target = target_hwnd or self._resolve_control_target()
         if not target_hwnd and effective_target:
             target_hwnd = effective_target
+        wps_override = self._find_wps_slideshow_target()
+        if wps_override:
+            target_hwnd = wps_override
+            effective_target = wps_override
         target_class = self._presentation_window_class(target_hwnd) if target_hwnd else ""
         if effective_target and not self._presentation_control_allowed(effective_target):
             if originating_key is not None:
@@ -5661,6 +5750,15 @@ class OverlayWindow(QWidget):
             return False
         success = False
         suppress_focus_restore = False
+        wps_override = self._find_wps_slideshow_target()
+        if wps_override:
+            suppress_focus_restore = True
+            forwarder = getattr(self, "_forwarder", None)
+            if forwarder is not None:
+                try:
+                    forwarder._last_target_hwnd = wps_override  # type: ignore[attr-defined]
+                except Exception:
+                    pass
         if self._forwarder is not None:
             qt_key_map = {
                 VK_UP: Qt.Key.Key_Up,
@@ -6689,6 +6787,10 @@ class OverlayWindow(QWidget):
             if self.whiteboard_active:
                 e.accept()
                 return
+            target = self._resolve_control_target()
+            if not target or not self._presentation_control_allowed(target):
+                super().keyPressEvent(e)
+                return
             is_auto = e.isAutoRepeat()
             if not is_auto:
                 self._active_navigation_keys.add(key)
@@ -6716,6 +6818,9 @@ class OverlayWindow(QWidget):
         if e.key() in _QT_NAVIGATION_KEYS:
             if self.whiteboard_active:
                 e.accept()
+                return
+            if e.key() not in self._active_navigation_keys:
+                super().keyReleaseEvent(e)
                 return
             if not e.isAutoRepeat():
                 self._release_keyboard_navigation_state(e.key())
