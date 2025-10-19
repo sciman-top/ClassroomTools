@@ -79,6 +79,14 @@ else:  # pragma: no cover - 非 Windows 平台不会调用
     _WNDENUMPROC = None  # type: ignore[assignment]
 
 
+def clamp(value: float, minimum: float, maximum: float) -> float:
+    """Clamp *value* into the inclusive range [minimum, maximum]."""
+
+    if minimum > maximum:
+        minimum, maximum = maximum, minimum
+    return max(minimum, min(maximum, value))
+
+
 def _user32_window_rect(hwnd: int) -> Optional[Tuple[int, int, int, int]]:
     if _USER32 is None or hwnd == 0:
         return None
@@ -199,11 +207,13 @@ from PyQt6.QtCore import (
     QEvent,
     pyqtSignal,
     QObject,
+    QUrl,
 )
 from PyQt6.QtGui import (
     QBrush,
     QColor,
     QCursor,
+    QDesktopServices,
     QFont,
     QFontDatabase,
     QFontMetrics,
@@ -1437,6 +1447,12 @@ class PenStyleConfig:
     feather_strength: float = 0.0
     edge_highlight_alpha: int = 0
     solid_fill: bool = False
+    opacity_range: Optional[tuple[int, int]] = None
+    default_opacity: Optional[int] = None
+    target_responsiveness: float = 0.35
+    width_accel: float = 0.18
+    width_velocity_limit: float = 0.22
+    width_velocity_damping: float = 0.7
 
 
 _DEFAULT_PEN_STYLE = PenStyle.FOUNTAIN
@@ -1447,64 +1463,68 @@ PEN_STYLE_CONFIGS: Dict[PenStyle, PenStyleConfig] = {
         key="chalk",
         display_name="粉笔",
         description="粉笔质感，色彩饱满且边缘柔和。",
-        slider_range=(6, 36),
-        default_base=15,
-        width_multiplier=1.04,
-        smoothing=0.9,
-        speed_base_multiplier=28.0,
-        speed_base_offset=42.0,
+        slider_range=(8, 34),
+        default_base=16,
+        width_multiplier=1.1,
+        smoothing=0.88,
+        speed_base_multiplier=30.0,
+        speed_base_offset=46.0,
         target_min_factor=0.9,
-        target_speed_factor=0.12,
-        target_curve_factor=0.1,
-        target_blend=0.28,
-        curve_sensitivity=0.44,
-        pressure_factor=0.1,
-        width_memory=0.94,
-        pressure_time_weight=2.6,
-        travel_weight=0.14,
-        fade_min_alpha=190,
+        target_speed_factor=0.1,
+        target_curve_factor=0.08,
+        target_blend=0.25,
+        curve_sensitivity=0.42,
+        pressure_factor=0.12,
+        width_memory=0.95,
+        pressure_time_weight=2.5,
+        travel_weight=0.16,
+        fade_min_alpha=210,
         fade_max_alpha=255,
-        fade_speed_weight=84.0,
-        fade_curve_weight=46.0,
+        fade_speed_weight=88.0,
+        fade_curve_weight=54.0,
         base_alpha=255,
-        shadow_alpha=58,
-        shadow_alpha_scale=0.25,
-        shadow_width_scale=1.18,
+        shadow_alpha=70,
+        shadow_alpha_scale=0.26,
+        shadow_width_scale=1.16,
         texture=None,
         composition_mode=QPainter.CompositionMode.CompositionMode_SourceOver,
-        color_lighten=0.92,
-        target_max_factor=1.18,
-        width_change_limit=0.042,
+        color_lighten=1.0,
+        target_max_factor=1.16,
+        width_change_limit=0.028,
         noise_strength=0.0,
-        fill_alpha_boost=0,
-        feather_strength=0.18,
-        edge_highlight_alpha=40,
+        fill_alpha_boost=12,
+        feather_strength=0.14,
+        edge_highlight_alpha=46,
         solid_fill=True,
+        target_responsiveness=0.32,
+        width_accel=0.16,
+        width_velocity_limit=0.18,
+        width_velocity_damping=0.68,
     ),
     PenStyle.HIGHLIGHTER: PenStyleConfig(
         key="highlighter",
         display_name="荧光笔",
         description="柔和半透明，均匀覆盖文本的划重点效果。",
-        slider_range=(10, 30),
+        slider_range=(12, 30),
         default_base=18,
-        width_multiplier=1.92,
+        width_multiplier=1.9,
         smoothing=0.9,
-        speed_base_multiplier=32.0,
-        speed_base_offset=48.0,
-        target_min_factor=0.98,
-        target_speed_factor=0.08,
-        target_curve_factor=0.05,
-        target_blend=0.24,
-        curve_sensitivity=0.32,
-        pressure_factor=0.04,
-        width_memory=0.95,
-        pressure_time_weight=2.0,
-        travel_weight=0.08,
-        fade_min_alpha=70,
+        speed_base_multiplier=34.0,
+        speed_base_offset=52.0,
+        target_min_factor=0.94,
+        target_speed_factor=0.06,
+        target_curve_factor=0.04,
+        target_blend=0.22,
+        curve_sensitivity=0.3,
+        pressure_factor=0.05,
+        width_memory=0.96,
+        pressure_time_weight=2.2,
+        travel_weight=0.09,
+        fade_min_alpha=60,
         fade_max_alpha=190,
-        fade_speed_weight=68.0,
-        fade_curve_weight=28.0,
-        base_alpha=175,
+        fade_speed_weight=60.0,
+        fade_curve_weight=30.0,
+        base_alpha=190,
         shadow_alpha=0,
         shadow_alpha_scale=0.0,
         shadow_width_scale=1.0,
@@ -1512,50 +1532,60 @@ PEN_STYLE_CONFIGS: Dict[PenStyle, PenStyleConfig] = {
         composition_mode=QPainter.CompositionMode.CompositionMode_SourceOver,
         color_lighten=1.0,
         target_max_factor=1.08,
-        width_change_limit=0.032,
+        width_change_limit=0.022,
         noise_strength=0.0,
         fill_alpha_boost=0,
-        feather_strength=0.5,
+        feather_strength=0.36,
         edge_highlight_alpha=0,
         solid_fill=True,
+        opacity_range=(96, 232),
+        default_opacity=180,
+        target_responsiveness=0.28,
+        width_accel=0.12,
+        width_velocity_limit=0.16,
+        width_velocity_damping=0.76,
     ),
     PenStyle.FOUNTAIN: PenStyleConfig(
         key="fountain",
         display_name="钢笔",
         description="细腻流畅，接近旧版画笔的书写体验。",
-        slider_range=(4, 24),
-        default_base=9,
-        width_multiplier=1.0,
-        smoothing=0.85,
-        speed_base_multiplier=22.0,
-        speed_base_offset=36.0,
-        target_min_factor=0.58,
-        target_speed_factor=0.18,
-        target_curve_factor=0.22,
-        target_blend=0.3,
-        curve_sensitivity=0.58,
-        pressure_factor=0.22,
-        width_memory=0.9,
+        slider_range=(5, 24),
+        default_base=10,
+        width_multiplier=1.04,
+        smoothing=0.86,
+        speed_base_multiplier=24.0,
+        speed_base_offset=38.0,
+        target_min_factor=0.62,
+        target_speed_factor=0.16,
+        target_curve_factor=0.2,
+        target_blend=0.28,
+        curve_sensitivity=0.56,
+        pressure_factor=0.2,
+        width_memory=0.92,
         pressure_time_weight=2.8,
-        travel_weight=0.22,
-        fade_min_alpha=130,
+        travel_weight=0.2,
+        fade_min_alpha=140,
         fade_max_alpha=240,
-        fade_speed_weight=106.0,
-        fade_curve_weight=68.0,
+        fade_speed_weight=102.0,
+        fade_curve_weight=64.0,
         base_alpha=255,
         shadow_alpha=70,
-        shadow_alpha_scale=0.36,
-        shadow_width_scale=1.12,
+        shadow_alpha_scale=0.34,
+        shadow_width_scale=1.14,
         texture=None,
         composition_mode=QPainter.CompositionMode.CompositionMode_SourceOver,
         color_lighten=1.0,
-        target_max_factor=1.12,
-        width_change_limit=0.045,
+        target_max_factor=1.14,
+        width_change_limit=0.03,
         noise_strength=0.0,
         fill_alpha_boost=10,
-        feather_strength=0.12,
-        edge_highlight_alpha=45,
+        feather_strength=0.1,
+        edge_highlight_alpha=40,
         solid_fill=True,
+        target_responsiveness=0.38,
+        width_accel=0.2,
+        width_velocity_limit=0.2,
+        width_velocity_damping=0.7,
     ),
     PenStyle.BRUSH: PenStyleConfig(
         key="brush",
@@ -1563,37 +1593,41 @@ PEN_STYLE_CONFIGS: Dict[PenStyle, PenStyleConfig] = {
         description="富有笔锋、墨色厚实的毛笔效果。",
         slider_range=(6, 20),
         default_base=12,
-        width_multiplier=1.42,
-        smoothing=0.82,
-        speed_base_multiplier=20.0,
-        speed_base_offset=32.0,
-        target_min_factor=0.68,
-        target_speed_factor=0.24,
-        target_curve_factor=0.26,
-        target_blend=0.32,
-        curve_sensitivity=0.58,
-        pressure_factor=0.28,
-        width_memory=0.88,
+        width_multiplier=1.46,
+        smoothing=0.84,
+        speed_base_multiplier=22.0,
+        speed_base_offset=34.0,
+        target_min_factor=0.7,
+        target_speed_factor=0.22,
+        target_curve_factor=0.24,
+        target_blend=0.3,
+        curve_sensitivity=0.6,
+        pressure_factor=0.26,
+        width_memory=0.9,
         pressure_time_weight=3.0,
         travel_weight=0.24,
-        fade_min_alpha=140,
+        fade_min_alpha=150,
         fade_max_alpha=255,
-        fade_speed_weight=124.0,
-        fade_curve_weight=76.0,
+        fade_speed_weight=120.0,
+        fade_curve_weight=72.0,
         base_alpha=255,
-        shadow_alpha=100,
-        shadow_alpha_scale=0.32,
-        shadow_width_scale=1.22,
+        shadow_alpha=110,
+        shadow_alpha_scale=0.34,
+        shadow_width_scale=1.2,
         texture=None,
         composition_mode=QPainter.CompositionMode.CompositionMode_SourceOver,
         color_lighten=1.0,
-        target_max_factor=1.32,
-        width_change_limit=0.05,
+        target_max_factor=1.28,
+        width_change_limit=0.034,
         noise_strength=0.0,
-        fill_alpha_boost=28,
-        feather_strength=0.2,
-        edge_highlight_alpha=75,
+        fill_alpha_boost=32,
+        feather_strength=0.18,
+        edge_highlight_alpha=70,
         solid_fill=True,
+        target_responsiveness=0.34,
+        width_accel=0.24,
+        width_velocity_limit=0.24,
+        width_velocity_damping=0.66,
     ),
 }
 
@@ -1612,7 +1646,7 @@ def get_pen_style_config(style: PenStyle) -> PenStyleConfig:
 def clamp_base_size_for_style(style: PenStyle, base_size: float) -> float:
     config = get_pen_style_config(style)
     minimum, maximum = config.slider_range
-    return float(max(minimum, min(maximum, base_size)))
+    return float(clamp(base_size, minimum, maximum))
 
 
 def configure_pen_for_style(
@@ -1622,6 +1656,10 @@ def configure_pen_for_style(
     width: float,
     fade_alpha: int,
     style: PenStyle,
+    *,
+    base_alpha_override: Optional[int] = None,
+    shadow_alpha_override: Optional[int] = None,
+    alpha_scale: float = 1.0,
 ) -> None:
     config = get_pen_style_config(style)
     effective_width = max(0.6, float(width))
@@ -1629,8 +1667,10 @@ def configure_pen_for_style(
     if config.color_lighten and abs(config.color_lighten - 1.0) > 1e-3:
         light_factor = max(25, min(400, int(config.color_lighten * 100)))
         base_color = base_color.lighter(light_factor)
-    if config.base_alpha < 255:
-        base_color.setAlpha(config.base_alpha)
+    target_alpha = base_alpha_override if base_alpha_override is not None else config.base_alpha
+    target_alpha = int(clamp(target_alpha, 0, 255))
+    if target_alpha < 255:
+        base_color.setAlpha(target_alpha)
     pen.setColor(base_color)
     pen.setWidthF(effective_width)
     pen.setStyle(Qt.PenStyle.SolidLine)
@@ -1643,13 +1683,15 @@ def configure_pen_for_style(
     pen.setCosmetic(False)
 
     shadow_color = QColor(base_color)
-    if config.shadow_alpha <= 0 and config.shadow_alpha_scale <= 0:
+    shadow_alpha = shadow_alpha_override if shadow_alpha_override is not None else config.shadow_alpha
+    if shadow_alpha <= 0 and config.shadow_alpha_scale <= 0:
         shadow_color.setAlpha(0)
     else:
         composite_alpha = int(
-            max(
+            clamp(
+                shadow_alpha + fade_alpha * config.shadow_alpha_scale * max(0.0, alpha_scale),
                 0,
-                min(255, config.shadow_alpha + fade_alpha * config.shadow_alpha_scale),
+                255,
             )
         )
         shadow_color.setAlpha(composite_alpha)
@@ -1663,6 +1705,33 @@ def configure_pen_for_style(
     else:
         shadow_pen.setBrush(QBrush(shadow_color))
     shadow_pen.setCosmetic(False)
+
+
+def resolve_pen_opacity(
+    config: PenStyleConfig,
+    override_alpha: Optional[int],
+) -> tuple[int, int, int, int, float]:
+    """Return (base_alpha, fade_min, fade_max, shadow_alpha, scale)."""
+
+    base_alpha = int(config.base_alpha)
+    if config.opacity_range is not None:
+        min_alpha, max_alpha = config.opacity_range
+    else:
+        min_alpha = base_alpha
+        max_alpha = base_alpha
+    if config.default_opacity is not None:
+        default_alpha = int(config.default_opacity)
+    else:
+        default_alpha = base_alpha
+    target_alpha = override_alpha if override_alpha is not None else default_alpha
+    target_alpha = int(clamp(target_alpha, min_alpha, max_alpha))
+    scale = 1.0
+    if base_alpha > 0:
+        scale = max(0.0, target_alpha / float(base_alpha))
+    fade_min = int(clamp(config.fade_min_alpha * scale, 0, 255))
+    fade_max = int(clamp(config.fade_max_alpha * scale, fade_min, 255))
+    shadow_alpha = int(clamp(config.shadow_alpha * scale, 0, 255))
+    return target_alpha, fade_min, fade_max, shadow_alpha, scale
 
 
 class _PenStyleEffects:
@@ -1718,7 +1787,8 @@ class _PenStyleEffects:
         if width <= 0.0:
             return
         style_key = config.key
-        fill_alpha = min(255, max(0, config.base_alpha + config.fill_alpha_boost))
+        base_alpha = base_color.alpha() if base_color.isValid() else config.base_alpha
+        fill_alpha = int(clamp(base_alpha + config.fill_alpha_boost, 0, 255))
         color = QColor(base_color)
 
         def _fill(stroke_area: QPainterPath, fill_color: QColor) -> None:
@@ -1729,16 +1799,16 @@ class _PenStyleEffects:
             painter.restore()
 
         if style_key == "chalk":
-            stroke_area = cls._stroke_path(path, width * 1.18)
+            stroke_area = cls._stroke_path(path, width * 1.12)
             body_color = QColor(color)
             body_color.setAlpha(fill_alpha)
             _fill(stroke_area, body_color)
 
             edge_color = QColor(body_color)
-            edge_color.setAlpha(int(fill_alpha * 0.45))
+            edge_color.setAlpha(int(fill_alpha * 0.42))
             edge_pen = QPen(
                 edge_color,
-                max(0.9, width * (1.05 + config.feather_strength * 0.35)),
+                max(0.9, width * (1.02 + config.feather_strength * 0.3)),
                 Qt.PenStyle.SolidLine,
                 Qt.PenCapStyle.RoundCap,
                 Qt.PenJoinStyle.RoundJoin,
@@ -1763,14 +1833,14 @@ class _PenStyleEffects:
             return
 
         if style_key == "highlighter":
-            stroke_area = cls._stroke_path(path, width * 1.05)
+            stroke_area = cls._stroke_path(path, width * 1.04)
             body_color = QColor(color)
             body_color.setAlpha(fill_alpha)
             _fill(stroke_area, body_color)
 
             if config.feather_strength > 0:
                 glow_color = QColor(body_color)
-                glow_color.setAlpha(int(fill_alpha * 0.35))
+                glow_color.setAlpha(int(fill_alpha * 0.32))
                 glow_pen = QPen(
                     glow_color,
                     max(0.8, width * (1.0 + config.feather_strength)),
@@ -1785,17 +1855,17 @@ class _PenStyleEffects:
             return
 
         if style_key == "brush":
-            stroke_area = cls._stroke_path(path, width * 1.1)
+            stroke_area = cls._stroke_path(path, width * 1.08)
             body_color = QColor(color)
             body_color.setAlpha(fill_alpha)
             _fill(stroke_area, body_color)
 
             depth_color = QColor(body_color)
-            depth_color = depth_color.darker(125)
-            depth_color.setAlpha(int(fill_alpha * 0.55))
+            depth_color = depth_color.darker(118)
+            depth_color.setAlpha(int(fill_alpha * 0.6))
             depth_pen = QPen(
                 depth_color,
-                max(0.8, width * 0.74),
+                max(0.8, width * 0.68),
                 Qt.PenStyle.SolidLine,
                 Qt.PenCapStyle.RoundCap,
                 Qt.PenJoinStyle.RoundJoin,
@@ -1859,6 +1929,7 @@ def render_pen_preview_pixmap(
     base_size: float,
     *,
     size: QSize = QSize(200, 64),
+    opacity_override: Optional[int] = None,
 ) -> QPixmap:
     width = max(60, size.width())
     height = max(36, size.height())
@@ -1875,9 +1946,23 @@ def render_pen_preview_pixmap(
     base_width = clamp_base_size_for_style(style, base_size)
     effective_width = max(1.0, float(base_width) * config.width_multiplier)
 
+    base_alpha, fade_min, fade_max, shadow_alpha, alpha_scale = resolve_pen_opacity(
+        config, opacity_override
+    )
+
     pen = QPen()
     shadow_pen = QPen()
-    configure_pen_for_style(pen, shadow_pen, color, effective_width, config.fade_max_alpha, style)
+    configure_pen_for_style(
+        pen,
+        shadow_pen,
+        color,
+        effective_width,
+        fade_max,
+        style,
+        base_alpha_override=base_alpha,
+        shadow_alpha_override=shadow_alpha,
+        alpha_scale=alpha_scale,
+    )
 
     path = QPainterPath(QPointF(14, height * 0.7))
     path.cubicTo(
@@ -1952,6 +2037,7 @@ class PenSettingsDialog(QDialog):
         initial_base_size: float = 12,
         initial_color: str = "#FF0000",
         initial_style: Union[PenStyle, str] = _DEFAULT_PEN_STYLE,
+        initial_opacity_overrides: Optional[Mapping[PenStyle, int]] = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("画笔设置")
@@ -1966,6 +2052,15 @@ class PenSettingsDialog(QDialog):
         self._initial_base_size = clamp_base_size_for_style(
             self._current_style, float(initial_base_size)
         )
+        overrides: Dict[PenStyle, int] = {}
+        if initial_opacity_overrides:
+            for key, value in initial_opacity_overrides.items():
+                if isinstance(key, PenStyle):
+                    try:
+                        overrides[key] = int(value)
+                    except (TypeError, ValueError):
+                        continue
+        self._opacity_overrides: Dict[PenStyle, int] = overrides
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
@@ -1979,7 +2074,16 @@ class PenSettingsDialog(QDialog):
         self.style_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         for style in PEN_STYLE_ORDER:
             config = get_pen_style_config(style)
-            icon = QIcon(render_pen_preview_pixmap(self.pen_color, style, config.default_base, size=QSize(96, 40)))
+            override_alpha = self._resolve_opacity_for_style(style)
+            icon = QIcon(
+                render_pen_preview_pixmap(
+                    self.pen_color,
+                    style,
+                    config.default_base,
+                    size=QSize(96, 40),
+                    opacity_override=override_alpha,
+                )
+            )
             self.style_combo.addItem(icon, config.display_name, style)
             self.style_combo.setItemData(
                 self.style_combo.count() - 1,
@@ -2006,6 +2110,20 @@ class PenSettingsDialog(QDialog):
         size_layout.addWidget(self.size_slider, 1)
         size_layout.addWidget(self.size_value)
         layout.addLayout(size_layout)
+
+        self.opacity_container = QWidget(self)
+        opacity_layout = QHBoxLayout(self.opacity_container)
+        opacity_layout.setContentsMargins(0, 0, 0, 0)
+        opacity_layout.setSpacing(6)
+        self.opacity_label = QLabel("透明度:")
+        self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.opacity_slider.setRange(0, 100)
+        self.opacity_slider.setMinimumWidth(140)
+        self.opacity_value = QLabel("")
+        opacity_layout.addWidget(self.opacity_label)
+        opacity_layout.addWidget(self.opacity_slider, 1)
+        opacity_layout.addWidget(self.opacity_value)
+        layout.addWidget(self.opacity_container)
 
         self.preview_label = QLabel(self)
         self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -2049,6 +2167,7 @@ class PenSettingsDialog(QDialog):
         self.style_combo.blockSignals(prev_block)
         self.style_combo.currentIndexChanged.connect(self._on_style_changed)
         self.size_slider.valueChanged.connect(self._on_size_changed)
+        self.opacity_slider.valueChanged.connect(self._on_opacity_changed)
 
         self._update_style_description()
         self._apply_style_to_slider(base_size=self._initial_base_size, use_default=False)
@@ -2084,12 +2203,46 @@ class PenSettingsDialog(QDialog):
         self.size_slider.setValue(int(value))
         self.size_slider.blockSignals(prev_block)
         self._update_size_label()
+        self._apply_style_to_opacity(use_default=use_default)
 
     def _update_size_label(self) -> None:
         config = get_pen_style_config(self._current_style)
         base_value = int(self.size_slider.value())
         effective = int(round(base_value * config.width_multiplier))
         self.size_value.setText(f"基础 {base_value}px · 实际≈{effective}px")
+
+    def _apply_style_to_opacity(self, *, use_default: bool) -> None:
+        config = get_pen_style_config(self._current_style)
+        if not config.opacity_range:
+            self.opacity_container.hide()
+            self.opacity_value.setText("")
+            return
+        self.opacity_container.show()
+        if config.default_opacity is not None:
+            default_alpha = int(config.default_opacity)
+        else:
+            default_alpha = int(config.base_alpha)
+        if use_default:
+            alpha = default_alpha
+        else:
+            alpha = self._resolve_opacity_for_style(self._current_style)
+        min_alpha, max_alpha = config.opacity_range
+        alpha = int(clamp(alpha, min_alpha, max_alpha))
+        self._opacity_overrides[self._current_style] = alpha
+        percent = self._alpha_to_percent(alpha, config)
+        prev_block = self.opacity_slider.blockSignals(True)
+        self.opacity_slider.setValue(percent)
+        self.opacity_slider.blockSignals(prev_block)
+        self._update_opacity_label()
+
+    def _update_opacity_label(self) -> None:
+        config = get_pen_style_config(self._current_style)
+        if not config.opacity_range:
+            self.opacity_value.setText("")
+            return
+        alpha = self._resolve_opacity_for_style(self._current_style)
+        percent = self._alpha_to_percent(alpha, config)
+        self.opacity_value.setText(f"{percent}% · α={alpha}")
 
     def _update_style_description(self) -> None:
         config = get_pen_style_config(self._current_style)
@@ -2098,11 +2251,50 @@ class PenSettingsDialog(QDialog):
             f"{config.description}（基础粗细范围 {minimum} - {maximum} 像素）"
         )
 
+    def _resolve_opacity_for_style(self, style: PenStyle) -> int:
+        config = get_pen_style_config(style)
+        if config.opacity_range:
+            min_alpha, max_alpha = config.opacity_range
+        else:
+            min_alpha = int(config.base_alpha)
+            max_alpha = int(config.base_alpha)
+        if config.default_opacity is not None:
+            default_alpha = int(config.default_opacity)
+        else:
+            default_alpha = int(config.base_alpha)
+        stored = self._opacity_overrides.get(style, default_alpha)
+        return int(clamp(stored, min_alpha, max_alpha))
+
+    def _alpha_to_percent(self, alpha: int, config: PenStyleConfig) -> int:
+        if not config.opacity_range:
+            return 100
+        min_alpha, max_alpha = config.opacity_range
+        span = max(1, max_alpha - min_alpha)
+        percent = int(round((alpha - min_alpha) * 100 / span))
+        return int(clamp(percent, 0, 100))
+
+    def _percent_to_alpha(self, percent: int, config: PenStyleConfig) -> int:
+        if not config.opacity_range:
+            return int(config.base_alpha)
+        percent = int(clamp(percent, 0, 100))
+        min_alpha, max_alpha = config.opacity_range
+        span = max(0, max_alpha - min_alpha)
+        if span <= 0:
+            return min_alpha
+        alpha = min_alpha + int(round(span * (percent / 100.0)))
+        return int(clamp(alpha, min_alpha, max_alpha))
+
     def _refresh_style_icons(self) -> None:
         for index, style in enumerate(PEN_STYLE_ORDER):
             config = get_pen_style_config(style)
             icon = QIcon(
-                render_pen_preview_pixmap(self.pen_color, style, config.default_base, size=QSize(96, 40))
+                render_pen_preview_pixmap(
+                    self.pen_color,
+                    style,
+                    config.default_base,
+                    size=QSize(96, 40),
+                    opacity_override=self._resolve_opacity_for_style(style),
+                )
             )
             self.style_combo.setItemIcon(index, icon)
 
@@ -2112,6 +2304,7 @@ class PenSettingsDialog(QDialog):
             self._current_style,
             float(self.size_slider.value()),
             size=self._preview_size,
+            opacity_override=self._resolve_opacity_for_style(self._current_style),
         )
         self.preview_label.setPixmap(pixmap)
         self.preview_label.setFixedSize(pixmap.size())
@@ -2130,6 +2323,17 @@ class PenSettingsDialog(QDialog):
         self._update_size_label()
         self._update_preview()
 
+    def _on_opacity_changed(self) -> None:
+        config = get_pen_style_config(self._current_style)
+        if not config.opacity_range:
+            return
+        percent = int(self.opacity_slider.value())
+        alpha = self._percent_to_alpha(percent, config)
+        self._opacity_overrides[self._current_style] = alpha
+        self._update_opacity_label()
+        self._refresh_style_icons()
+        self._update_preview()
+
     def _select_color(self, color_hex: str) -> None:
         color = QColor(color_hex)
         if not color.isValid():
@@ -2138,8 +2342,13 @@ class PenSettingsDialog(QDialog):
         self._refresh_style_icons()
         self._update_preview()
 
-    def get_settings(self) -> tuple[int, QColor, PenStyle]:
-        return int(self.size_slider.value()), QColor(self.pen_color), self._current_style
+    def get_settings(self) -> tuple[int, QColor, PenStyle, Dict[PenStyle, int]]:
+        return (
+            int(self.size_slider.value()),
+            QColor(self.pen_color),
+            self._current_style,
+            {style: value for style, value in self._opacity_overrides.items()},
+        )
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
@@ -2500,7 +2709,12 @@ class FloatingToolbar(QWidget):
                 button.setChecked(False)
                 button.blockSignals(prev)
         if mode == "brush":
-            self.update_pen_tooltip(self.overlay.pen_style, self.overlay.pen_base_size, self.overlay.pen_size)
+            self.update_pen_tooltip(
+                self.overlay.pen_style,
+                self.overlay.pen_base_size,
+                self.overlay.pen_size,
+                opacity_percent=self.overlay._get_active_opacity_percent(),
+            )
         if self._whiteboard_locked:
             for button in (self.btn_cursor, self.btn_slide_down, self.btn_slide_up):
                 button.setEnabled(False)
@@ -2511,10 +2725,20 @@ class FloatingToolbar(QWidget):
     def update_undo_state(self, enabled: bool) -> None:
         self.btn_undo.setEnabled(enabled)
 
-    def update_pen_tooltip(self, style: PenStyle, base_size: float, effective_size: int) -> None:
+    def update_pen_tooltip(
+        self,
+        style: PenStyle,
+        base_size: float,
+        effective_size: int,
+        *,
+        opacity_percent: Optional[int] = None,
+    ) -> None:
         config = get_pen_style_config(style)
         base_value = int(round(base_size))
-        tooltip = f"画笔设置（{config.display_name} · 基础{base_value}px · 实际≈{effective_size}px）"
+        tooltip = f"画笔设置（{config.display_name} · 基础{base_value}px · 实际≈{effective_size}px"
+        if opacity_percent is not None:
+            tooltip = f"{tooltip} · 透明度{opacity_percent}%"
+        tooltip += "）"
         self.btn_settings.setToolTip(tooltip)
 
     def eventFilter(self, obj, event):
@@ -3924,6 +4148,26 @@ class OverlayWindow(QWidget):
         self.pen_color = QColor(color_hex)
         if not self.pen_color.isValid():
             self.pen_color = QColor("#ff0000")
+        self._style_opacity_overrides: Dict[PenStyle, int] = {}
+        for style in PEN_STYLE_ORDER:
+            config = get_pen_style_config(style)
+            if not config.opacity_range:
+                continue
+            key = f"{style.value}_opacity"
+            raw_value = paint_settings.get(key)
+            if raw_value is None:
+                if config.default_opacity is not None:
+                    value = int(config.default_opacity)
+                else:
+                    value = int(config.base_alpha)
+            else:
+                try:
+                    value = int(float(raw_value))
+                except (TypeError, ValueError):
+                    value = int(config.default_opacity or config.base_alpha)
+            min_alpha, max_alpha = config.opacity_range
+            value = int(clamp(value, min_alpha, max_alpha))
+            self._style_opacity_overrides[style] = value
         config = get_pen_style_config(self.pen_style)
         self.pen_size = max(1, int(round(self.pen_base_size * config.width_multiplier)))
         self.mode = "brush"
@@ -3947,6 +4191,8 @@ class OverlayWindow(QWidget):
         self._stroke_speed: float = 0.0
         self._stroke_last_midpoint: Optional[QPointF] = None
         self._stroke_filter_point: Optional[QPointF] = None
+        self._stroke_width_velocity: float = 0.0
+        self._stroke_smoothed_target: float = max(1.0, self.pen_size)
         self.navigation_active = False
         self._navigation_reasons: Dict[str, int] = {}
         self._active_navigation_keys: Set[int] = set()
@@ -3982,7 +4228,14 @@ class OverlayWindow(QWidget):
             Qt.PenJoinStyle.RoundJoin,
         )
         self._brush_composition_mode = config.composition_mode
-        self._update_brush_pen_appearance(base_width, config.fade_max_alpha)
+        self._active_base_alpha = int(config.base_alpha)
+        self._active_fade_min = int(config.fade_min_alpha)
+        self._active_fade_max = int(config.fade_max_alpha)
+        self._active_shadow_alpha = int(config.shadow_alpha)
+        self._active_alpha_scale = 1.0
+        self._refresh_pen_alpha_state()
+        self._stroke_smoothed_target = max(1.0, base_width * config.target_min_factor)
+        self._update_brush_pen_appearance(base_width, self._active_fade_max)
         self._last_preview_bounds: Optional[QRect] = None
         self.whiteboard_active = False
         self._mode_before_whiteboard: Optional[str] = None
@@ -4061,15 +4314,52 @@ class OverlayWindow(QWidget):
         return max(1.0, float(self.pen_base_size) * config.width_multiplier)
 
     def _update_brush_pen_appearance(self, width: float, fade_alpha: int) -> None:
+        target_fade = int(clamp(fade_alpha, self._active_fade_min, self._active_fade_max))
         configure_pen_for_style(
             self._brush_pen,
             self._brush_shadow_pen,
             self.pen_color,
             width,
-            fade_alpha,
+            target_fade,
             self.pen_style,
+            base_alpha_override=self._active_base_alpha,
+            shadow_alpha_override=self._active_shadow_alpha,
+            alpha_scale=self._active_alpha_scale,
         )
         self._active_pen_color = QColor(self._brush_pen.color())
+
+    def _refresh_pen_alpha_state(self) -> None:
+        config = get_pen_style_config(self.pen_style)
+        override = self._style_opacity_overrides.get(self.pen_style)
+        base_alpha, fade_min, fade_max, shadow_alpha, scale = resolve_pen_opacity(
+            config, override
+        )
+        self._active_base_alpha = base_alpha
+        self._active_fade_min = fade_min
+        self._active_fade_max = fade_max
+        self._active_shadow_alpha = shadow_alpha
+        self._active_alpha_scale = scale if scale > 0 else 1.0
+
+    def _apply_opacity_overrides(self, overrides: Mapping[PenStyle, int]) -> None:
+        updated = False
+        for style, value in overrides.items():
+            if not isinstance(style, PenStyle):
+                continue
+            config = get_pen_style_config(style)
+            if not config.opacity_range:
+                continue
+            min_alpha, max_alpha = config.opacity_range
+            default_alpha = int(config.default_opacity or config.base_alpha)
+            try:
+                alpha = int(value)
+            except (TypeError, ValueError):
+                alpha = default_alpha
+            alpha = int(clamp(alpha, min_alpha, max_alpha))
+            if self._style_opacity_overrides.get(style) != alpha:
+                self._style_opacity_overrides[style] = alpha
+                updated = True
+        if updated:
+            self._refresh_pen_alpha_state()
 
     def _apply_pen_style_change(self, *, update_cursor: bool = True) -> None:
         self.pen_base_size = clamp_base_size_for_style(self.pen_style, float(self.pen_base_size))
@@ -4077,10 +4367,13 @@ class OverlayWindow(QWidget):
         self.pen_size = max(1, int(round(self._effective_brush_width())))
         self._brush_composition_mode = config.composition_mode
         base_width = self._effective_brush_width()
-        self._update_brush_pen_appearance(base_width, config.fade_max_alpha)
+        self._refresh_pen_alpha_state()
+        self._update_brush_pen_appearance(base_width, self._active_fade_max)
         if self._brush_painter is not None:
             self._brush_painter.setCompositionMode(self._brush_composition_mode)
         self.last_width = max(1.0, base_width * config.target_min_factor)
+        self._stroke_smoothed_target = float(self.last_width)
+        self._stroke_width_velocity = 0.0
         self._stroke_target_width = float(self.last_width)
         if update_cursor:
             self.update_cursor()
@@ -4091,7 +4384,21 @@ class OverlayWindow(QWidget):
         if toolbar is None:
             return
         effective = int(round(self._effective_brush_width()))
-        toolbar.update_pen_tooltip(self.pen_style, float(self.pen_base_size), effective)
+        toolbar.update_pen_tooltip(
+            self.pen_style,
+            float(self.pen_base_size),
+            effective,
+            opacity_percent=self._get_active_opacity_percent(),
+        )
+
+    def _get_active_opacity_percent(self) -> Optional[int]:
+        config = get_pen_style_config(self.pen_style)
+        if not config.opacity_range:
+            return None
+        min_alpha, max_alpha = config.opacity_range
+        span = max(1, max_alpha - min_alpha)
+        percent = int(round((self._active_base_alpha - min_alpha) * 100 / span))
+        return int(clamp(percent, 0, 100))
 
     def _apply_whiteboard_lock(self) -> None:
         toolbar = getattr(self, "toolbar", None)
@@ -4130,12 +4437,14 @@ class OverlayWindow(QWidget):
             self.pen_base_size,
             self.pen_color.name(),
             self.pen_style,
+            initial_opacity_overrides=self._style_opacity_overrides,
         )
         if dialog.exec():
-            base_size, color, style = dialog.get_settings()
+            base_size, color, style, overrides = dialog.get_settings()
             self.pen_style = style
             self.pen_base_size = float(base_size)
             self.pen_color = QColor(color)
+            self._apply_opacity_overrides(overrides)
             self._apply_pen_style_change()
         self.set_mode(pm, ps)
         self.raise_toolbar()
@@ -5090,7 +5399,8 @@ class OverlayWindow(QWidget):
         self.pen_color = color
         config = get_pen_style_config(self.pen_style)
         base_width = self._effective_brush_width()
-        self._update_brush_pen_appearance(base_width, config.fade_max_alpha)
+        self._refresh_pen_alpha_state()
+        self._update_brush_pen_appearance(base_width, self._active_fade_max)
         self._update_pen_tooltip()
         self.set_mode("brush")
 
@@ -5118,6 +5428,13 @@ class OverlayWindow(QWidget):
         paint["brush_base_size"] = f"{self.pen_base_size:.2f}"
         paint["brush_color"] = self.pen_color.name()
         paint["brush_style"] = self.pen_style.value
+        for style in PEN_STYLE_ORDER:
+            config = get_pen_style_config(style)
+            if not config.opacity_range:
+                continue
+            default_alpha = int(config.default_opacity or config.base_alpha)
+            value = int(self._style_opacity_overrides.get(style, default_alpha))
+            paint[f"{style.value}_opacity"] = str(value)
         settings["Paint"] = paint
         self.settings_manager.save_settings(settings)
 
@@ -5144,6 +5461,8 @@ class OverlayWindow(QWidget):
         self._stroke_filter_point = None
         self._stroke_speed = 0.0
         self._stroke_target_width = float(self.last_width)
+        self._stroke_smoothed_target = float(self.last_width)
+        self._stroke_width_velocity = 0.0
 
     def _start_paint_session(self, event) -> None:
         self._push_history()
@@ -5168,8 +5487,11 @@ class OverlayWindow(QWidget):
             config = get_pen_style_config(self.pen_style)
             base_width = self._effective_brush_width()
             self.last_width = max(1.0, base_width * config.target_min_factor)
-            self._update_brush_pen_appearance(base_width, config.fade_max_alpha)
+            self._refresh_pen_alpha_state()
+            self._update_brush_pen_appearance(base_width, self._active_fade_max)
             self._stroke_target_width = float(self.last_width)
+            self._stroke_smoothed_target = float(self.last_width)
+            self._stroke_width_velocity = 0.0
         elif self.mode == "eraser":
             self._ensure_eraser_painter()
 
@@ -5391,13 +5713,27 @@ class OverlayWindow(QWidget):
         target_w = max(min_w, min(max_w, target_w))
         self._stroke_target_width = target_w
 
-        memory = min(max(config.width_memory, 0.05), 0.97)
-        cur_w = self.last_width * memory + target_w * (1.0 - memory)
-        final_step_limit = max(0.25, target_step_limit * 0.85)
-        delta_width = cur_w - self.last_width
-        if abs(delta_width) > final_step_limit:
-            cur_w = self.last_width + math.copysign(final_step_limit, delta_width)
-        cur_w = max(min_w, min(max_w, cur_w))
+        responsiveness = clamp(getattr(config, "target_responsiveness", 0.35), 0.05, 0.95)
+        smoothed_prev = getattr(self, "_stroke_smoothed_target", self.last_width)
+        smoothed_target = smoothed_prev + (target_w - smoothed_prev) * responsiveness
+        smoothed_target = float(clamp(smoothed_target, min_w, max_w))
+        self._stroke_smoothed_target = smoothed_target
+
+        velocity = getattr(self, "_stroke_width_velocity", 0.0)
+        accel = clamp(getattr(config, "width_accel", 0.18), 0.02, 0.6)
+        velocity += (smoothed_target - self.last_width) * accel
+        damping = clamp(getattr(config, "width_velocity_damping", 0.7), 0.4, 0.95)
+        velocity *= damping
+        velocity_limit = max(
+            0.06,
+            target_step_limit * 0.6,
+            effective_base * clamp(getattr(config, "width_velocity_limit", 0.22), 0.05, 0.6),
+        )
+        velocity = float(clamp(velocity, -velocity_limit, velocity_limit))
+        cur_w = self.last_width + velocity
+        memory = clamp(getattr(config, "width_memory", 0.9), 0.6, 0.985)
+        cur_w = float(clamp(self.last_width * memory + cur_w * (1.0 - memory), min_w, max_w))
+        self._stroke_width_velocity = velocity
 
         last_mid = QPointF(self._stroke_last_midpoint) if self._stroke_last_midpoint else QPointF(last_point)
         current_mid = (last_point + cur_point) / 2.0
@@ -5405,16 +5741,11 @@ class OverlayWindow(QWidget):
         path = QPainterPath(last_mid)
         path.quadTo(last_point, current_mid)
 
-        fade_alpha = int(
-            max(
-                config.fade_min_alpha,
-                min(
-                    config.fade_max_alpha,
-                    config.fade_speed_weight * speed_scale
-                    + config.fade_curve_weight * curve_scale,
-                ),
-            )
-        )
+        fade_candidate = (
+            config.fade_speed_weight * speed_scale
+            + config.fade_curve_weight * curve_scale
+        ) * max(0.0, self._active_alpha_scale)
+        fade_alpha = int(clamp(fade_candidate, self._active_fade_min, self._active_fade_max))
         self._update_brush_pen_appearance(cur_w, fade_alpha)
         painter.setPen(self._brush_shadow_pen)
         painter.drawPath(path)
@@ -8132,6 +8463,27 @@ class RollCallTimerWindow(QWidget):
 
     def _build_menu(self) -> QMenu:
         menu = QMenu(self)
+        menu.setStyleSheet(
+            """
+            QMenu {
+                background-color: #2d2e30;
+                color: #f1f3f4;
+                border: 1px solid rgba(255, 255, 255, 35);
+            }
+            QMenu::item:selected {
+                background-color: #1a73e8;
+                color: #ffffff;
+            }
+            QMenu::item:disabled {
+                color: rgba(255, 255, 255, 90);
+            }
+            QMenu::separator {
+                height: 1px;
+                background: rgba(255, 255, 255, 45);
+                margin: 4px 8px;
+            }
+            """
+        )
         disp = menu.addMenu("显示选项")
         self.show_id_action = disp.addAction("显示学号"); self.show_id_action.setCheckable(True); self.show_id_action.setChecked(self.show_id)
         self.show_id_action.toggled.connect(self._on_display_option_changed)
@@ -9604,20 +9956,32 @@ class AboutDialog(QDialog):
         layout.setContentsMargins(18, 18, 18, 18)
         layout.setSpacing(12)
         info = QLabel(
-            "<b>ClassroomTools</b><br>"
-            "作者：广州番禺王耀强<br>"
-            "知乎主页：<a href='https://www.zhihu.com/people/sciman/columns'>sciman</a><br>"
-            "公众号：sciman逸居<br>"
-            "“初中物理教研”Q群：323728546"
+            (
+                "<b>ClassroomTools</b><br>"
+                "作者：广州番禺王耀强<br>"
+                "知乎主页：<a href='https://www.zhihu.com/people/sciman/columns'>sciman</a><br>"
+                "公众号：sciman逸居<br>"
+                "GitHub：<a href='https://github.com/sciman-top/ClassroomTools'>sciman-top/ClassroomTools</a><br>"
+                "“初中物理教研”Q群：323728546"
+            )
         )
-        info.setOpenExternalLinks(True)
+        info.setOpenExternalLinks(False)
         info.setTextFormat(Qt.TextFormat.RichText)
+        info.linkActivated.connect(self._open_link)
         layout.addWidget(info)
         btn = QPushButton("确定")
         btn.clicked.connect(self.accept)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         layout.addWidget(btn, alignment=Qt.AlignmentFlag.AlignCenter)
         self.setFixedSize(self.sizeHint())
+
+    def _open_link(self, url: str) -> None:
+        if not url:
+            return
+        try:
+            QDesktopServices.openUrl(QUrl(url))
+        except Exception:
+            pass
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
