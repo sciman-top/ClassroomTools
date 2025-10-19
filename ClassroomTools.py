@@ -2284,10 +2284,10 @@ class PenSettingsDialog(QDialog):
         control_grid.setHorizontalSpacing(14)
         control_grid.setVerticalSpacing(6)
         control_items = [
-            ("ms_ppt", "控制微软 PowerPoint 幻灯片"),
-            ("ms_word", "控制微软 Word 文档滚动"),
-            ("wps_ppt", "控制 WPS 幻灯片"),
-            ("wps_word", "控制 WPS 文档滚动"),
+            ("ms_ppt", "控制PowerPoint"),
+            ("ms_word", "控制Word"),
+            ("wps_ppt", "控制WPS演示"),
+            ("wps_word", "控制WPS文档"),
         ]
         for index, (key, text) in enumerate(control_items):
             checkbox = QCheckBox(text, self)
@@ -3285,6 +3285,13 @@ class _PresentationForwarder:
         if not target:
             target = self._detect_presentation_window()
         if not target:
+            return False
+        if not self.overlay._presentation_control_allowed(target):
+            self._log_debug(
+                "focus_presentation_window: control disabled target=%s",
+                hex(target) if target else "0x0",
+            )
+            self.clear_cached_target()
             return False
         attach_pair = self._attach_to_target_thread(target)
         try:
@@ -5021,6 +5028,7 @@ class OverlayWindow(QWidget):
             self._set_navigation_reason("cursor-button", False)
             self._cursor_button_navigation = False
         focus_on_cursor = bool(self._forwarder) and mode == "cursor" and not initial
+        pending_focus_target: Optional[int] = None
         self.mode = mode
         if not self._restoring_tool:
             self._pending_tool_restore = None
@@ -5033,6 +5041,14 @@ class OverlayWindow(QWidget):
             self._eraser_last_point = None
         if self._forwarder and mode == "cursor":
             self._forwarder.clear_cached_target()
+            if focus_on_cursor:
+                try:
+                    pending_focus_target = self._forwarder.get_presentation_target()
+                except Exception:
+                    pending_focus_target = None
+                if pending_focus_target and not self._presentation_control_allowed(pending_focus_target):
+                    focus_on_cursor = False
+                    self._forwarder.clear_cached_target()
         if self.mode in {"brush", "shape"} and not self._restoring_tool:
             self._update_last_tool_snapshot()
         self._update_visibility_for_mode(initial=initial)
