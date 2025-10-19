@@ -76,6 +76,9 @@ _NAVIGATION_EXTENDED_KEYS = {VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT}
 MOUSEEVENTF_WHEEL = getattr(win32con, "MOUSEEVENTF_WHEEL", 0x0800)
 MOUSEEVENTF_LEFTDOWN = getattr(win32con, "MOUSEEVENTF_LEFTDOWN", 0x0002)
 MOUSEEVENTF_LEFTUP = getattr(win32con, "MOUSEEVENTF_LEFTUP", 0x0004)
+ASFW_ANY = getattr(win32con, "ASFW_ANY", 0xFFFFFFFF)
+SW_SHOW = getattr(win32con, "SW_SHOW", 5)
+SW_RESTORE = getattr(win32con, "SW_RESTORE", 9)
 
 if _USER32 is not None:
     _WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
@@ -151,6 +154,89 @@ def _user32_get_foreground_window() -> int:
         return int(_USER32.GetForegroundWindow())
     except Exception:
         return 0
+
+
+def _user32_force_foreground(hwnd: int) -> bool:
+    if _USER32 is None or hwnd == 0:
+        return False
+    result = False
+    attached = False
+    current_thread = 0
+    target_thread = 0
+    try:
+        if hasattr(_USER32, "AllowSetForegroundWindow"):
+            try:
+                _USER32.AllowSetForegroundWindow(ASFW_ANY)
+            except Exception:
+                pass
+        try:
+            current_thread = int(_USER32.GetCurrentThreadId())
+        except Exception:
+            current_thread = 0
+        pid = wintypes.DWORD()
+        try:
+            target_thread = int(
+                _USER32.GetWindowThreadProcessId(
+                    wintypes.HWND(hwnd), ctypes.byref(pid)
+                )
+            )
+        except Exception:
+            target_thread = 0
+        if target_thread and current_thread and target_thread != current_thread:
+            try:
+                attached = bool(
+                    _USER32.AttachThreadInput(current_thread, target_thread, True)
+                )
+            except Exception:
+                attached = False
+        try:
+            if _user32_is_window_iconic(hwnd):
+                try:
+                    _USER32.ShowWindow(wintypes.HWND(hwnd), SW_RESTORE)
+                except Exception:
+                    try:
+                        _USER32.ShowWindow(wintypes.HWND(hwnd), SW_SHOW)
+                    except Exception:
+                        pass
+            try:
+                _USER32.BringWindowToTop(wintypes.HWND(hwnd))
+            except Exception:
+                pass
+            set_foreground = False
+            try:
+                set_foreground = bool(
+                    _USER32.SetForegroundWindow(wintypes.HWND(hwnd))
+                )
+            except Exception:
+                set_foreground = False
+            set_active = False
+            try:
+                set_active = bool(_USER32.SetActiveWindow(wintypes.HWND(hwnd)))
+            except Exception:
+                set_active = False
+            set_focus = False
+            try:
+                set_focus = bool(_USER32.SetFocus(wintypes.HWND(hwnd)))
+            except Exception:
+                set_focus = False
+            if hasattr(_USER32, "SwitchToThisWindow"):
+                try:
+                    _USER32.SwitchToThisWindow(wintypes.HWND(hwnd), True)
+                    set_foreground = True
+                except Exception:
+                    pass
+            result = set_foreground or set_active or set_focus
+        finally:
+            if attached:
+                try:
+                    _USER32.AttachThreadInput(current_thread, target_thread, False)
+                except Exception:
+                    pass
+    except Exception:
+        return False
+    if not result:
+        result = _user32_get_foreground_window() == hwnd
+    return result
 
 
 def _user32_get_parent(hwnd: int) -> int:
@@ -5075,9 +5161,10 @@ class OverlayWindow(QWidget):
 
     def _prepare_word_focus(
         self, target_hwnd: int
-    ) -> Tuple[bool, Optional[Tuple[int, int, int, int]]]:
+    ) -> Tuple[bool, Optional[Tuple[int, int, int, int]], bool]:
         focus_ok = False
         rect: Optional[Tuple[int, int, int, int]] = None
+        forced_foreground = False
         if target_hwnd and _USER32 is not None:
             rect = _user32_window_rect(int(target_hwnd))
         if self._forwarder is not None and target_hwnd:
@@ -5090,6 +5177,9 @@ class OverlayWindow(QWidget):
                     focus_ok = self._forwarder.bring_target_to_foreground(int(target_hwnd))
                 except Exception:
                     focus_ok = False
+        if target_hwnd and not focus_ok:
+            forced_foreground = _user32_force_foreground(int(target_hwnd))
+            focus_ok = focus_ok or forced_foreground
         foreground_ready = self._await_foreground(target_hwnd)
         ready = bool(focus_ok or foreground_ready)
         if logger.isEnabledFor(logging.DEBUG):
@@ -5098,8 +5188,9 @@ class OverlayWindow(QWidget):
                 target=hex(target_hwnd) if target_hwnd else "0x0",
                 focus=focus_ok,
                 foreground=foreground_ready,
+                forced=forced_foreground,
             )
-        return ready, rect
+        return ready, rect, forced_foreground
 
     def _simulate_left_click(self) -> bool:
         if _USER32 is None:
@@ -5142,8 +5233,17 @@ class OverlayWindow(QWidget):
                 moved_cursor = bool(_USER32.SetCursorPos(cx, cy))
             except Exception:
                 moved_cursor = False
-        if moved_cursor and click:
+            if not moved_cursor:
+                try:
+                    QCursor.setPos(cx, cy)
+                    moved_cursor = True
+                except Exception:
+                    moved_cursor = False
+        if click:
             click_ok = self._simulate_left_click()
+            if click_ok:
+                QApplication.processEvents()
+                time.sleep(0.01)
         try:
             yield (moved_cursor, click_ok)
         finally:
@@ -5166,18 +5266,20 @@ class OverlayWindow(QWidget):
         hwnd = int(target_hwnd)
         focus_ready = False
         rect: Optional[Tuple[int, int, int, int]] = None
+        forced_foreground = False
         if self._forwarder is not None:
-            focus_ready, rect = self._prepare_word_focus(hwnd)
+            focus_ready, rect, forced_foreground = self._prepare_word_focus(hwnd)
         else:
             rect = _user32_window_rect(hwnd)
-            focus_ready = self._await_foreground(hwnd)
+            forced_foreground = _user32_force_foreground(hwnd)
+            focus_ready = self._await_foreground(hwnd) or forced_foreground
         if rect is None:
             rect = _user32_window_rect(hwnd)
         cursor_moved = False
         click_ok = False
         success = False
         used_fallback = False
-        ready = focus_ready
+        ready = focus_ready or forced_foreground
         with self._temporarily_release_keyboard():
             with self._temporary_input_passthrough():
                 cursor_context = self._word_cursor_context(hwnd, rect, click=True)
@@ -5188,10 +5290,19 @@ class OverlayWindow(QWidget):
                         ready = bool(cursor_moved or click_ok)
                     if not ready:
                         ready = self._await_foreground(hwnd)
+                    if not ready:
+                        ready = _user32_force_foreground(hwnd)
+                    if click_ok:
+                        QApplication.processEvents()
+                        time.sleep(0.02)
                     if ready:
                         if mode == "wheel":
                             success = self._fallback_send_wheel(value)
                             used_fallback = True
+                            if not success:
+                                QApplication.processEvents()
+                                time.sleep(0.02)
+                                success = self._fallback_send_wheel(value)
                         elif mode == "key":
                             send_success = False
                             if self._forwarder is not None:
@@ -5202,6 +5313,10 @@ class OverlayWindow(QWidget):
                             if not send_success:
                                 used_fallback = True
                                 send_success = self._fallback_send_virtual_key(value)
+                                if not send_success:
+                                    QApplication.processEvents()
+                                    time.sleep(0.02)
+                                    send_success = self._fallback_send_virtual_key(value)
                             success = send_success
         if not success and self._forwarder is not None:
             try:
@@ -5221,6 +5336,7 @@ class OverlayWindow(QWidget):
                 click=click_ok,
                 fallback=used_fallback,
                 success=success,
+                forced=forced_foreground,
             )
         return success
 
@@ -5275,9 +5391,12 @@ class OverlayWindow(QWidget):
             return True, False
         target_rect: Optional[Tuple[int, int, int, int]] = None
         focus_ready = False
+        forced_focus = False
         if self._forwarder is not None and target_hwnd:
             if is_word_target:
-                focus_ready, target_rect = self._prepare_word_focus(int(target_hwnd))
+                focus_ready, target_rect, forced_focus = self._prepare_word_focus(
+                    int(target_hwnd)
+                )
             else:
                 try:
                     focus_ready = self._forwarder.focus_presentation_window()
@@ -5323,6 +5442,7 @@ class OverlayWindow(QWidget):
                 focus=focus_ready,
                 cursor=cursor_moved,
                 click=click_ok,
+                forced=forced_focus,
             )
         if not handled and self._forwarder is not None:
             try:
