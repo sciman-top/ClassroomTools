@@ -6504,10 +6504,10 @@ class CountdownSettingsDialog(QDialog):
 
         layout = QVBoxLayout(self); layout.setContentsMargins(10, 10, 10, 10); layout.setSpacing(6)
 
-        minute_label = QLabel("分钟 (0-300，滑块 0-15):")
+        minute_label = QLabel("分钟 (0-150，滑块 0-25):")
         ml = QHBoxLayout(); ml.addWidget(minute_label)
-        self.minutes_spin = QSpinBox(); self.minutes_spin.setRange(0, 300); self.minutes_spin.setValue(max(0, min(300, minutes)))
-        minute_slider = QSlider(Qt.Orientation.Horizontal); minute_slider.setRange(0, 15)
+        self.minutes_spin = QSpinBox(); self.minutes_spin.setRange(0, 150); self.minutes_spin.setValue(max(0, min(150, minutes)))
+        minute_slider = QSlider(Qt.Orientation.Horizontal); minute_slider.setRange(0, 25)
         minute_slider.setValue(min(self.minutes_spin.value(), minute_slider.maximum()))
         minute_slider.valueChanged.connect(self.minutes_spin.setValue)
 
