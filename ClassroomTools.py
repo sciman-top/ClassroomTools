@@ -1660,7 +1660,7 @@ def configure_pen_for_style(
     base_alpha_override: Optional[int] = None,
     shadow_alpha_override: Optional[int] = None,
     alpha_scale: float = 1.0,
-) -> None:
+) -> QColor:
     config = get_pen_style_config(style)
     effective_width = max(0.6, float(width))
     base_color = QColor(color)
@@ -1705,6 +1705,7 @@ def configure_pen_for_style(
     else:
         shadow_pen.setBrush(QBrush(shadow_color))
     shadow_pen.setCosmetic(False)
+    return base_color
 
 
 def resolve_pen_opacity(
@@ -1952,7 +1953,7 @@ def render_pen_preview_pixmap(
 
     pen = QPen()
     shadow_pen = QPen()
-    configure_pen_for_style(
+    base_color = configure_pen_for_style(
         pen,
         shadow_pen,
         color,
@@ -1974,8 +1975,9 @@ def render_pen_preview_pixmap(
     painter.setPen(shadow_pen)
     painter.drawPath(path)
     painter.setPen(pen)
-    painter.drawPath(path)
-    _PenStyleEffects.apply(painter, path, effective_width, config, QColor(pen.color()))
+    if config.key != "highlighter":
+        painter.drawPath(path)
+    _PenStyleEffects.apply(painter, path, effective_width, config, QColor(base_color))
     painter.end()
     return pixmap
 
@@ -2038,6 +2040,7 @@ class PenSettingsDialog(QDialog):
         initial_color: str = "#FF0000",
         initial_style: Union[PenStyle, str] = _DEFAULT_PEN_STYLE,
         initial_opacity_overrides: Optional[Mapping[PenStyle, int]] = None,
+        initial_base_sizes: Optional[Mapping[PenStyle, float]] = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("画笔设置")
@@ -2052,6 +2055,18 @@ class PenSettingsDialog(QDialog):
         self._initial_base_size = clamp_base_size_for_style(
             self._current_style, float(initial_base_size)
         )
+        base_sizes: Dict[PenStyle, float] = {}
+        if initial_base_sizes:
+            for key, value in initial_base_sizes.items():
+                if not isinstance(key, PenStyle):
+                    continue
+                try:
+                    numeric = float(value)
+                except (TypeError, ValueError):
+                    continue
+                base_sizes[key] = clamp_base_size_for_style(key, numeric)
+        base_sizes.setdefault(self._current_style, float(self._initial_base_size))
+        self._style_base_sizes: Dict[PenStyle, float] = base_sizes
         overrides: Dict[PenStyle, int] = {}
         if initial_opacity_overrides:
             for key, value in initial_opacity_overrides.items():
@@ -2195,12 +2210,17 @@ class PenSettingsDialog(QDialog):
         minimum, maximum = config.slider_range
         prev_block = self.size_slider.blockSignals(True)
         self.size_slider.setRange(minimum, maximum)
-        if use_default:
-            value = config.default_base
+        if base_size is not None:
+            value = clamp_base_size_for_style(self._current_style, float(base_size))
+        elif use_default:
+            value = clamp_base_size_for_style(self._current_style, float(config.default_base))
         else:
-            target = base_size if base_size is not None else self.size_slider.value()
-            value = int(round(clamp_base_size_for_style(self._current_style, float(target))))
-        self.size_slider.setValue(int(value))
+            stored = self._style_base_sizes.get(self._current_style)
+            if stored is None:
+                stored = float(config.default_base)
+            value = clamp_base_size_for_style(self._current_style, float(stored))
+        self._style_base_sizes[self._current_style] = float(value)
+        self.size_slider.setValue(int(round(value)))
         self.size_slider.blockSignals(prev_block)
         self._update_size_label()
         self._apply_style_to_opacity(use_default=use_default)
@@ -2315,11 +2335,13 @@ class PenSettingsDialog(QDialog):
             return
         self._current_style = style
         self._update_style_description()
-        self._apply_style_to_slider(use_default=True)
+        self._apply_style_to_slider(use_default=False)
         self._refresh_style_icons()
         self._update_preview()
 
     def _on_size_changed(self) -> None:
+        value = clamp_base_size_for_style(self._current_style, float(self.size_slider.value()))
+        self._style_base_sizes[self._current_style] = float(value)
         self._update_size_label()
         self._update_preview()
 
@@ -2342,12 +2364,22 @@ class PenSettingsDialog(QDialog):
         self._refresh_style_icons()
         self._update_preview()
 
-    def get_settings(self) -> tuple[int, QColor, PenStyle, Dict[PenStyle, int]]:
+    def get_settings(
+        self,
+    ) -> tuple[float, QColor, PenStyle, Dict[PenStyle, int], Dict[PenStyle, float]]:
+        bases: Dict[PenStyle, float] = {}
+        for style in PEN_STYLE_ORDER:
+            config = get_pen_style_config(style)
+            stored = self._style_base_sizes.get(style)
+            if stored is None:
+                stored = float(config.default_base)
+            bases[style] = float(clamp_base_size_for_style(style, stored))
         return (
-            int(self.size_slider.value()),
+            float(clamp_base_size_for_style(self._current_style, float(self.size_slider.value()))),
             QColor(self.pen_color),
             self._current_style,
             {style: value for style, value in self._opacity_overrides.items()},
+            bases,
         )
 
     def showEvent(self, event) -> None:  # type: ignore[override]
@@ -4168,6 +4200,26 @@ class OverlayWindow(QWidget):
             min_alpha, max_alpha = config.opacity_range
             value = int(clamp(value, min_alpha, max_alpha))
             self._style_opacity_overrides[style] = value
+        self._style_base_sizes: Dict[PenStyle, float] = {}
+        for style in PEN_STYLE_ORDER:
+            style_config = get_pen_style_config(style)
+            key = f"{style.value}_base_size"
+            raw_base = paint_settings.get(key)
+            if raw_base is None:
+                if style == self.pen_style:
+                    stored = float(self.pen_base_size)
+                else:
+                    stored = float(style_config.default_base)
+            else:
+                try:
+                    stored = float(raw_base)
+                except (TypeError, ValueError):
+                    stored = float(style_config.default_base)
+            stored = clamp_base_size_for_style(style, stored)
+            self._style_base_sizes[style] = float(stored)
+        self.pen_base_size = float(
+            self._style_base_sizes.get(self.pen_style, float(self.pen_base_size))
+        )
         config = get_pen_style_config(self.pen_style)
         self.pen_size = max(1, int(round(self.pen_base_size * config.width_multiplier)))
         self.mode = "brush"
@@ -4315,7 +4367,7 @@ class OverlayWindow(QWidget):
 
     def _update_brush_pen_appearance(self, width: float, fade_alpha: int) -> None:
         target_fade = int(clamp(fade_alpha, self._active_fade_min, self._active_fade_max))
-        configure_pen_for_style(
+        base_color = configure_pen_for_style(
             self._brush_pen,
             self._brush_shadow_pen,
             self.pen_color,
@@ -4326,7 +4378,7 @@ class OverlayWindow(QWidget):
             shadow_alpha_override=self._active_shadow_alpha,
             alpha_scale=self._active_alpha_scale,
         )
-        self._active_pen_color = QColor(self._brush_pen.color())
+        self._active_pen_color = QColor(base_color)
 
     def _refresh_pen_alpha_state(self) -> None:
         config = get_pen_style_config(self.pen_style)
@@ -4361,8 +4413,20 @@ class OverlayWindow(QWidget):
         if updated:
             self._refresh_pen_alpha_state()
 
+    def _ingest_style_base_sizes(self, bases: Mapping[PenStyle, float]) -> None:
+        for style, value in bases.items():
+            if not isinstance(style, PenStyle):
+                continue
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                continue
+            clamped = clamp_base_size_for_style(style, numeric)
+            self._style_base_sizes[style] = float(clamped)
+
     def _apply_pen_style_change(self, *, update_cursor: bool = True) -> None:
         self.pen_base_size = clamp_base_size_for_style(self.pen_style, float(self.pen_base_size))
+        self._style_base_sizes[self.pen_style] = float(self.pen_base_size)
         config = get_pen_style_config(self.pen_style)
         self.pen_size = max(1, int(round(self._effective_brush_width())))
         self._brush_composition_mode = config.composition_mode
@@ -4438,11 +4502,16 @@ class OverlayWindow(QWidget):
             self.pen_color.name(),
             self.pen_style,
             initial_opacity_overrides=self._style_opacity_overrides,
+            initial_base_sizes=self._style_base_sizes,
         )
         if dialog.exec():
-            base_size, color, style, overrides = dialog.get_settings()
+            base_size, color, style, overrides, base_sizes = dialog.get_settings()
+            self._ingest_style_base_sizes(base_sizes)
             self.pen_style = style
             self.pen_base_size = float(base_size)
+            self._style_base_sizes[self.pen_style] = float(
+                clamp_base_size_for_style(self.pen_style, self.pen_base_size)
+            )
             self.pen_color = QColor(color)
             self._apply_opacity_overrides(overrides)
             self._apply_pen_style_change()
@@ -5430,8 +5499,16 @@ class OverlayWindow(QWidget):
         paint["brush_base_size"] = f"{self.pen_base_size:.2f}"
         paint["brush_color"] = self.pen_color.name()
         paint["brush_style"] = self.pen_style.value
+        self._style_base_sizes[self.pen_style] = float(
+            clamp_base_size_for_style(self.pen_style, float(self.pen_base_size))
+        )
         for style in PEN_STYLE_ORDER:
             config = get_pen_style_config(style)
+            base_value = clamp_base_size_for_style(
+                style,
+                float(self._style_base_sizes.get(style, float(config.default_base))),
+            )
+            paint[f"{style.value}_base_size"] = f"{base_value:.2f}"
             if not config.opacity_range:
                 continue
             default_alpha = int(config.default_opacity or config.base_alpha)
@@ -5752,7 +5829,8 @@ class OverlayWindow(QWidget):
         painter.setPen(self._brush_shadow_pen)
         painter.drawPath(path)
         painter.setPen(self._brush_pen)
-        painter.drawPath(path)
+        if config.key != "highlighter":
+            painter.drawPath(path)
         _PenStyleEffects.apply(painter, path, cur_w, config, QColor(self._active_pen_color))
 
         self.prev_point = QPointF(last_point)
