@@ -1413,6 +1413,7 @@ class PenStyleConfig:
     target_min_factor: float
     target_speed_factor: float
     target_curve_factor: float
+    target_blend: float
     curve_sensitivity: float
     pressure_factor: float
     width_memory: float
@@ -1448,35 +1449,36 @@ PEN_STYLE_CONFIGS: Dict[PenStyle, PenStyleConfig] = {
         description="粉笔质感，色彩饱满且边缘柔和。",
         slider_range=(6, 36),
         default_base=15,
-        width_multiplier=1.08,
-        smoothing=0.85,
+        width_multiplier=1.04,
+        smoothing=0.9,
         speed_base_multiplier=28.0,
         speed_base_offset=42.0,
-        target_min_factor=0.78,
-        target_speed_factor=0.18,
-        target_curve_factor=0.16,
-        curve_sensitivity=0.48,
-        pressure_factor=0.12,
-        width_memory=0.9,
+        target_min_factor=0.9,
+        target_speed_factor=0.12,
+        target_curve_factor=0.1,
+        target_blend=0.28,
+        curve_sensitivity=0.44,
+        pressure_factor=0.1,
+        width_memory=0.94,
         pressure_time_weight=2.6,
         travel_weight=0.14,
-        fade_min_alpha=180,
+        fade_min_alpha=190,
         fade_max_alpha=255,
-        fade_speed_weight=90.0,
-        fade_curve_weight=50.0,
+        fade_speed_weight=84.0,
+        fade_curve_weight=46.0,
         base_alpha=255,
-        shadow_alpha=70,
+        shadow_alpha=58,
         shadow_alpha_scale=0.25,
-        shadow_width_scale=1.22,
+        shadow_width_scale=1.18,
         texture=None,
         composition_mode=QPainter.CompositionMode.CompositionMode_SourceOver,
-        color_lighten=1.0,
-        target_max_factor=1.32,
-        width_change_limit=0.06,
+        color_lighten=0.92,
+        target_max_factor=1.18,
+        width_change_limit=0.042,
         noise_strength=0.0,
         fill_alpha_boost=0,
-        feather_strength=0.22,
-        edge_highlight_alpha=70,
+        feather_strength=0.18,
+        edge_highlight_alpha=40,
         solid_fill=True,
     ),
     PenStyle.HIGHLIGHTER: PenStyleConfig(
@@ -1485,34 +1487,35 @@ PEN_STYLE_CONFIGS: Dict[PenStyle, PenStyleConfig] = {
         description="柔和半透明，均匀覆盖文本的划重点效果。",
         slider_range=(10, 30),
         default_base=18,
-        width_multiplier=2.0,
-        smoothing=0.88,
+        width_multiplier=1.92,
+        smoothing=0.9,
         speed_base_multiplier=32.0,
         speed_base_offset=48.0,
-        target_min_factor=0.96,
-        target_speed_factor=0.1,
-        target_curve_factor=0.08,
-        curve_sensitivity=0.36,
-        pressure_factor=0.05,
-        width_memory=0.93,
+        target_min_factor=0.98,
+        target_speed_factor=0.08,
+        target_curve_factor=0.05,
+        target_blend=0.24,
+        curve_sensitivity=0.32,
+        pressure_factor=0.04,
+        width_memory=0.95,
         pressure_time_weight=2.0,
         travel_weight=0.08,
-        fade_min_alpha=80,
-        fade_max_alpha=210,
-        fade_speed_weight=70.0,
-        fade_curve_weight=32.0,
-        base_alpha=210,
+        fade_min_alpha=70,
+        fade_max_alpha=190,
+        fade_speed_weight=68.0,
+        fade_curve_weight=28.0,
+        base_alpha=175,
         shadow_alpha=0,
         shadow_alpha_scale=0.0,
         shadow_width_scale=1.0,
         texture=None,
         composition_mode=QPainter.CompositionMode.CompositionMode_SourceOver,
         color_lighten=1.0,
-        target_max_factor=1.12,
-        width_change_limit=0.05,
+        target_max_factor=1.08,
+        width_change_limit=0.032,
         noise_strength=0.0,
         fill_alpha_boost=0,
-        feather_strength=0.55,
+        feather_strength=0.5,
         edge_highlight_alpha=0,
         solid_fill=True,
     ),
@@ -1523,34 +1526,35 @@ PEN_STYLE_CONFIGS: Dict[PenStyle, PenStyleConfig] = {
         slider_range=(4, 24),
         default_base=9,
         width_multiplier=1.0,
-        smoothing=0.82,
+        smoothing=0.85,
         speed_base_multiplier=22.0,
         speed_base_offset=36.0,
-        target_min_factor=0.56,
-        target_speed_factor=0.22,
-        target_curve_factor=0.28,
-        curve_sensitivity=0.6,
-        pressure_factor=0.26,
-        width_memory=0.88,
+        target_min_factor=0.58,
+        target_speed_factor=0.18,
+        target_curve_factor=0.22,
+        target_blend=0.3,
+        curve_sensitivity=0.58,
+        pressure_factor=0.22,
+        width_memory=0.9,
         pressure_time_weight=2.8,
         travel_weight=0.22,
-        fade_min_alpha=120,
+        fade_min_alpha=130,
         fade_max_alpha=240,
-        fade_speed_weight=110.0,
-        fade_curve_weight=70.0,
+        fade_speed_weight=106.0,
+        fade_curve_weight=68.0,
         base_alpha=255,
-        shadow_alpha=75,
-        shadow_alpha_scale=0.4,
-        shadow_width_scale=1.15,
+        shadow_alpha=70,
+        shadow_alpha_scale=0.36,
+        shadow_width_scale=1.12,
         texture=None,
         composition_mode=QPainter.CompositionMode.CompositionMode_SourceOver,
         color_lighten=1.0,
-        target_max_factor=1.2,
-        width_change_limit=0.07,
+        target_max_factor=1.12,
+        width_change_limit=0.045,
         noise_strength=0.0,
-        fill_alpha_boost=6,
-        feather_strength=0.14,
-        edge_highlight_alpha=55,
+        fill_alpha_boost=10,
+        feather_strength=0.12,
+        edge_highlight_alpha=45,
         solid_fill=True,
     ),
     PenStyle.BRUSH: PenStyleConfig(
@@ -1559,35 +1563,36 @@ PEN_STYLE_CONFIGS: Dict[PenStyle, PenStyleConfig] = {
         description="富有笔锋、墨色厚实的毛笔效果。",
         slider_range=(6, 20),
         default_base=12,
-        width_multiplier=1.45,
-        smoothing=0.8,
+        width_multiplier=1.42,
+        smoothing=0.82,
         speed_base_multiplier=20.0,
         speed_base_offset=32.0,
-        target_min_factor=0.6,
-        target_speed_factor=0.34,
-        target_curve_factor=0.3,
-        curve_sensitivity=0.6,
-        pressure_factor=0.32,
-        width_memory=0.85,
+        target_min_factor=0.68,
+        target_speed_factor=0.24,
+        target_curve_factor=0.26,
+        target_blend=0.32,
+        curve_sensitivity=0.58,
+        pressure_factor=0.28,
+        width_memory=0.88,
         pressure_time_weight=3.0,
         travel_weight=0.24,
-        fade_min_alpha=130,
+        fade_min_alpha=140,
         fade_max_alpha=255,
-        fade_speed_weight=130.0,
-        fade_curve_weight=80.0,
+        fade_speed_weight=124.0,
+        fade_curve_weight=76.0,
         base_alpha=255,
-        shadow_alpha=110,
-        shadow_alpha_scale=0.35,
-        shadow_width_scale=1.25,
+        shadow_alpha=100,
+        shadow_alpha_scale=0.32,
+        shadow_width_scale=1.22,
         texture=None,
         composition_mode=QPainter.CompositionMode.CompositionMode_SourceOver,
         color_lighten=1.0,
-        target_max_factor=1.55,
-        width_change_limit=0.065,
+        target_max_factor=1.32,
+        width_change_limit=0.05,
         noise_strength=0.0,
-        fill_alpha_boost=20,
-        feather_strength=0.24,
-        edge_highlight_alpha=90,
+        fill_alpha_boost=28,
+        feather_strength=0.2,
+        edge_highlight_alpha=75,
         solid_fill=True,
     ),
 }
@@ -3927,6 +3932,7 @@ class OverlayWindow(QWidget):
         self.drawing = False
         self.last_point = QPointF(); self.prev_point = QPointF()
         self.last_width = max(1.0, self.pen_base_size * config.target_min_factor)
+        self._stroke_target_width = float(self.last_width)
         self.last_time = time.time()
         self._last_brush_color = QColor(self.pen_color)
         self._last_brush_size = max(1, int(self.pen_size))
@@ -4075,6 +4081,7 @@ class OverlayWindow(QWidget):
         if self._brush_painter is not None:
             self._brush_painter.setCompositionMode(self._brush_composition_mode)
         self.last_width = max(1.0, base_width * config.target_min_factor)
+        self._stroke_target_width = float(self.last_width)
         if update_cursor:
             self.update_cursor()
         self._update_pen_tooltip()
@@ -5136,6 +5143,7 @@ class OverlayWindow(QWidget):
         self._stroke_last_midpoint = None
         self._stroke_filter_point = None
         self._stroke_speed = 0.0
+        self._stroke_target_width = float(self.last_width)
 
     def _start_paint_session(self, event) -> None:
         self._push_history()
@@ -5161,6 +5169,7 @@ class OverlayWindow(QWidget):
             base_width = self._effective_brush_width()
             self.last_width = max(1.0, base_width * config.target_min_factor)
             self._update_brush_pen_appearance(base_width, config.fade_max_alpha)
+            self._stroke_target_width = float(self.last_width)
         elif self.mode == "eraser":
             self._ensure_eraser_painter()
 
@@ -5336,7 +5345,7 @@ class OverlayWindow(QWidget):
         if distance < 0.08 and elapsed < 0.012:
             return None
         speed = distance / elapsed
-        self._stroke_speed = self._stroke_speed * 0.6 + speed * 0.4
+        self._stroke_speed = self._stroke_speed * 0.72 + speed * 0.28
 
         curvature = 0.0
         if len(self._stroke_points) >= 3:
@@ -5371,13 +5380,23 @@ class OverlayWindow(QWidget):
         min_w = effective_base * config.target_min_factor
         max_w = effective_base * max(config.target_min_factor, config.target_max_factor)
         target_w = max(min_w, min(max_w, target_w))
-        if self.last_width > 0:
-            step_limit = max(0.6, effective_base * config.width_change_limit)
-            delta = target_w - self.last_width
-            if abs(delta) > step_limit:
-                target_w = self.last_width + math.copysign(step_limit, delta)
-        memory = min(max(config.width_memory, 0.05), 0.95)
+
+        prev_target = getattr(self, "_stroke_target_width", self.last_width)
+        blend = max(0.0, min(1.0, getattr(config, "target_blend", 0.3)))
+        target_w = prev_target * (1.0 - blend) + target_w * blend
+        target_step_limit = max(0.35, effective_base * config.width_change_limit)
+        delta_target = target_w - prev_target
+        if abs(delta_target) > target_step_limit:
+            target_w = prev_target + math.copysign(target_step_limit, delta_target)
+        target_w = max(min_w, min(max_w, target_w))
+        self._stroke_target_width = target_w
+
+        memory = min(max(config.width_memory, 0.05), 0.97)
         cur_w = self.last_width * memory + target_w * (1.0 - memory)
+        final_step_limit = max(0.25, target_step_limit * 0.85)
+        delta_width = cur_w - self.last_width
+        if abs(delta_width) > final_step_limit:
+            cur_w = self.last_width + math.copysign(final_step_limit, delta_width)
         cur_w = max(min_w, min(max_w, cur_w))
 
         last_mid = QPointF(self._stroke_last_midpoint) if self._stroke_last_midpoint else QPointF(last_point)
