@@ -1932,7 +1932,6 @@ class _PresentationForwarder:
 
     _SMTO_ABORTIFHUNG = 0x0002
     _MAX_CHILD_FORWARDS = 32
-    _INPUT_MOUSE = 0
     _INPUT_KEYBOARD = 1
     _KEYEVENTF_EXTENDEDKEY = 0x0001
     _KEYEVENTF_KEYUP = 0x0002
@@ -1953,7 +1952,6 @@ class _PresentationForwarder:
             ]
 
         _KeyboardInput = None  # type: ignore[assignment]
-        _MouseInput = None  # type: ignore[assignment]
         _InputUnion = None  # type: ignore[assignment]
         _Input = None  # type: ignore[assignment]
         try:
@@ -1971,31 +1969,10 @@ class _PresentationForwarder:
                     ]
                 },
             )
-            _MouseInput = type(
-                "_MouseInput",
-                (ctypes.Structure,),
-                {
-                    "_fields_": [
-                        ("dx", wintypes.LONG),
-                        ("dy", wintypes.LONG),
-                        ("mouseData", wintypes.DWORD),
-                        ("dwFlags", wintypes.DWORD),
-                        ("time", wintypes.DWORD),
-                        ("dwExtraInfo", wintypes.ULONG_PTR),
-                    ]
-                },
-            )
-            _union_fields: List[Tuple[str, Any]] = []
-            if _MouseInput is not None:
-                _union_fields.append(("mi", _MouseInput))
-            if _KeyboardInput is not None:
-                _union_fields.append(("ki", _KeyboardInput))
-            if not _union_fields:
-                raise RuntimeError("Input union requires at least one field")
             _InputUnion = type(
                 "_InputUnion",
                 (ctypes.Union,),
-                {"_fields_": _union_fields},
+                {"_fields_": [("ki", _KeyboardInput)]},
             )
             _Input = type(
                 "_Input",
@@ -2018,7 +1995,6 @@ class _PresentationForwarder:
             _fields_: List[Tuple[str, Any]] = []
 
         _KeyboardInput = None  # type: ignore[assignment]
-        _MouseInput = None  # type: ignore[assignment]
         _InputUnion = None  # type: ignore[assignment]
         _Input = None  # type: ignore[assignment]
 
@@ -2193,29 +2169,18 @@ class _PresentationForwarder:
         y_word = ctypes.c_short(global_pos.y()).value & 0xFFFF
         l_param = x_word | (y_word << 16)
         delivered = False
-        overlay = getattr(self, "overlay", None)
-        passthrough_cm = (
-            overlay._temporary_navigation_passthrough()
-            if overlay is not None and hasattr(overlay, "_temporary_navigation_passthrough")
-            else contextlib.nullcontext()
-        )
-        with passthrough_cm:
-            with self._keyboard_capture_guard():
-                focus_ok = self.bring_target_to_foreground(target)
-                if not focus_ok:
-                    focus_ok = self._activate_window_for_input(target)
-                if focus_ok and self._send_input_wheel_event(delta):
+        with self._keyboard_capture_guard():
+            focus_ok = self.bring_target_to_foreground(target)
+            if not focus_ok:
+                focus_ok = self._activate_window_for_input(target)
+            for hwnd, update_cache in self._iter_wheel_targets(target):
+                if self._deliver_mouse_wheel(hwnd, w_param, l_param):
                     delivered = True
-                    self._last_target_hwnd = target
-                if not delivered:
-                    for hwnd, update_cache in self._iter_wheel_targets(target):
-                        if self._deliver_mouse_wheel(hwnd, w_param, l_param):
-                            delivered = True
-                            if update_cache:
-                                self._last_target_hwnd = target
-                            break
-                if not delivered and focus_ok:
-                    delivered = self._deliver_mouse_wheel(target, w_param, l_param)
+                    if update_cache:
+                        self._last_target_hwnd = target
+                    break
+            if not delivered and focus_ok:
+                delivered = self._deliver_mouse_wheel(target, w_param, l_param)
         if not delivered:
             self.clear_cached_target()
         return delivered
@@ -2541,49 +2506,6 @@ class _PresentationForwarder:
             sent = 0
         return bool(sent)
 
-    def _send_input_wheel_event(self, delta: int) -> bool:
-        if (
-            _USER32 is None
-            or self._Input is None
-            or getattr(self, "_MouseInput", None) is None
-        ):
-            return False
-        mouse_input = self._MouseInput()
-        mouse_input.dx = 0
-        mouse_input.dy = 0
-        wheel_value = ctypes.c_uint32(ctypes.c_int(delta).value & 0xFFFFFFFF).value
-        mouse_input.mouseData = wheel_value
-        mouse_input.dwFlags = MOUSEEVENTF_WHEEL
-        mouse_input.time = 0
-        try:
-            mouse_input.dwExtraInfo = 0
-        except Exception:
-            pass
-        input_record = self._Input()
-        input_record.type = self._INPUT_MOUSE
-        try:
-            input_record.data.mi = mouse_input
-        except Exception:
-            try:
-                ctypes.memmove(
-                    ctypes.byref(input_record.data),
-                    ctypes.byref(mouse_input),
-                    ctypes.sizeof(mouse_input),
-                )
-            except Exception:
-                return False
-        try:
-            sent = int(
-                _USER32.SendInput(
-                    1,
-                    ctypes.byref(input_record),
-                    ctypes.sizeof(self._Input),
-                )
-            )
-        except Exception:
-            sent = 0
-        return bool(sent)
-
     def _map_virtual_key(self, vk_code: int) -> int:
         map_vk = getattr(win32api, "MapVirtualKey", None) if win32api is not None else None
         if callable(map_vk):
@@ -2865,24 +2787,6 @@ class _PresentationForwarder:
         left, top, right, bottom = rect
         return ((left + right) // 2, (top + bottom) // 2)
 
-    def _window_overlay_overlap_ratio(self, rect: Tuple[int, int, int, int]) -> float:
-        overlay_rect = self._overlay_rect_tuple()
-        if overlay_rect is None:
-            return 0.0
-        left, top, right, bottom = rect
-        o_left, o_top, o_right, o_bottom = overlay_rect
-        overlap_left = max(left, o_left)
-        overlap_top = max(top, o_top)
-        overlap_right = min(right, o_right)
-        overlap_bottom = min(bottom, o_bottom)
-        overlap_width = max(0, overlap_right - overlap_left)
-        overlap_height = max(0, overlap_bottom - overlap_top)
-        if overlap_width <= 0 or overlap_height <= 0:
-            return 0.0
-        window_area = max(1, (right - left) * (bottom - top))
-        overlap_area = overlap_width * overlap_height
-        return float(overlap_area) / float(window_area)
-
     def _rect_intersects_overlay(self, rect: Tuple[int, int, int, int]) -> bool:
         overlay_rect = self._overlay_rect_tuple()
         if overlay_rect is None:
@@ -2993,11 +2897,8 @@ class _PresentationForwarder:
         if center is not None:
             cx, cy = center
             contains_center = left <= cx <= right and top <= cy <= bottom
-        overlap_ratio = self._window_overlay_overlap_ratio((left, top, right, bottom))
         size_match = width >= 400 and height >= 300 and width_diff <= 64 and height_diff <= 64
         if contains_center and width >= 400 and height >= 300:
-            return True
-        if overlap_ratio >= 0.6 and width >= 400 and height >= 300:
             return True
         return size_match
 
@@ -3098,12 +2999,11 @@ class _PresentationForwarder:
                 if overlay_area > 0:
                     ratio = min(area, overlay_area) / max(area, overlay_area)
                     score += int(ratio * 160)
-                overlap_ratio = self._window_overlay_overlap_ratio(rect)
-                if overlap_ratio > 0:
-                    score += int(overlap_ratio * 180)
-                    if overlay_area > 0:
-                        coverage = min((overlap_ratio * area) / max(1, overlay_area), 1.0)
-                        score += int(coverage * 140)
+                overlap_x = max(0, min(right, overlay_rect[2]) - max(left, overlay_rect[0]))
+                overlap_y = max(0, min(bottom, overlay_rect[3]) - max(top, overlay_rect[1]))
+                overlap_area = overlap_x * overlap_y
+                if overlap_area > 0 and area > 0:
+                    score += int((overlap_area / area) * 180)
 
         return score
 
@@ -3213,11 +3113,8 @@ class _PresentationForwarder:
         if center is not None:
             cx, cy = center
             contains_center = left <= cx <= right and top <= cy <= bottom
-        overlap_ratio = self._window_overlay_overlap_ratio((left, top, right, bottom))
         size_match = width >= 400 and height >= 300 and width_diff <= 64 and height_diff <= 64
         if contains_center and width >= 400 and height >= 300:
-            return True
-        if overlap_ratio >= 0.6 and width >= 400 and height >= 300:
             return True
         return size_match
 
@@ -3650,23 +3547,13 @@ class OverlayWindow(QWidget):
         return self._fallback_send_wheel(delta)
 
     def _fallback_send_wheel(self, delta: int) -> bool:
-        if delta == 0:
+        if delta == 0 or _USER32 is None:
             return False
-        with self._temporary_navigation_passthrough():
-            forwarder = getattr(self, "_forwarder", None)
-            if forwarder is not None:
-                try:
-                    if forwarder._send_input_wheel_event(delta):
-                        return True
-                except Exception:
-                    pass
-            if _USER32 is None:
-                return False
-            try:
-                _USER32.mouse_event(MOUSEEVENTF_WHEEL, 0, 0, delta, 0)
-                return True
-            except Exception:
-                return False
+        try:
+            _USER32.mouse_event(MOUSEEVENTF_WHEEL, 0, 0, delta, 0)
+            return True
+        except Exception:
+            return False
 
     def _apply_navigation_cursor_hold(self, restore_mode: str, restore_shape: Optional[str]) -> None:
         if restore_mode not in {"brush", "shape", "eraser"}:
@@ -3759,7 +3646,6 @@ class OverlayWindow(QWidget):
             if count is None:
                 if reason == "cursor-button":
                     self._cursor_button_navigation = False
-                self._update_navigation_state()
                 return
             if count <= 1:
                 self._navigation_reasons.pop(reason, None)
@@ -3928,30 +3814,6 @@ class OverlayWindow(QWidget):
             if had_keyboard_grab:
                 self._ensure_keyboard_capture()
 
-    @contextlib.contextmanager
-    def _temporary_navigation_passthrough(self) -> Iterable[None]:
-        was_transparent = self.testAttribute(
-            Qt.WidgetAttribute.WA_TransparentForMouseEvents
-        )
-        applied = False
-        if not was_transparent:
-            try:
-                self._apply_input_passthrough(True)
-                applied = True
-            except Exception:
-                applied = False
-        try:
-            yield
-        finally:
-            if applied:
-                try:
-                    self._apply_input_passthrough(False)
-                finally:
-                    if self.mode != "cursor":
-                        self._ensure_keyboard_capture()
-                    else:
-                        self._release_keyboard_capture()
-
     def _overlay_rect_tuple(self) -> Optional[Tuple[int, int, int, int]]:
         rect = self.geometry()
         if rect.isNull():
@@ -3968,24 +3830,6 @@ class OverlayWindow(QWidget):
             return None
         left, top, right, bottom = rect
         return ((left + right) // 2, (top + bottom) // 2)
-
-    def _window_overlay_overlap_ratio(self, rect: Tuple[int, int, int, int]) -> float:
-        overlay = self._overlay_rect_tuple()
-        if overlay is None:
-            return 0.0
-        left, top, right, bottom = rect
-        o_left, o_top, o_right, o_bottom = overlay
-        overlap_left = max(left, o_left)
-        overlap_top = max(top, o_top)
-        overlap_right = min(right, o_right)
-        overlap_bottom = min(bottom, o_bottom)
-        overlap_width = max(0, overlap_right - overlap_left)
-        overlap_height = max(0, overlap_bottom - overlap_top)
-        if overlap_width <= 0 or overlap_height <= 0:
-            return 0.0
-        window_area = max(1, (right - left) * (bottom - top))
-        overlap_area = overlap_width * overlap_height
-        return float(overlap_area) / float(window_area)
 
     def _rect_intersects_overlay(self, rect: Tuple[int, int, int, int]) -> bool:
         overlay = self._overlay_rect_tuple()
@@ -4094,11 +3938,8 @@ class OverlayWindow(QWidget):
         if center is not None:
             cx, cy = center
             contains_center = left <= cx <= right and top <= cy <= bottom
-        overlap_ratio = self._window_overlay_overlap_ratio((left, top, right, bottom))
         size_match = width >= 400 and height >= 300 and width_diff <= 64 and height_diff <= 64
         if contains_center and width >= 400 and height >= 300:
-            return True
-        if overlap_ratio >= 0.6 and width >= 400 and height >= 300:
             return True
         return size_match
 
@@ -4310,11 +4151,8 @@ class OverlayWindow(QWidget):
         if center is not None:
             cx, cy = center
             contains_center = left <= cx <= right and top <= cy <= bottom
-        overlap_ratio = self._window_overlay_overlap_ratio((left, top, right, bottom))
         size_match = width >= 400 and height >= 300 and width_diff <= 64 and height_diff <= 64
         if contains_center and width >= 400 and height >= 300:
-            return True
-        if overlap_ratio >= 0.6 and width >= 400 and height >= 300:
             return True
         return size_match
 
