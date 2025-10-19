@@ -2185,8 +2185,14 @@ class _PresentationForwarder:
             self.clear_cached_target()
         return delivered
 
-    def forward_key(self, event: QKeyEvent, *, is_press: bool) -> bool:
-        if not self._can_forward():
+    def forward_key(
+        self,
+        event: QKeyEvent,
+        *,
+        is_press: bool,
+        allow_cursor: bool = False,
+    ) -> bool:
+        if not self._can_forward(allow_cursor=allow_cursor):
             self.clear_cached_target()
             return False
         vk_code = self._resolve_vk_code(event)
@@ -3398,6 +3404,7 @@ class OverlayWindow(QWidget):
             self._release_canvas_painters()
         if mode != "cursor":
             self._cancel_navigation_cursor_hold()
+            self._set_navigation_reason("cursor-button", False)
         else:
             self._set_navigation_reason("cursor-button", False)
             self._cursor_button_navigation = False
@@ -3598,8 +3605,20 @@ class OverlayWindow(QWidget):
             if qt_key is not None:
                 press_event = QKeyEvent(QEvent.Type.KeyPress, qt_key, Qt.KeyboardModifier.NoModifier)
                 release_event = QKeyEvent(QEvent.Type.KeyRelease, qt_key, Qt.KeyboardModifier.NoModifier)
-                press_ok = self._forwarder.forward_key(press_event, is_press=True)
-                release_ok = self._forwarder.forward_key(release_event, is_press=False) if press_ok else False
+                press_ok = self._forwarder.forward_key(
+                    press_event,
+                    is_press=True,
+                    allow_cursor=True,
+                )
+                release_ok = (
+                    self._forwarder.forward_key(
+                        release_event,
+                        is_press=False,
+                        allow_cursor=True,
+                    )
+                    if press_ok
+                    else False
+                )
                 if press_ok and release_ok:
                     success = True
             if not success:
@@ -4383,7 +4402,12 @@ class OverlayWindow(QWidget):
                 self.go_to_previous_slide()
             e.accept()
             return
-        if self._forwarder and self._forwarder.forward_key(e, is_press=True):
+        allow_cursor = self.mode == "cursor" or self.navigation_active
+        if self._forwarder and self._forwarder.forward_key(
+            e,
+            is_press=True,
+            allow_cursor=allow_cursor,
+        ):
             e.accept()
             return
         if e.key() == Qt.Key.Key_Escape:
@@ -4397,7 +4421,12 @@ class OverlayWindow(QWidget):
                 self._set_navigation_reason("keyboard", False)
             e.accept()
             return
-        if self._forwarder and self._forwarder.forward_key(e, is_press=False):
+        allow_cursor = self.mode == "cursor" or self.navigation_active
+        if self._forwarder and self._forwarder.forward_key(
+            e,
+            is_press=False,
+            allow_cursor=allow_cursor,
+        ):
             e.accept()
             return
         super().keyReleaseEvent(e)
