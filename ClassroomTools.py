@@ -33,6 +33,7 @@ from typing import (
     Callable,
     Dict,
     Iterable,
+    Iterator,
     List,
     Mapping,
     Optional,
@@ -72,6 +73,8 @@ KEYEVENTF_EXTENDEDKEY = getattr(win32con, "KEYEVENTF_EXTENDEDKEY", 0x0001)
 KEYEVENTF_KEYUP = getattr(win32con, "KEYEVENTF_KEYUP", 0x0002)
 _NAVIGATION_EXTENDED_KEYS = {VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT}
 MOUSEEVENTF_WHEEL = getattr(win32con, "MOUSEEVENTF_WHEEL", 0x0800)
+MOUSEEVENTF_LEFTDOWN = getattr(win32con, "MOUSEEVENTF_LEFTDOWN", 0x0002)
+MOUSEEVENTF_LEFTUP = getattr(win32con, "MOUSEEVENTF_LEFTUP", 0x0004)
 
 if _USER32 is not None:
     _WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
@@ -5058,6 +5061,97 @@ class OverlayWindow(QWidget):
             False,
         )
 
+    def _await_foreground(self, target_hwnd: Optional[int], *, attempts: int = 10, delay: float = 0.02) -> bool:
+        if not target_hwnd or target_hwnd == 0 or _USER32 is None:
+            return False
+        attempts = max(1, attempts)
+        for _ in range(attempts):
+            if _user32_get_foreground_window() == target_hwnd:
+                return True
+            QApplication.processEvents()
+            time.sleep(delay)
+        return _user32_get_foreground_window() == target_hwnd
+
+    def _prepare_word_focus(
+        self, target_hwnd: int
+    ) -> Tuple[bool, Optional[Tuple[int, int, int, int]]]:
+        focus_ok = False
+        rect: Optional[Tuple[int, int, int, int]] = None
+        if target_hwnd and _USER32 is not None:
+            rect = _user32_window_rect(int(target_hwnd))
+        if self._forwarder is not None and target_hwnd:
+            try:
+                focus_ok = self._forwarder.focus_presentation_window()
+            except Exception:
+                focus_ok = False
+            if not focus_ok:
+                try:
+                    focus_ok = self._forwarder.bring_target_to_foreground(int(target_hwnd))
+                except Exception:
+                    focus_ok = False
+        foreground_ready = self._await_foreground(target_hwnd)
+        ready = bool(focus_ok or foreground_ready)
+        if logger.isEnabledFor(logging.DEBUG):
+            self._log_navigation_debug(
+                "word_focus_ready",
+                target=hex(target_hwnd) if target_hwnd else "0x0",
+                focus=focus_ok,
+                foreground=foreground_ready,
+            )
+        return ready, rect
+
+    def _simulate_left_click(self) -> bool:
+        if _USER32 is None:
+            return False
+        try:
+            _USER32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+            _USER32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+            return True
+        except Exception:
+            return False
+
+    @contextlib.contextmanager
+    def _word_cursor_context(
+        self,
+        target_hwnd: Optional[int],
+        rect: Optional[Tuple[int, int, int, int]],
+        *,
+        click: bool,
+    ) -> Iterator[Tuple[bool, bool]]:
+        if target_hwnd is None or target_hwnd == 0 or _USER32 is None:
+            yield (False, False)
+            return
+        if rect is None:
+            rect = _user32_window_rect(int(target_hwnd))
+        if rect is None:
+            yield (False, False)
+            return
+        restore_cursor: Optional[Tuple[int, int]] = None
+        moved_cursor = False
+        click_ok = False
+        cx = int((rect[0] + rect[2]) // 2)
+        cy = int((rect[1] + rect[3]) // 2)
+        try:
+            global_pos = QCursor.pos()
+            restore_cursor = (global_pos.x(), global_pos.y())
+        except Exception:
+            restore_cursor = None
+        if restore_cursor is not None:
+            try:
+                moved_cursor = bool(_USER32.SetCursorPos(cx, cy))
+            except Exception:
+                moved_cursor = False
+        if moved_cursor and click:
+            click_ok = self._simulate_left_click()
+        try:
+            yield (moved_cursor, click_ok)
+        finally:
+            if moved_cursor and restore_cursor and _USER32 is not None:
+                try:
+                    _USER32.SetCursorPos(restore_cursor[0], restore_cursor[1])
+                except Exception:
+                    pass
+
     def _forward_wheel_with_fallback(
         self,
         *,
@@ -5100,44 +5194,36 @@ class OverlayWindow(QWidget):
         if handled:
             return True, False
         target_rect: Optional[Tuple[int, int, int, int]] = None
-        if target_hwnd:
-            target_rect = _user32_window_rect(int(target_hwnd))
+        focus_ready = False
         if self._forwarder is not None and target_hwnd:
-            focus_ok = False
-            try:
-                focus_ok = self._forwarder.focus_presentation_window()
-            except Exception:
-                focus_ok = False
-            if not focus_ok:
+            if is_word_target:
+                focus_ready, target_rect = self._prepare_word_focus(int(target_hwnd))
+            else:
                 try:
-                    if self._forwarder.bring_target_to_foreground(int(target_hwnd)):
-                        QApplication.processEvents()
-                        time.sleep(0.02)
-                        focus_ok = True
+                    focus_ready = self._forwarder.focus_presentation_window()
                 except Exception:
-                    focus_ok = False
-        restore_cursor: Optional[Tuple[int, int]] = None
-        moved_cursor = False
-        with self._temporarily_release_keyboard():
-            if is_word_target and target_rect and _USER32 is not None:
-                try:
-                    global_pos = QCursor.pos()
-                    restore_cursor = (global_pos.x(), global_pos.y())
-                except Exception:
-                    restore_cursor = None
-                if restore_cursor is not None:
-                    cx = int((target_rect[0] + target_rect[2]) // 2)
-                    cy = int((target_rect[1] + target_rect[3]) // 2)
+                    focus_ready = False
+                if not focus_ready:
                     try:
-                        moved_cursor = bool(_USER32.SetCursorPos(cx, cy))
+                        if self._forwarder.bring_target_to_foreground(int(target_hwnd)):
+                            QApplication.processEvents()
+                            time.sleep(0.02)
+                            focus_ready = True
                     except Exception:
-                        moved_cursor = False
-            fallback_success = self._fallback_send_wheel(delta)
-        if moved_cursor and restore_cursor and _USER32 is not None:
-            try:
-                _USER32.SetCursorPos(restore_cursor[0], restore_cursor[1])
-            except Exception:
-                pass
+                        focus_ready = False
+        if target_rect is None and target_hwnd:
+            target_rect = _user32_window_rect(int(target_hwnd))
+        cursor_moved = False
+        click_ok = False
+        with self._temporarily_release_keyboard():
+            if is_word_target:
+                cursor_context = self._word_cursor_context(target_hwnd, target_rect, click=True)
+            else:
+                cursor_context = contextlib.nullcontext((False, False))
+            with cursor_context as (moved_cursor, click_result):
+                cursor_moved = moved_cursor
+                click_ok = click_result
+                fallback_success = self._fallback_send_wheel(delta)
         handled = fallback_success
         fallback_path = True
         if forced_fallback and logger.isEnabledFor(logging.DEBUG):
@@ -5146,6 +5232,9 @@ class OverlayWindow(QWidget):
                 target=hex(target_hwnd) if target_hwnd else "0x0",
                 cls=target_class or "",
                 word=is_word_target,
+                focus=focus_ready,
+                cursor=cursor_moved,
+                click=click_ok,
             )
         if not handled and self._forwarder is not None:
             try:
@@ -5209,7 +5298,24 @@ class OverlayWindow(QWidget):
             if target_hwnd:
                 target_class = self._presentation_window_class(target_hwnd) or ""
             if target_hwnd and self._is_word_like_class(target_class):
-                success = self._forwarder.send_virtual_key(vk_code)
+                cursor_moved = False
+                click_ok = False
+                word_ready, word_rect = self._prepare_word_focus(int(target_hwnd))
+                with self._temporarily_release_keyboard():
+                    cursor_context = self._word_cursor_context(
+                        target_hwnd,
+                        word_rect,
+                        click=True,
+                    )
+                    with cursor_context as (move_result, click_result):
+                        cursor_moved = move_result
+                        click_ok = click_result
+                        if not word_ready:
+                            word_ready = cursor_moved or click_ok
+                        if word_ready:
+                            success = self._forwarder.send_virtual_key(vk_code)
+                        else:
+                            success = False
                 if success:
                     self._log_navigation_debug(
                         "virtual_key_sendinput",
@@ -5217,6 +5323,8 @@ class OverlayWindow(QWidget):
                         target=hex(target_hwnd) if target_hwnd else "0x0",
                         cls=target_class,
                         word=True,
+                        cursor=cursor_moved,
+                        click=click_ok,
                     )
                 else:
                     self._forwarder.clear_cached_target()
