@@ -3226,6 +3226,15 @@ class _PresentationForwarder:
                 return ""
         return _user32_window_class_name(hwnd)
 
+    def _window_process_name(self, hwnd: int) -> str:
+        pid = self._window_process_id(hwnd)
+        if not pid:
+            return ""
+        path = _process_image_path(int(pid))
+        if not path:
+            return ""
+        return os.path.basename(path).strip().lower()
+
     def _is_wps_slideshow_class(self, class_name: str) -> bool:
         if not class_name:
             return False
@@ -3234,7 +3243,14 @@ class _PresentationForwarder:
         return class_name.startswith("kwppshow")
 
     def _is_wps_slideshow_window(self, hwnd: int) -> bool:
-        return self._is_wps_slideshow_class(self._window_class_name(hwnd))
+        class_name = self._window_class_name(hwnd)
+        if self._is_wps_slideshow_class(class_name):
+            return True
+        if class_name in self._SLIDESHOW_PRIORITY_CLASSES or class_name in self._SLIDESHOW_SECONDARY_CLASSES:
+            process_name = self._window_process_name(self._top_level_hwnd(hwnd))
+            if process_name.startswith("wpp"):
+                return True
+        return False
 
     def _is_slideshow_class(self, class_name: str) -> bool:
         if not class_name:
@@ -5276,8 +5292,6 @@ class OverlayWindow(QWidget):
             return "wps_ppt"
         if self._is_word_like_class(class_name) or self._is_word_like_class(top_class):
             return "ms_word"
-        if self._class_has_ms_presentation_signature(class_name) or self._class_has_ms_presentation_signature(top_class):
-            return "ms_ppt"
         process_name = self._window_process_name(top_hwnd or hwnd)
         if process_name:
             if process_name.startswith("wpp"):
@@ -5288,6 +5302,8 @@ class OverlayWindow(QWidget):
                 return "ms_ppt"
             if "winword" in process_name:
                 return "ms_word"
+        if self._class_has_ms_presentation_signature(class_name) or self._class_has_ms_presentation_signature(top_class):
+            return "ms_ppt"
         return "other"
 
     def _is_presentation_category_allowed(self, category: str) -> bool:
@@ -5346,6 +5362,28 @@ class OverlayWindow(QWidget):
             if any(excluded in class_name for excluded in self._WPS_WRITER_EXCLUDE_KEYWORDS):
                 return False
             if any(keyword in class_name for keyword in self._WPS_WRITER_KEYWORDS):
+                return True
+        return False
+
+    def _is_wps_slideshow_class(self, class_name: str) -> bool:
+        if not class_name:
+            return False
+        if class_name in self._WPS_SLIDESHOW_CLASSES:
+            return True
+        return class_name.startswith("kwppshow")
+
+    def _is_wps_slideshow_target(self, hwnd: Optional[int] = None) -> bool:
+        if hwnd is None:
+            hwnd = self._current_navigation_target()
+        if not hwnd:
+            return False
+        class_name = self._presentation_window_class(hwnd)
+        if self._is_wps_slideshow_class(class_name):
+            return True
+        if class_name in self._SLIDESHOW_PRIORITY_CLASSES or class_name in self._SLIDESHOW_SECONDARY_CLASSES:
+            top_hwnd = _user32_top_level_hwnd(hwnd)
+            process_name = self._window_process_name(top_hwnd or hwnd)
+            if process_name.startswith("wpp"):
                 return True
         return False
 
