@@ -5952,9 +5952,17 @@ class OverlayWindow(QWidget):
             and self._fallback_is_candidate_window(foreground)
         ):
             normalized = self._normalize_presentation_target(foreground)
-            if normalized and self._fallback_is_target_window_valid(normalized):
-                return normalized
-            return foreground
+            ordered: Tuple[int, ...] = tuple(
+                hwnd
+                for hwnd in (
+                    normalized if normalized and self._fallback_is_target_window_valid(normalized) else None,
+                    foreground if self._fallback_is_target_window_valid(foreground) else None,
+                )
+                if hwnd
+            )
+            for candidate in ordered:
+                if self._presentation_control_allowed(candidate, log=False):
+                    return candidate
         if _WNDENUMPROC is None:
             return None
         candidates: List[int] = []
@@ -5978,11 +5986,20 @@ class OverlayWindow(QWidget):
         except Exception:
             return None
         for hwnd in candidates:
-            if self._fallback_is_candidate_window(hwnd):
-                normalized = self._normalize_presentation_target(hwnd)
-                if normalized and self._fallback_is_target_window_valid(normalized):
-                    return normalized
-                return hwnd
+            if not self._fallback_is_candidate_window(hwnd):
+                continue
+            normalized = self._normalize_presentation_target(hwnd)
+            ordered: Tuple[int, ...] = tuple(
+                handle
+                for handle in (
+                    normalized if normalized and self._fallback_is_target_window_valid(normalized) else None,
+                    hwnd if self._fallback_is_target_window_valid(hwnd) else None,
+                )
+                if handle
+            )
+            for candidate in ordered:
+                if self._presentation_control_allowed(candidate, log=False):
+                    return candidate
         return None
 
     def _presentation_window_class(self, hwnd: int) -> str:
@@ -6053,9 +6070,9 @@ class OverlayWindow(QWidget):
             return False
         hwnd = self._resolve_presentation_target()
         if not hwnd:
-            hwnd = self._fallback_detect_presentation_window_user32()
-            if hwnd and self._fallback_is_target_window_valid(hwnd):
-                self._last_target_hwnd = hwnd
+            candidate = self._fallback_detect_presentation_window_user32()
+            if candidate and self._fallback_is_target_window_valid(candidate):
+                hwnd = candidate
         if not hwnd or not self._fallback_is_target_window_valid(hwnd):
             return False
         if not self._presentation_control_allowed(hwnd, log=False):
@@ -6073,6 +6090,8 @@ class OverlayWindow(QWidget):
             focused = _user32_focus_window(hwnd)
         elif hwnd != top_level:
             _user32_focus_window(hwnd)
+        if focused:
+            self._last_target_hwnd = hwnd
         return focused
 
     def _is_target_window_valid(self, hwnd: int) -> bool:
@@ -6107,9 +6126,17 @@ class OverlayWindow(QWidget):
             and self._is_candidate_presentation_window(foreground)
         ):
             normalized = self._normalize_presentation_target(foreground)
-            if normalized and self._is_target_window_valid(normalized):
-                return normalized
-            return foreground
+            candidates: Tuple[int, ...] = tuple(
+                hwnd
+                for hwnd in (
+                    normalized if normalized and self._is_target_window_valid(normalized) else None,
+                    foreground if self._is_target_window_valid(foreground) else None,
+                )
+                if hwnd
+            )
+            for candidate in candidates:
+                if self._presentation_control_allowed(candidate, log=False):
+                    return candidate
         candidates: List[int] = []
 
         def _enum_callback(hwnd: int, result: List[int]) -> bool:
@@ -6133,11 +6160,20 @@ class OverlayWindow(QWidget):
         except Exception:
             return None
         for hwnd in candidates:
-            if self._is_candidate_presentation_window(hwnd):
-                normalized = self._normalize_presentation_target(hwnd)
-                if normalized and self._is_target_window_valid(normalized):
-                    return normalized
-                return hwnd
+            if not self._is_candidate_presentation_window(hwnd):
+                continue
+            normalized = self._normalize_presentation_target(hwnd)
+            ordered: Tuple[int, ...] = tuple(
+                handle
+                for handle in (
+                    normalized if normalized and self._is_target_window_valid(normalized) else None,
+                    hwnd if self._is_target_window_valid(hwnd) else None,
+                )
+                if handle
+            )
+            for candidate in ordered:
+                if self._presentation_control_allowed(candidate, log=False):
+                    return candidate
         return None
 
     def _resolve_presentation_target(self) -> Optional[int]:
