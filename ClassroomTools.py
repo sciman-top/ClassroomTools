@@ -40,6 +40,7 @@ from typing import (
     Set,
     Tuple,
     Union,
+    Literal,
 )
 
 logger = logging.getLogger(__name__)
@@ -5152,6 +5153,76 @@ class OverlayWindow(QWidget):
                 except Exception:
                     pass
 
+    def _send_robust_input_to_word(
+        self,
+        *,
+        target_hwnd: Optional[int],
+        target_class: str,
+        mode: Literal["wheel", "key"],
+        value: int,
+    ) -> bool:
+        if not target_hwnd or target_hwnd == 0:
+            return False
+        hwnd = int(target_hwnd)
+        focus_ready = False
+        rect: Optional[Tuple[int, int, int, int]] = None
+        if self._forwarder is not None:
+            focus_ready, rect = self._prepare_word_focus(hwnd)
+        else:
+            rect = _user32_window_rect(hwnd)
+            focus_ready = self._await_foreground(hwnd)
+        if rect is None:
+            rect = _user32_window_rect(hwnd)
+        cursor_moved = False
+        click_ok = False
+        success = False
+        used_fallback = False
+        ready = focus_ready
+        with self._temporarily_release_keyboard():
+            cursor_context = self._word_cursor_context(hwnd, rect, click=True)
+            with cursor_context as (moved, clicked):
+                cursor_moved = moved
+                click_ok = clicked
+                if not ready:
+                    ready = bool(cursor_moved or click_ok)
+                if not ready:
+                    ready = self._await_foreground(hwnd)
+                if ready:
+                    if mode == "wheel":
+                        success = self._fallback_send_wheel(value)
+                        used_fallback = True
+                    elif mode == "key":
+                        send_success = False
+                        if self._forwarder is not None:
+                            try:
+                                send_success = self._forwarder.send_virtual_key(value)
+                            except Exception:
+                                send_success = False
+                        if not send_success:
+                            used_fallback = True
+                            send_success = self._fallback_send_virtual_key(value)
+                        success = send_success
+        if not success and self._forwarder is not None:
+            try:
+                self._forwarder.clear_cached_target()
+            except Exception:
+                pass
+        if logger.isEnabledFor(logging.DEBUG):
+            self._log_navigation_debug(
+                "word_robust_input",
+                mode=mode,
+                value=value,
+                target=hex(hwnd),
+                cls=target_class or "",
+                focus=focus_ready,
+                ready=ready,
+                cursor=cursor_moved,
+                click=click_ok,
+                fallback=used_fallback,
+                success=success,
+            )
+        return success
+
     def _forward_wheel_with_fallback(
         self,
         *,
@@ -5168,6 +5239,14 @@ class OverlayWindow(QWidget):
         target_hwnd = self._current_navigation_target()
         target_class = self._presentation_window_class(target_hwnd) if target_hwnd else ""
         is_word_target = self._is_word_like_class(target_class)
+        if is_word_target and target_hwnd:
+            handled = self._send_robust_input_to_word(
+                target_hwnd=int(target_hwnd),
+                target_class=target_class or "",
+                mode="wheel",
+                value=delta,
+            )
+            return handled, True
         forced_fallback = False
         force_system = force_system or is_word_target
         if self._forwarder is not None and not force_system:
@@ -5298,36 +5377,12 @@ class OverlayWindow(QWidget):
             if target_hwnd:
                 target_class = self._presentation_window_class(target_hwnd) or ""
             if target_hwnd and self._is_word_like_class(target_class):
-                cursor_moved = False
-                click_ok = False
-                word_ready, word_rect = self._prepare_word_focus(int(target_hwnd))
-                with self._temporarily_release_keyboard():
-                    cursor_context = self._word_cursor_context(
-                        target_hwnd,
-                        word_rect,
-                        click=True,
-                    )
-                    with cursor_context as (move_result, click_result):
-                        cursor_moved = move_result
-                        click_ok = click_result
-                        if not word_ready:
-                            word_ready = cursor_moved or click_ok
-                        if word_ready:
-                            success = self._forwarder.send_virtual_key(vk_code)
-                        else:
-                            success = False
-                if success:
-                    self._log_navigation_debug(
-                        "virtual_key_sendinput",
-                        vk=vk_code,
-                        target=hex(target_hwnd) if target_hwnd else "0x0",
-                        cls=target_class,
-                        word=True,
-                        cursor=cursor_moved,
-                        click=click_ok,
-                    )
-                else:
-                    self._forwarder.clear_cached_target()
+                success = self._send_robust_input_to_word(
+                    target_hwnd=int(target_hwnd),
+                    target_class=target_class,
+                    mode="key",
+                    value=vk_code,
+                )
         if self._forwarder is not None and not success:
             qt_key_map = {
                 VK_UP: Qt.Key.Key_Up,
