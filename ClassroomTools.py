@@ -5455,6 +5455,65 @@ class OverlayWindow(QWidget):
                 return True
         return False
 
+    def _is_wps_slideshow_class(self, class_name: str) -> bool:
+        if not class_name:
+            return False
+        if class_name in self._WPS_SLIDESHOW_CLASSES:
+            return True
+        return class_name.startswith("kwppshow")
+
+    def _is_wps_slideshow_target(self, hwnd: Optional[int] = None) -> bool:
+        if hwnd is None:
+            hwnd = self._current_navigation_target()
+        if not hwnd:
+            return False
+        class_name = self._presentation_window_class(hwnd)
+        if self._is_wps_slideshow_class(class_name):
+            return True
+        if class_name in self._SLIDESHOW_PRIORITY_CLASSES or class_name in self._SLIDESHOW_SECONDARY_CLASSES:
+            top_hwnd = _user32_top_level_hwnd(hwnd)
+            process_name = self._window_process_name(top_hwnd or hwnd)
+            if process_name.startswith("wpp"):
+                return True
+        return False
+
+    def _is_wps_slideshow_class(self, class_name: str) -> bool:
+        if not class_name:
+            return False
+        if class_name in self._WPS_SLIDESHOW_CLASSES:
+            return True
+        return class_name.startswith("kwppshow")
+
+    def _is_wps_slideshow_target(self, hwnd: Optional[int] = None) -> bool:
+        if hwnd is None:
+            hwnd = self._current_navigation_target()
+        if not hwnd:
+            return False
+        class_name = self._presentation_window_class(hwnd)
+        if self._is_wps_slideshow_class(class_name):
+            return True
+        if class_name in self._SLIDESHOW_PRIORITY_CLASSES or class_name in self._SLIDESHOW_SECONDARY_CLASSES:
+            top_hwnd = _user32_top_level_hwnd(hwnd)
+            process_name = self._window_process_name(top_hwnd or hwnd)
+            if process_name.startswith("wpp"):
+                return True
+        return False
+
+    def _is_wps_slideshow_class(self, class_name: str) -> bool:
+        if not class_name:
+            return False
+        if class_name in self._WPS_SLIDESHOW_CLASSES:
+            return True
+        return class_name.startswith("kwppshow")
+
+    def _is_wps_slideshow_target(self, hwnd: Optional[int] = None) -> bool:
+        if hwnd is None:
+            hwnd = self._current_navigation_target()
+        if not hwnd:
+            return False
+        class_name = self._presentation_window_class(hwnd)
+        return self._is_wps_slideshow_class(class_name)
+
     def _word_navigation_vk(self, vk_code: int, target_hwnd: Optional[int]) -> int:
         if win32con is None or not target_hwnd:
             return 0
