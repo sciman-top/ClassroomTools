@@ -3546,15 +3546,62 @@ class _PresentationForwarder:
         if not roots:
             return None
         seen: Set[int] = set(handles)
+        buffer = self._child_buffer
         for root in roots:
-            for child in self._collect_descendant_windows(root):
-                if child in seen:
+            queue: deque[int] = deque([root])
+            while queue:
+                parent = queue.popleft()
+                buffer.clear()
+
+                def _collector(child_hwnd: int, acc: List[int]) -> bool:
+                    if child_hwnd in seen:
+                        return True
+                    seen.add(child_hwnd)
+                    acc.append(child_hwnd)
+                    return True
+
+                try:
+                    win32gui.EnumChildWindows(parent, _collector, buffer)
+                except Exception:
                     continue
-                seen.add(child)
-                class_name = self._window_class_name(child)
-                if self._is_word_content_class(class_name) and self._is_target_window_valid(child):
-                    return child
+                for child in list(buffer):
+                    class_name = self._window_class_name(child)
+                    if self._is_word_content_class(class_name):
+                        if self._is_target_window_valid(child):
+                            return child
+                    if self._is_word_host_class(class_name) or self._is_word_like_class(class_name):
+                        queue.append(child)
         return None
+
+    def _word_host_chain(self, hwnd: int) -> Tuple[int, ...]:
+        if win32gui is None or hwnd == 0:
+            return ()
+        chain: List[int] = []
+        seen: Set[int] = set()
+        current = hwnd
+        for _ in range(8):
+            try:
+                parent = win32gui.GetParent(current)
+            except Exception:
+                parent = 0
+            if not parent or parent in seen:
+                break
+            seen.add(parent)
+            current = parent
+            class_name = self._window_class_name(current)
+            if self._is_word_host_class(class_name) or self._is_word_like_class(class_name):
+                chain.append(current)
+        top_level = self._top_level_hwnd(hwnd)
+        if (
+            top_level
+            and top_level not in seen
+            and top_level not in chain
+            and top_level != hwnd
+        ):
+            class_name = self._window_class_name(top_level)
+            if self._is_word_host_class(class_name) or self._is_word_like_class(class_name):
+                chain.append(top_level)
+        return tuple(chain)
 
     def _normalize_presentation_target(self, hwnd: int) -> Optional[int]:
         if hwnd == 0:
@@ -3623,6 +3670,13 @@ class _PresentationForwarder:
         for focus_hwnd in self._gather_thread_focus_handles(target):
             _register(focus_hwnd, cache=False, require_visible=False, base=900)
         _register(target, cache=True, require_visible=True, base=820)
+        target_class = self._window_class_name(target)
+        if self._is_word_like_class(target_class):
+            word_content = self._locate_word_content_window(target)
+            if word_content and word_content != target:
+                _register(word_content, cache=True, require_visible=True, base=860)
+            for ancestor in self._word_host_chain(target):
+                _register(ancestor, cache=True, require_visible=True, base=780)
         for child_hwnd in self._collect_descendant_windows(target):
             _register(child_hwnd, cache=False, require_visible=False, base=780)
 
@@ -3652,6 +3706,13 @@ class _PresentationForwarder:
         for focus_hwnd in self._gather_thread_focus_handles(target):
             _append(focus_hwnd, cache=False, require_visible=False, base=880)
         _append(target, cache=True, require_visible=True, base=800)
+        target_class = self._window_class_name(target)
+        if self._is_word_like_class(target_class):
+            word_content = self._locate_word_content_window(target)
+            if word_content and word_content != target:
+                _append(word_content, cache=True, require_visible=True, base=840)
+            for ancestor in self._word_host_chain(target):
+                _append(ancestor, cache=True, require_visible=True, base=780)
         for child_hwnd in self._collect_descendant_windows(target):
             _append(child_hwnd, cache=False, require_visible=False, base=760)
 
@@ -4918,9 +4979,9 @@ class OverlayWindow(QWidget):
                         )
                         break
         self._pending_tool_restore = None
-        if originating_key is not None and not success:
-            self._release_keyboard_navigation_state(originating_key)
         if not success:
+            if originating_key is not None:
+                self._release_keyboard_navigation_state(originating_key)
             self._log_navigation_debug(
                 "virtual_key_failed",
                 vk=vk_code,
@@ -4931,6 +4992,8 @@ class OverlayWindow(QWidget):
             if via_toolbar:
                 self._cancel_navigation_cursor_hold()
             return
+        if originating_key is not None:
+            self._release_keyboard_navigation_state(originating_key)
         if not wheel_used and not had_keyboard_grab and self.mode != "cursor":
             self._ensure_keyboard_capture()
         self.raise_toolbar()
@@ -5906,17 +5969,20 @@ class OverlayWindow(QWidget):
         super().mouseReleaseEvent(e)
 
     def keyPressEvent(self, e: QKeyEvent) -> None:
-        if e.key() in _QT_NAVIGATION_KEYS:
+        key = e.key()
+        if key in _QT_NAVIGATION_KEYS:
             if self.whiteboard_active:
                 e.accept()
                 return
-            if not e.isAutoRepeat():
-                self._active_navigation_keys.add(e.key())
+            is_auto = e.isAutoRepeat()
+            if not is_auto:
+                self._active_navigation_keys.add(key)
                 self._set_navigation_reason("keyboard", True)
-            if e.key() in (Qt.Key.Key_Down, Qt.Key.Key_Right):
-                self.go_to_next_slide(originating_key=e.key())
+            origin_key = None if is_auto else key
+            if key in (Qt.Key.Key_Down, Qt.Key.Key_Right):
+                self.go_to_next_slide(originating_key=origin_key)
             else:
-                self.go_to_previous_slide(originating_key=e.key())
+                self.go_to_previous_slide(originating_key=origin_key)
             e.accept()
             return
         allow_cursor = (self.mode == "cursor" or self.navigation_active) and not self.whiteboard_active
@@ -5927,7 +5993,7 @@ class OverlayWindow(QWidget):
         ):
             e.accept()
             return
-        if e.key() == Qt.Key.Key_Escape:
+        if key == Qt.Key.Key_Escape:
             self.set_mode("cursor"); return
         super().keyPressEvent(e)
 
