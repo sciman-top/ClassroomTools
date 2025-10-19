@@ -4446,6 +4446,7 @@ class OverlayWindow(QWidget):
             self.pen_color = QColor(color)
             self._apply_opacity_overrides(overrides)
             self._apply_pen_style_change()
+            self.save_settings()
         self.set_mode(pm, ps)
         self.raise_toolbar()
 
@@ -5403,6 +5404,7 @@ class OverlayWindow(QWidget):
         self._update_brush_pen_appearance(base_width, self._active_fade_max)
         self._update_pen_tooltip()
         self.set_mode("brush")
+        self.save_settings()
 
     def undo_last_action(self) -> None:
         if not self.history:
@@ -6107,9 +6109,10 @@ class CountdownSettingsDialog(QDialog):
 
         layout = QVBoxLayout(self); layout.setContentsMargins(10, 10, 10, 10); layout.setSpacing(6)
 
-        ml = QHBoxLayout(); ml.addWidget(QLabel("分钟 (0-25):"))
+        minute_label = QLabel("分钟 (0-300，滑块 0-15):")
+        ml = QHBoxLayout(); ml.addWidget(minute_label)
         self.minutes_spin = QSpinBox(); self.minutes_spin.setRange(0, 300); self.minutes_spin.setValue(max(0, min(300, minutes)))
-        minute_slider = QSlider(Qt.Orientation.Horizontal); minute_slider.setRange(0, 25)
+        minute_slider = QSlider(Qt.Orientation.Horizontal); minute_slider.setRange(0, 15)
         minute_slider.setValue(min(self.minutes_spin.value(), minute_slider.maximum()))
         minute_slider.valueChanged.connect(self.minutes_spin.setValue)
 
@@ -8498,8 +8501,6 @@ class RollCallTimerWindow(QWidget):
             (3, "3 秒"),
             (5, "5 秒"),
             (10, "10 秒"),
-            (15, "15 秒"),
-            (30, "30 秒"),
         ]
         current_seconds = int(self.photo_duration_seconds)
         for seconds, label in duration_choices:
