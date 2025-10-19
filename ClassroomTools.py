@@ -65,6 +65,8 @@ VK_UP = getattr(win32con, "VK_UP", 0x26)
 VK_DOWN = getattr(win32con, "VK_DOWN", 0x28)
 VK_LEFT = getattr(win32con, "VK_LEFT", 0x25)
 VK_RIGHT = getattr(win32con, "VK_RIGHT", 0x27)
+VK_PRIOR = getattr(win32con, "VK_PRIOR", 0x21)
+VK_NEXT = getattr(win32con, "VK_NEXT", 0x22)
 KEYEVENTF_EXTENDEDKEY = getattr(win32con, "KEYEVENTF_EXTENDEDKEY", 0x0001)
 KEYEVENTF_KEYUP = getattr(win32con, "KEYEVENTF_KEYUP", 0x0002)
 _NAVIGATION_EXTENDED_KEYS = {VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT}
@@ -3218,6 +3220,14 @@ class OverlayWindow(QWidget):
     _SLIDESHOW_PRIORITY_CLASSES = _PresentationForwarder._SLIDESHOW_PRIORITY_CLASSES
     _SLIDESHOW_SECONDARY_CLASSES = _PresentationForwarder._SLIDESHOW_SECONDARY_CLASSES
     _NAVIGATION_RESTORE_DELAY_MS = 600
+    _WORD_WINDOW_CLASSES: Set[str] = {
+        "opusapp",
+        "worddocument",
+        "_wwg",
+        "_wwb",
+        "nuidocumentwindow",
+        "netuihwnd",
+    }
 
     def __init__(self, settings_manager: SettingsManager) -> None:
         super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
@@ -3489,11 +3499,29 @@ class OverlayWindow(QWidget):
         self._update_last_tool_snapshot()
         self.set_mode("cursor")
 
-    def go_to_next_slide(self, *, via_toolbar: bool = False) -> None:
-        self._send_slide_virtual_key(VK_DOWN, via_toolbar=via_toolbar)
+    def go_to_next_slide(
+        self,
+        *,
+        via_toolbar: bool = False,
+        originating_key: Optional[int] = None,
+    ) -> None:
+        self._send_slide_virtual_key(
+            VK_DOWN,
+            via_toolbar=via_toolbar,
+            originating_key=originating_key,
+        )
 
-    def go_to_previous_slide(self, *, via_toolbar: bool = False) -> None:
-        self._send_slide_virtual_key(VK_UP, via_toolbar=via_toolbar)
+    def go_to_previous_slide(
+        self,
+        *,
+        via_toolbar: bool = False,
+        originating_key: Optional[int] = None,
+    ) -> None:
+        self._send_slide_virtual_key(
+            VK_UP,
+            via_toolbar=via_toolbar,
+            originating_key=originating_key,
+        )
 
     def _wheel_delta_for_vk(self, vk_code: int) -> int:
         if vk_code in (VK_DOWN, VK_RIGHT):
@@ -3502,21 +3530,80 @@ class OverlayWindow(QWidget):
             return 120
         return 0
 
-    def _send_slide_virtual_key(self, vk_code: int, *, via_toolbar: bool = False) -> None:
+    def _is_word_like_class(self, class_name: str) -> bool:
+        if not class_name:
+            return False
+        if class_name in self._WORD_WINDOW_CLASSES:
+            return True
+        if class_name.startswith("_ww"):
+            return True
+        if "word" in class_name:
+            return True
+        return False
+
+    def _word_navigation_vk(self, vk_code: int, target_hwnd: Optional[int]) -> int:
+        if win32con is None or not target_hwnd:
+            return 0
+        class_name = self._presentation_window_class(target_hwnd)
+        if not self._is_word_like_class(class_name):
+            return 0
+        if vk_code in (VK_DOWN, VK_RIGHT):
+            return getattr(win32con, "VK_NEXT", 0)
+        if vk_code in (VK_UP, VK_LEFT):
+            return getattr(win32con, "VK_PRIOR", 0)
+        return 0
+
+    def _navigation_vk_candidates(self, vk_code: int) -> Tuple[int, ...]:
+        candidates: List[int] = []
+        target_hwnd = self._resolve_presentation_target()
+        alt_vk = self._word_navigation_vk(vk_code, target_hwnd)
+        for candidate in (alt_vk, vk_code):
+            if candidate and candidate not in candidates:
+                candidates.append(candidate)
+        if not candidates:
+            candidates.append(vk_code)
+        return tuple(candidates)
+
+    def _release_keyboard_navigation_state(self, key: Optional[int] = None) -> None:
+        if key is not None:
+            self._active_navigation_keys.discard(key)
+        if not self._active_navigation_keys:
+            self._set_navigation_reason("keyboard", False)
+
+    def _send_slide_virtual_key(
+        self,
+        vk_code: int,
+        *,
+        via_toolbar: bool = False,
+        originating_key: Optional[int] = None,
+    ) -> None:
         if vk_code == 0:
             return
         wheel_delta = self._wheel_delta_for_vk(vk_code)
         prefer_wheel = via_toolbar or self.navigation_active or self.mode == "cursor"
         if wheel_delta and prefer_wheel:
             if self._send_navigation_wheel(wheel_delta):
+                if originating_key is not None:
+                    self._release_keyboard_navigation_state(originating_key)
                 self.raise_toolbar()
                 return
         prev_mode = self.mode
         if prev_mode in {"brush", "shape"}:
             self._update_last_tool_snapshot()
+        candidates = self._navigation_vk_candidates(vk_code)
+        success = False
         with self._temporarily_release_keyboard() as had_keyboard_grab:
-            success = self._dispatch_virtual_key(vk_code)
+            for candidate in candidates:
+                if not candidate:
+                    continue
+                success = self._dispatch_virtual_key(candidate)
+                if success:
+                    break
+            if originating_key is not None:
+                self._release_keyboard_navigation_state(originating_key)
         self._pending_tool_restore = None
+        if originating_key is not None and not success:
+            self._release_keyboard_navigation_state(originating_key)
         if not success:
             if via_toolbar:
                 self._cancel_navigation_cursor_hold()
@@ -4397,9 +4484,9 @@ class OverlayWindow(QWidget):
                 self._active_navigation_keys.add(e.key())
                 self._set_navigation_reason("keyboard", True)
             if e.key() in (Qt.Key.Key_Down, Qt.Key.Key_Right):
-                self.go_to_next_slide()
+                self.go_to_next_slide(originating_key=e.key())
             else:
-                self.go_to_previous_slide()
+                self.go_to_previous_slide(originating_key=e.key())
             e.accept()
             return
         allow_cursor = self.mode == "cursor" or self.navigation_active
@@ -4416,9 +4503,8 @@ class OverlayWindow(QWidget):
 
     def keyReleaseEvent(self, e: QKeyEvent) -> None:
         if e.key() in _QT_NAVIGATION_KEYS:
-            if not e.isAutoRepeat() and e.key() in self._active_navigation_keys:
-                self._active_navigation_keys.discard(e.key())
-                self._set_navigation_reason("keyboard", False)
+            if not e.isAutoRepeat():
+                self._release_keyboard_navigation_state(e.key())
             e.accept()
             return
         allow_cursor = self.mode == "cursor" or self.navigation_active
