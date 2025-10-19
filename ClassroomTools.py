@@ -1462,7 +1462,7 @@ PEN_STYLE_CONFIGS: Dict[PenStyle, PenStyleConfig] = {
     PenStyle.CHALK: PenStyleConfig(
         key="chalk",
         display_name="粉笔",
-        description="粉笔质感，色彩饱满且边缘柔和。",
+        description="粉笔质感，色彩饱满并带有柔和粉雾的边缘与轻微阴影。",
         slider_range=(8, 34),
         default_base=16,
         width_multiplier=1.1,
@@ -1504,7 +1504,7 @@ PEN_STYLE_CONFIGS: Dict[PenStyle, PenStyleConfig] = {
     PenStyle.HIGHLIGHTER: PenStyleConfig(
         key="highlighter",
         display_name="荧光笔",
-        description="柔和半透明，均匀覆盖文本的划重点效果。",
+        description="半透明覆盖，色彩均匀顺滑，突出重点又不遮挡底稿。",
         slider_range=(12, 30),
         default_base=18,
         width_multiplier=1.9,
@@ -1548,7 +1548,7 @@ PEN_STYLE_CONFIGS: Dict[PenStyle, PenStyleConfig] = {
     PenStyle.FOUNTAIN: PenStyleConfig(
         key="fountain",
         display_name="钢笔",
-        description="细腻流畅，接近旧版画笔的书写体验。",
+        description="细腻流畅，线宽随速度自然过渡，适合精致书写。",
         slider_range=(5, 24),
         default_base=10,
         width_multiplier=1.04,
@@ -1590,7 +1590,7 @@ PEN_STYLE_CONFIGS: Dict[PenStyle, PenStyleConfig] = {
     PenStyle.BRUSH: PenStyleConfig(
         key="brush",
         display_name="毛笔",
-        description="富有笔锋、墨色厚实的毛笔效果。",
+        description="富有笔锋层次，墨迹厚实顺滑，起收笔都更具力度。",
         slider_range=(6, 20),
         default_base=12,
         width_multiplier=1.46,
@@ -1784,16 +1784,25 @@ class _PenStyleEffects:
         width: float,
         config: PenStyleConfig,
         base_color: QColor,
-    ) -> None:
+        *,
+        stroke_coverage: Optional[QPainterPath] = None,
+    ) -> Optional[QPainterPath]:
         if width <= 0.0:
-            return
+            return stroke_coverage
         style_key = config.key
         base_alpha = base_color.alpha() if base_color.isValid() else config.base_alpha
         fill_alpha = int(clamp(base_alpha + config.fill_alpha_boost, 0, 255))
         color = QColor(base_color)
 
-        def _fill(stroke_area: QPainterPath, fill_color: QColor) -> None:
+        def _fill(
+            stroke_area: QPainterPath,
+            fill_color: QColor,
+            *,
+            composition: Optional[QPainter.CompositionMode] = None,
+        ) -> None:
             painter.save()
+            if composition is not None:
+                painter.setCompositionMode(composition)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(fill_color)
             painter.drawPath(stroke_area)
@@ -1831,13 +1840,22 @@ class _PenStyleEffects:
                 painter.setPen(highlight_pen)
                 painter.drawPath(path)
                 painter.restore()
-            return
+            return stroke_coverage
 
         if style_key == "highlighter":
             stroke_area = cls._stroke_path(path, width * 1.04)
             body_color = QColor(color)
             body_color.setAlpha(fill_alpha)
-            _fill(stroke_area, body_color)
+            fill_area = QPainterPath(stroke_area)
+            coverage = stroke_coverage
+            if coverage is not None and not coverage.isEmpty():
+                fill_area = fill_area.subtracted(coverage)
+            if not fill_area.isEmpty():
+                _fill(fill_area, body_color)
+            if coverage is not None and not coverage.isEmpty():
+                updated_coverage = coverage.united(stroke_area)
+            else:
+                updated_coverage = QPainterPath(stroke_area)
 
             if config.feather_strength > 0:
                 glow_color = QColor(body_color)
@@ -1853,7 +1871,7 @@ class _PenStyleEffects:
                 painter.setPen(glow_pen)
                 painter.drawPath(path)
                 painter.restore()
-            return
+            return updated_coverage
 
         if style_key == "brush":
             stroke_area = cls._stroke_path(path, width * 1.08)
@@ -1888,7 +1906,7 @@ class _PenStyleEffects:
                 painter.setPen(highlight_pen)
                 painter.drawPath(path)
                 painter.restore()
-            return
+            return stroke_coverage
 
         # fountain & fallback styles
         stroke_area = cls._stroke_path(path, width * 1.04)
@@ -1924,6 +1942,7 @@ class _PenStyleEffects:
             painter.setPen(highlight_pen)
             painter.drawPath(path)
             painter.restore()
+        return stroke_coverage
 def render_pen_preview_pixmap(
     color: QColor,
     style: PenStyle,
@@ -4245,6 +4264,7 @@ class OverlayWindow(QWidget):
         self._stroke_filter_point: Optional[QPointF] = None
         self._stroke_width_velocity: float = 0.0
         self._stroke_smoothed_target: float = max(1.0, self.pen_size)
+        self._stroke_fill_coverage = QPainterPath()
         self.navigation_active = False
         self._navigation_reasons: Dict[str, int] = {}
         self._active_navigation_keys: Set[int] = set()
@@ -5542,6 +5562,7 @@ class OverlayWindow(QWidget):
         self._stroke_target_width = float(self.last_width)
         self._stroke_smoothed_target = float(self.last_width)
         self._stroke_width_velocity = 0.0
+        self._stroke_fill_coverage = QPainterPath()
 
     def _start_paint_session(self, event) -> None:
         self._push_history()
@@ -5831,7 +5852,16 @@ class OverlayWindow(QWidget):
         painter.setPen(self._brush_pen)
         if config.key != "highlighter":
             painter.drawPath(path)
-        _PenStyleEffects.apply(painter, path, cur_w, config, QColor(self._active_pen_color))
+        updated_coverage = _PenStyleEffects.apply(
+            painter,
+            path,
+            cur_w,
+            config,
+            QColor(self._active_pen_color),
+            stroke_coverage=self._stroke_fill_coverage,
+        )
+        if isinstance(updated_coverage, QPainterPath):
+            self._stroke_fill_coverage = QPainterPath(updated_coverage)
 
         self.prev_point = QPointF(last_point)
         self.last_point = QPointF(cur_point)
