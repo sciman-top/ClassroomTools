@@ -2850,16 +2850,23 @@ class FloatingToolbar(QWidget):
 
     def wheelEvent(self, event) -> None:
         handled = False
-        forwarder = getattr(self.overlay, "_forwarder", None)
-        if forwarder is not None and (
-            getattr(self.overlay, "mode", "") == "cursor"
-            or getattr(self.overlay, "navigation_active", False)
-        ) and not getattr(self.overlay, "whiteboard_active", False):
+        overlay = getattr(self, "overlay", None)
+        if (
+            overlay is not None
+            and (
+                getattr(overlay, "mode", "") == "cursor"
+                or getattr(overlay, "navigation_active", False)
+            )
+            and not getattr(overlay, "whiteboard_active", False)
+        ):
             try:
-                handled = forwarder.forward_wheel(
-                    event,
-                    allow_cursor=True,
-                )
+                delta = overlay._wheel_event_delta(event)
+                if delta:
+                    handled, _ = overlay._forward_wheel_with_fallback(
+                        event=event,
+                        delta=delta,
+                        allow_cursor=True,
+                    )
             except Exception:
                 handled = False
         if handled:
@@ -4941,7 +4948,10 @@ class OverlayWindow(QWidget):
         success = False
         wheel_used = False
         if wheel_delta and (prefer_wheel or is_word_target):
-            success = self._send_navigation_wheel(wheel_delta)
+            success, wheel_fallback = self._forward_wheel_with_fallback(
+                delta=wheel_delta,
+                allow_cursor=(self.mode == "cursor" or self.navigation_active),
+            )
             wheel_used = success
             self._log_navigation_debug(
                 "wheel_forward",
@@ -4950,6 +4960,7 @@ class OverlayWindow(QWidget):
                 target=hex(target_hwnd) if target_hwnd else "0x0",
                 cls=target_class or "",
                 word=is_word_target,
+                fallback=wheel_fallback,
                 success=success,
             )
         prev_mode = self.mode
@@ -4998,33 +5009,62 @@ class OverlayWindow(QWidget):
             self._ensure_keyboard_capture()
         self.raise_toolbar()
 
-    def _send_navigation_wheel(self, delta: int) -> bool:
+    def _wheel_event_delta(self, event: QWheelEvent) -> int:
+        delta_vec = event.angleDelta()
+        delta = int(delta_vec.y() or delta_vec.x())
+        if delta == 0:
+            pixel_vec = event.pixelDelta()
+            delta = int(pixel_vec.y() or pixel_vec.x())
+        return delta
+
+    def _create_navigation_wheel_event(self, delta: int) -> QWheelEvent:
+        global_pos = QCursor.pos()
+        local_pos = self.mapFromGlobal(global_pos)
+        return QWheelEvent(
+            QPointF(local_pos),
+            QPointF(global_pos),
+            QPoint(),
+            QPoint(0, delta),
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+            Qt.ScrollPhase.ScrollUpdate,
+            False,
+        )
+
+    def _forward_wheel_with_fallback(
+        self,
+        *,
+        delta: int,
+        allow_cursor: bool,
+        event: Optional[QWheelEvent] = None,
+    ) -> Tuple[bool, bool]:
         if delta == 0 or self.whiteboard_active:
-            return False
+            return False, False
         handled = False
+        fallback_used = False
+        wheel_event = event
         if self._forwarder is not None:
             try:
-                global_pos = QCursor.pos()
-                local_pos = self.mapFromGlobal(global_pos)
-                wheel_event = QWheelEvent(
-                    QPointF(local_pos),
-                    QPointF(global_pos),
-                    QPoint(),
-                    QPoint(0, delta),
-                    Qt.MouseButton.NoButton,
-                    Qt.KeyboardModifier.NoModifier,
-                    Qt.ScrollPhase.ScrollUpdate,
-                    False,
-                )
+                if wheel_event is None:
+                    wheel_event = self._create_navigation_wheel_event(delta)
                 handled = self._forwarder.forward_wheel(
                     wheel_event,
-                    allow_cursor=(self.mode == "cursor" or self.navigation_active),
+                    allow_cursor=allow_cursor,
                 )
             except Exception:
                 handled = False
         if handled:
-            return True
-        return self._fallback_send_wheel(delta)
+            return True, False
+        with self._temporarily_release_keyboard():
+            fallback_used = self._fallback_send_wheel(delta)
+        return fallback_used, fallback_used
+
+    def _send_navigation_wheel(self, delta: int) -> bool:
+        handled, _ = self._forward_wheel_with_fallback(
+            delta=delta,
+            allow_cursor=(self.mode == "cursor" or self.navigation_active),
+        )
+        return handled
 
     def _fallback_send_wheel(self, delta: int) -> bool:
         if delta == 0 or _USER32 is None:
@@ -5831,8 +5871,19 @@ class OverlayWindow(QWidget):
 
     # ---- 画图事件 ----
     def wheelEvent(self, e) -> None:
+        if self.whiteboard_active:
+            super().wheelEvent(e)
+            return
         allow_cursor = self.mode == "cursor" or self.navigation_active
-        if self._forwarder and self._forwarder.forward_wheel(e, allow_cursor=allow_cursor):
+        delta = self._wheel_event_delta(e)
+        handled = False
+        if delta:
+            handled, _ = self._forward_wheel_with_fallback(
+                event=e,
+                delta=delta,
+                allow_cursor=allow_cursor,
+            )
+        if handled:
             e.accept()
             return
         super().wheelEvent(e)
