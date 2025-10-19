@@ -3179,6 +3179,7 @@ class _PresentationForwarder:
         if not target:
             self.clear_cached_target()
             return False
+        is_wps_target = self._is_wps_slideshow_window(target)
         keys = self._translate_mouse_modifiers(event)
         delta_word = ctypes.c_short(delta).value & 0xFFFF
         w_param = (ctypes.c_ushort(keys).value & 0xFFFF) | (delta_word << 16)
@@ -3187,10 +3188,18 @@ class _PresentationForwarder:
         y_word = ctypes.c_short(global_pos.y()).value & 0xFFFF
         l_param = x_word | (y_word << 16)
         delivered = False
-        with self._keyboard_capture_guard():
-            focus_ok = self.bring_target_to_foreground(target)
-            if not focus_ok:
-                focus_ok = self._activate_window_for_input(target)
+        guard = (
+            contextlib.nullcontext()
+            if is_wps_target
+            else self._keyboard_capture_guard()
+        )
+        with guard:
+            if is_wps_target:
+                focus_ok = True
+            else:
+                focus_ok = self.bring_target_to_foreground(target)
+                if not focus_ok:
+                    focus_ok = self._activate_window_for_input(target)
             for hwnd, update_cache in self._iter_wheel_targets(target):
                 if self._deliver_mouse_wheel(hwnd, w_param, l_param):
                     delivered = True
@@ -4997,6 +5006,14 @@ class OverlayWindow(QWidget):
             return True
         return class_name.startswith("kwppshow")
 
+    def _is_wps_slideshow_target(self, hwnd: Optional[int] = None) -> bool:
+        if hwnd is None:
+            hwnd = self._current_navigation_target()
+        if not hwnd:
+            return False
+        class_name = self._presentation_window_class(hwnd)
+        return self._is_wps_slideshow_class(class_name)
+
     def _word_navigation_vk(self, vk_code: int, target_hwnd: Optional[int]) -> int:
         if win32con is None or not target_hwnd:
             return 0
@@ -5040,6 +5057,7 @@ class OverlayWindow(QWidget):
         target_class = self._presentation_window_class(target_hwnd) if target_hwnd else ""
         is_word_target = self._is_word_like_class(target_class)
         prefer_wheel = via_toolbar or self.navigation_active or self.mode == "cursor"
+        suppress_focus_restore = self._is_wps_slideshow_class(target_class)
         success = False
         wheel_used = False
         if wheel_delta and (prefer_wheel or is_word_target):
@@ -5060,7 +5078,10 @@ class OverlayWindow(QWidget):
         had_keyboard_grab = False
         if not success:
             candidates = self._navigation_vk_candidates(vk_code)
-            with self._temporarily_release_keyboard() as had_keyboard_grab:
+            with self._temporarily_release_keyboard(
+                release=not suppress_focus_restore,
+                restore=not suppress_focus_restore,
+            ) as had_keyboard_grab:
                 for candidate in candidates:
                     if not candidate:
                         continue
@@ -5072,6 +5093,8 @@ class OverlayWindow(QWidget):
                             if current_target
                             else ""
                         )
+                        if self._is_wps_slideshow_class(current_class):
+                            suppress_focus_restore = True
                         self._log_navigation_debug(
                             "virtual_key_forward",
                             vk=candidate,
@@ -5096,6 +5119,8 @@ class OverlayWindow(QWidget):
             return
         if originating_key is not None:
             self._release_keyboard_navigation_state(originating_key)
+        if suppress_focus_restore:
+            return
         if not wheel_used and not had_keyboard_grab and self.mode != "cursor":
             self._ensure_keyboard_capture()
         self.raise_toolbar()
@@ -5169,6 +5194,7 @@ class OverlayWindow(QWidget):
         if vk_code == 0 or self.whiteboard_active:
             return False
         success = False
+        suppress_focus_restore = False
         if self._forwarder is not None:
             qt_key_map = {
                 VK_UP: Qt.Key.Key_Up,
@@ -5196,22 +5222,27 @@ class OverlayWindow(QWidget):
                 )
                 if press_ok and release_ok:
                     success = True
+                    current_target = self._forwarder.get_presentation_target()
+                    if self._is_wps_slideshow_target(current_target):
+                        suppress_focus_restore = True
             if not success:
                 target_hwnd = self._forwarder.get_presentation_target()
                 focus_ok = False
                 if target_hwnd:
-                    try:
-                        focus_ok = self._forwarder.focus_presentation_window()
-                    except Exception:
-                        focus_ok = False
-                    if not focus_ok:
+                    suppress_focus_restore = self._is_wps_slideshow_target(target_hwnd)
+                    if not suppress_focus_restore:
                         try:
-                            if self._forwarder.bring_target_to_foreground(target_hwnd):
-                                QApplication.processEvents()
-                                time.sleep(0.05)
-                                focus_ok = True
+                            focus_ok = self._forwarder.focus_presentation_window()
                         except Exception:
                             focus_ok = False
+                        if not focus_ok:
+                            try:
+                                if self._forwarder.bring_target_to_foreground(target_hwnd):
+                                    QApplication.processEvents()
+                                    time.sleep(0.05)
+                                    focus_ok = True
+                            except Exception:
+                                focus_ok = False
                 else:
                     self._forwarder.clear_cached_target()
                 success = self._forwarder.send_virtual_key(vk_code)
@@ -5220,7 +5251,7 @@ class OverlayWindow(QWidget):
         if not success:
             self._focus_presentation_window_fallback()
             success = self._fallback_send_virtual_key(vk_code)
-        if success and self.mode != "cursor":
+        if success and self.mode != "cursor" and not suppress_focus_restore:
             QTimer.singleShot(100, self._ensure_keyboard_capture)
         return success
 
@@ -5400,14 +5431,16 @@ class OverlayWindow(QWidget):
         self._keyboard_grabbed = False
 
     @contextlib.contextmanager
-    def _temporarily_release_keyboard(self):
-        had_keyboard_grab = self._keyboard_grabbed
-        if had_keyboard_grab:
+    def _temporarily_release_keyboard(
+        self, *, release: bool = True, restore: bool = True
+    ) -> Iterable[bool]:
+        had_keyboard_grab = bool(self._keyboard_grabbed and release)
+        if release and self._keyboard_grabbed:
             self._release_keyboard_capture()
         try:
             yield had_keyboard_grab
         finally:
-            if had_keyboard_grab:
+            if restore and had_keyboard_grab:
                 self._ensure_keyboard_capture()
 
     def _overlay_rect_tuple(self) -> Optional[Tuple[int, int, int, int]]:
