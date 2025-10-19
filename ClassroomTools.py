@@ -2991,14 +2991,37 @@ class _PresentationForwarder:
         "worddocument",
         "_wwg",
         "_wwb",
+        "kwpsframeclass",
+        "kwpsmainframe",
+        "wpsframeclass",
+        "wpsmainframe",
+        "kwpsviewclass",
+        "wpsviewclass",
+        "kwpspageview",
+        "wpspageview",
     }
-    _WORD_CONTENT_CLASSES: Set[str] = {"worddocument", "paneclassdc", "_wwg", "_wwb"}
+    _WORD_CONTENT_CLASSES: Set[str] = {
+        "worddocument",
+        "paneclassdc",
+        "_wwg",
+        "_wwb",
+        "kwpsviewclass",
+        "wpsviewclass",
+        "kwpspageview",
+        "wpspageview",
+        "kwpsdocview",
+        "wpsdocview",
+    }
     _WORD_HOST_CLASSES: Set[str] = {
         "opusapp",
         "nuidocumentwindow",
         "netuihwnd",
         "documentwindow",
         "mdiclient",
+        "kwpsframeclass",
+        "kwpsmainframe",
+        "wpsframeclass",
+        "wpsmainframe",
     }
     _PRESENTATION_EDITOR_CLASSES: Set[str] = {
         "pptframeclass",
@@ -3524,6 +3547,10 @@ class _PresentationForwarder:
         if class_name.startswith("_ww"):
             return True
         if "word" in class_name:
+            return True
+        if class_name.startswith("kwps") or class_name.startswith("wps"):
+            return True
+        if "wps" in class_name and "kwpp" not in class_name:
             return True
         return False
 
@@ -4892,6 +4919,10 @@ class OverlayWindow(QWidget):
         if class_name.startswith("_ww"):
             return True
         if "word" in class_name:
+            return True
+        if class_name.startswith("kwps") or class_name.startswith("wps"):
+            return True
+        if "wps" in class_name and "kwpp" not in class_name:
             return True
         return False
 
