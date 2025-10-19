@@ -5179,29 +5179,30 @@ class OverlayWindow(QWidget):
         used_fallback = False
         ready = focus_ready
         with self._temporarily_release_keyboard():
-            cursor_context = self._word_cursor_context(hwnd, rect, click=True)
-            with cursor_context as (moved, clicked):
-                cursor_moved = moved
-                click_ok = clicked
-                if not ready:
-                    ready = bool(cursor_moved or click_ok)
-                if not ready:
-                    ready = self._await_foreground(hwnd)
-                if ready:
-                    if mode == "wheel":
-                        success = self._fallback_send_wheel(value)
-                        used_fallback = True
-                    elif mode == "key":
-                        send_success = False
-                        if self._forwarder is not None:
-                            try:
-                                send_success = self._forwarder.send_virtual_key(value)
-                            except Exception:
-                                send_success = False
-                        if not send_success:
+            with self._temporary_input_passthrough():
+                cursor_context = self._word_cursor_context(hwnd, rect, click=True)
+                with cursor_context as (moved, clicked):
+                    cursor_moved = moved
+                    click_ok = clicked
+                    if not ready:
+                        ready = bool(cursor_moved or click_ok)
+                    if not ready:
+                        ready = self._await_foreground(hwnd)
+                    if ready:
+                        if mode == "wheel":
+                            success = self._fallback_send_wheel(value)
                             used_fallback = True
-                            send_success = self._fallback_send_virtual_key(value)
-                        success = send_success
+                        elif mode == "key":
+                            send_success = False
+                            if self._forwarder is not None:
+                                try:
+                                    send_success = self._forwarder.send_virtual_key(value)
+                                except Exception:
+                                    send_success = False
+                            if not send_success:
+                                used_fallback = True
+                                send_success = self._fallback_send_virtual_key(value)
+                            success = send_success
         if not success and self._forwarder is not None:
             try:
                 self._forwarder.clear_cached_target()
@@ -5295,14 +5296,22 @@ class OverlayWindow(QWidget):
         cursor_moved = False
         click_ok = False
         with self._temporarily_release_keyboard():
-            if is_word_target:
-                cursor_context = self._word_cursor_context(target_hwnd, target_rect, click=True)
-            else:
-                cursor_context = contextlib.nullcontext((False, False))
-            with cursor_context as (moved_cursor, click_result):
-                cursor_moved = moved_cursor
-                click_ok = click_result
-                fallback_success = self._fallback_send_wheel(delta)
+            passthrough_ctx = (
+                self._temporary_input_passthrough()
+                if is_word_target
+                else contextlib.nullcontext(False)
+            )
+            with passthrough_ctx:
+                if is_word_target:
+                    cursor_context = self._word_cursor_context(
+                        target_hwnd, target_rect, click=True
+                    )
+                else:
+                    cursor_context = contextlib.nullcontext((False, False))
+                with cursor_context as (moved_cursor, click_result):
+                    cursor_moved = moved_cursor
+                    click_ok = click_result
+                    fallback_success = self._fallback_send_wheel(delta)
         handled = fallback_success
         fallback_path = True
         if forced_fallback and logger.isEnabledFor(logging.DEBUG):
@@ -5634,6 +5643,22 @@ class OverlayWindow(QWidget):
         finally:
             if had_keyboard_grab:
                 self._ensure_keyboard_capture()
+
+    @contextlib.contextmanager
+    def _temporary_input_passthrough(self):
+        previously_enabled = self.testAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents
+        )
+        had_keyboard_grab = self._keyboard_grabbed
+        if not previously_enabled:
+            self._apply_input_passthrough(True)
+        try:
+            yield previously_enabled
+        finally:
+            if not previously_enabled:
+                self._apply_input_passthrough(False)
+                if had_keyboard_grab:
+                    self._ensure_keyboard_capture()
 
     def _overlay_rect_tuple(self) -> Optional[Tuple[int, int, int, int]]:
         rect = self.geometry()
