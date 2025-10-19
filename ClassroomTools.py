@@ -1445,38 +1445,38 @@ PEN_STYLE_CONFIGS: Dict[PenStyle, PenStyleConfig] = {
     PenStyle.CHALK: PenStyleConfig(
         key="chalk",
         display_name="粉笔",
-        description="粉笔质感，颗粒柔和，书写时自然渐变。",
+        description="粉笔质感，色彩饱满且边缘柔和。",
         slider_range=(6, 36),
-        default_base=14,
-        width_multiplier=1.12,
-        smoothing=0.7,
-        speed_base_multiplier=18.0,
-        speed_base_offset=20.0,
-        target_min_factor=0.6,
-        target_speed_factor=0.35,
-        target_curve_factor=0.28,
-        curve_sensitivity=0.55,
-        pressure_factor=0.18,
-        width_memory=0.7,
-        pressure_time_weight=3.2,
-        travel_weight=0.22,
-        fade_min_alpha=120,
+        default_base=15,
+        width_multiplier=1.08,
+        smoothing=0.85,
+        speed_base_multiplier=28.0,
+        speed_base_offset=42.0,
+        target_min_factor=0.78,
+        target_speed_factor=0.18,
+        target_curve_factor=0.16,
+        curve_sensitivity=0.48,
+        pressure_factor=0.12,
+        width_memory=0.9,
+        pressure_time_weight=2.6,
+        travel_weight=0.14,
+        fade_min_alpha=180,
         fade_max_alpha=255,
-        fade_speed_weight=140.0,
-        fade_curve_weight=70.0,
-        base_alpha=250,
-        shadow_alpha=90,
-        shadow_alpha_scale=0.4,
-        shadow_width_scale=1.45,
+        fade_speed_weight=90.0,
+        fade_curve_weight=50.0,
+        base_alpha=255,
+        shadow_alpha=70,
+        shadow_alpha_scale=0.25,
+        shadow_width_scale=1.22,
         texture=None,
         composition_mode=QPainter.CompositionMode.CompositionMode_SourceOver,
         color_lighten=1.0,
-        target_max_factor=1.72,
-        width_change_limit=0.24,
-        noise_strength=0.55,
-        fill_alpha_boost=12,
-        feather_strength=0.28,
-        edge_highlight_alpha=110,
+        target_max_factor=1.32,
+        width_change_limit=0.06,
+        noise_strength=0.0,
+        fill_alpha_boost=0,
+        feather_strength=0.22,
+        edge_highlight_alpha=70,
         solid_fill=True,
     ),
     PenStyle.HIGHLIGHTER: PenStyleConfig(
@@ -1485,35 +1485,35 @@ PEN_STYLE_CONFIGS: Dict[PenStyle, PenStyleConfig] = {
         description="柔和半透明，均匀覆盖文本的划重点效果。",
         slider_range=(10, 30),
         default_base=18,
-        width_multiplier=2.05,
-        smoothing=0.74,
-        speed_base_multiplier=20.0,
-        speed_base_offset=14.0,
-        target_min_factor=0.92,
-        target_speed_factor=0.24,
-        target_curve_factor=0.16,
-        curve_sensitivity=0.42,
-        pressure_factor=0.08,
-        width_memory=0.82,
-        pressure_time_weight=2.2,
-        travel_weight=0.12,
-        fade_min_alpha=60,
-        fade_max_alpha=200,
-        fade_speed_weight=120.0,
-        fade_curve_weight=40.0,
-        base_alpha=190,
+        width_multiplier=2.0,
+        smoothing=0.88,
+        speed_base_multiplier=32.0,
+        speed_base_offset=48.0,
+        target_min_factor=0.96,
+        target_speed_factor=0.1,
+        target_curve_factor=0.08,
+        curve_sensitivity=0.36,
+        pressure_factor=0.05,
+        width_memory=0.93,
+        pressure_time_weight=2.0,
+        travel_weight=0.08,
+        fade_min_alpha=80,
+        fade_max_alpha=210,
+        fade_speed_weight=70.0,
+        fade_curve_weight=32.0,
+        base_alpha=210,
         shadow_alpha=0,
         shadow_alpha_scale=0.0,
         shadow_width_scale=1.0,
         texture=None,
         composition_mode=QPainter.CompositionMode.CompositionMode_SourceOver,
         color_lighten=1.0,
-        target_max_factor=1.36,
-        width_change_limit=0.2,
+        target_max_factor=1.12,
+        width_change_limit=0.05,
         noise_strength=0.0,
-        fill_alpha_boost=24,
-        feather_strength=0.75,
-        edge_highlight_alpha=80,
+        fill_alpha_boost=0,
+        feather_strength=0.55,
+        edge_highlight_alpha=0,
         solid_fill=True,
     ),
     PenStyle.FOUNTAIN: PenStyleConfig(
@@ -1523,34 +1523,34 @@ PEN_STYLE_CONFIGS: Dict[PenStyle, PenStyleConfig] = {
         slider_range=(4, 24),
         default_base=9,
         width_multiplier=1.0,
-        smoothing=0.62,
-        speed_base_multiplier=16.0,
-        speed_base_offset=28.0,
-        target_min_factor=0.48,
-        target_speed_factor=0.36,
-        target_curve_factor=0.44,
-        curve_sensitivity=0.72,
-        pressure_factor=0.32,
-        width_memory=0.64,
-        pressure_time_weight=3.0,
-        travel_weight=0.26,
-        fade_min_alpha=90,
-        fade_max_alpha=230,
-        fade_speed_weight=150.0,
-        fade_curve_weight=80.0,
+        smoothing=0.82,
+        speed_base_multiplier=22.0,
+        speed_base_offset=36.0,
+        target_min_factor=0.56,
+        target_speed_factor=0.22,
+        target_curve_factor=0.28,
+        curve_sensitivity=0.6,
+        pressure_factor=0.26,
+        width_memory=0.88,
+        pressure_time_weight=2.8,
+        travel_weight=0.22,
+        fade_min_alpha=120,
+        fade_max_alpha=240,
+        fade_speed_weight=110.0,
+        fade_curve_weight=70.0,
         base_alpha=255,
-        shadow_alpha=85,
-        shadow_alpha_scale=0.5,
-        shadow_width_scale=1.2,
+        shadow_alpha=75,
+        shadow_alpha_scale=0.4,
+        shadow_width_scale=1.15,
         texture=None,
         composition_mode=QPainter.CompositionMode.CompositionMode_SourceOver,
         color_lighten=1.0,
-        target_max_factor=1.28,
-        width_change_limit=0.18,
-        noise_strength=0.05,
-        fill_alpha_boost=8,
-        feather_strength=0.18,
-        edge_highlight_alpha=60,
+        target_max_factor=1.2,
+        width_change_limit=0.07,
+        noise_strength=0.0,
+        fill_alpha_boost=6,
+        feather_strength=0.14,
+        edge_highlight_alpha=55,
         solid_fill=True,
     ),
     PenStyle.BRUSH: PenStyleConfig(
@@ -1559,35 +1559,35 @@ PEN_STYLE_CONFIGS: Dict[PenStyle, PenStyleConfig] = {
         description="富有笔锋、墨色厚实的毛笔效果。",
         slider_range=(6, 20),
         default_base=12,
-        width_multiplier=1.55,
-        smoothing=0.64,
-        speed_base_multiplier=14.0,
-        speed_base_offset=18.0,
-        target_min_factor=0.5,
-        target_speed_factor=0.48,
-        target_curve_factor=0.42,
-        curve_sensitivity=0.68,
-        pressure_factor=0.38,
-        width_memory=0.6,
-        pressure_time_weight=3.4,
-        travel_weight=0.3,
-        fade_min_alpha=100,
+        width_multiplier=1.45,
+        smoothing=0.8,
+        speed_base_multiplier=20.0,
+        speed_base_offset=32.0,
+        target_min_factor=0.6,
+        target_speed_factor=0.34,
+        target_curve_factor=0.3,
+        curve_sensitivity=0.6,
+        pressure_factor=0.32,
+        width_memory=0.85,
+        pressure_time_weight=3.0,
+        travel_weight=0.24,
+        fade_min_alpha=130,
         fade_max_alpha=255,
-        fade_speed_weight=160.0,
-        fade_curve_weight=90.0,
+        fade_speed_weight=130.0,
+        fade_curve_weight=80.0,
         base_alpha=255,
-        shadow_alpha=120,
-        shadow_alpha_scale=0.45,
-        shadow_width_scale=1.3,
+        shadow_alpha=110,
+        shadow_alpha_scale=0.35,
+        shadow_width_scale=1.25,
         texture=None,
         composition_mode=QPainter.CompositionMode.CompositionMode_SourceOver,
         color_lighten=1.0,
-        target_max_factor=2.05,
-        width_change_limit=0.28,
-        noise_strength=0.24,
-        fill_alpha_boost=24,
-        feather_strength=0.32,
-        edge_highlight_alpha=130,
+        target_max_factor=1.55,
+        width_change_limit=0.065,
+        noise_strength=0.0,
+        fill_alpha_boost=20,
+        feather_strength=0.24,
+        edge_highlight_alpha=90,
         solid_fill=True,
     ),
 }
@@ -1716,28 +1716,37 @@ class _PenStyleEffects:
         fill_alpha = min(255, max(0, config.base_alpha + config.fill_alpha_boost))
         color = QColor(base_color)
 
-        if style_key == "chalk":
-            stroke_area = cls._stroke_path(path, width * 1.35)
+        def _fill(stroke_area: QPainterPath, fill_color: QColor) -> None:
             painter.save()
             painter.setPen(Qt.PenStyle.NoPen)
-            color.setAlpha(fill_alpha)
-            painter.setBrush(color)
+            painter.setBrush(fill_color)
             painter.drawPath(stroke_area)
             painter.restore()
 
-            if config.noise_strength > 0:
-                density = 0.2 + config.noise_strength * 0.45
-                noise_alpha = int(80 + config.noise_strength * 120)
-                painter.save()
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(cls._noise_brush(color, noise_alpha, density, scale=2))
-                painter.drawPath(stroke_area)
-                painter.restore()
+        if style_key == "chalk":
+            stroke_area = cls._stroke_path(path, width * 1.18)
+            body_color = QColor(color)
+            body_color.setAlpha(fill_alpha)
+            _fill(stroke_area, body_color)
+
+            edge_color = QColor(body_color)
+            edge_color.setAlpha(int(fill_alpha * 0.45))
+            edge_pen = QPen(
+                edge_color,
+                max(0.9, width * (1.05 + config.feather_strength * 0.35)),
+                Qt.PenStyle.SolidLine,
+                Qt.PenCapStyle.RoundCap,
+                Qt.PenJoinStyle.RoundJoin,
+            )
+            painter.save()
+            painter.setPen(edge_pen)
+            painter.drawPath(path)
+            painter.restore()
 
             if config.edge_highlight_alpha > 0:
                 highlight_pen = QPen(
                     QColor(255, 255, 255, config.edge_highlight_alpha),
-                    max(0.8, width * 0.18),
+                    max(0.6, width * 0.14),
                     Qt.PenStyle.SolidLine,
                     Qt.PenCapStyle.RoundCap,
                     Qt.PenJoinStyle.RoundJoin,
@@ -1749,19 +1758,17 @@ class _PenStyleEffects:
             return
 
         if style_key == "highlighter":
-            stroke_area = cls._stroke_path(path, width * 1.08)
-            painter.save()
-            painter.setPen(Qt.PenStyle.NoPen)
-            color.setAlpha(fill_alpha)
-            painter.setBrush(color)
-            painter.drawPath(stroke_area)
-            painter.restore()
+            stroke_area = cls._stroke_path(path, width * 1.05)
+            body_color = QColor(color)
+            body_color.setAlpha(fill_alpha)
+            _fill(stroke_area, body_color)
 
             if config.feather_strength > 0:
-                glow_alpha = int(fill_alpha * 0.45)
+                glow_color = QColor(body_color)
+                glow_color.setAlpha(int(fill_alpha * 0.35))
                 glow_pen = QPen(
-                    QColor(color.red(), color.green(), color.blue(), glow_alpha),
-                    max(0.6, width * (1.0 + config.feather_strength)),
+                    glow_color,
+                    max(0.8, width * (1.0 + config.feather_strength)),
                     Qt.PenStyle.SolidLine,
                     Qt.PenCapStyle.RoundCap,
                     Qt.PenJoinStyle.RoundJoin,
@@ -1770,58 +1777,33 @@ class _PenStyleEffects:
                 painter.setPen(glow_pen)
                 painter.drawPath(path)
                 painter.restore()
-
-            if config.edge_highlight_alpha > 0:
-                edge_pen = QPen(
-                    QColor(255, 255, 255, config.edge_highlight_alpha),
-                    max(0.6, width * 0.12),
-                    Qt.PenStyle.SolidLine,
-                    Qt.PenCapStyle.RoundCap,
-                    Qt.PenJoinStyle.RoundJoin,
-                )
-                painter.save()
-                painter.setPen(edge_pen)
-                painter.drawPath(path)
-                painter.restore()
             return
 
         if style_key == "brush":
-            stroke_area = cls._stroke_path(path, width * 1.12)
-            painter.save()
-            painter.setPen(Qt.PenStyle.NoPen)
-            color.setAlpha(fill_alpha)
-            painter.setBrush(color)
-            painter.drawPath(stroke_area)
-            painter.restore()
+            stroke_area = cls._stroke_path(path, width * 1.1)
+            body_color = QColor(color)
+            body_color.setAlpha(fill_alpha)
+            _fill(stroke_area, body_color)
 
-            shade_color = QColor(color)
-            shade_color = shade_color.darker(130)
-            shade_color.setAlpha(int(90 + config.noise_strength * 90))
-            shading_pen = QPen(
-                shade_color,
-                max(0.6, width * 0.62),
+            depth_color = QColor(body_color)
+            depth_color = depth_color.darker(125)
+            depth_color.setAlpha(int(fill_alpha * 0.55))
+            depth_pen = QPen(
+                depth_color,
+                max(0.8, width * 0.74),
                 Qt.PenStyle.SolidLine,
                 Qt.PenCapStyle.RoundCap,
                 Qt.PenJoinStyle.RoundJoin,
             )
             painter.save()
-            painter.setPen(shading_pen)
+            painter.setPen(depth_pen)
             painter.drawPath(path)
             painter.restore()
-
-            if config.noise_strength > 0:
-                density = 0.12 + config.noise_strength * 0.3
-                noise_alpha = int(60 + config.noise_strength * 140)
-                painter.save()
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(cls._noise_brush(color, noise_alpha, density, scale=3))
-                painter.drawPath(stroke_area)
-                painter.restore()
 
             if config.edge_highlight_alpha > 0:
                 highlight_pen = QPen(
                     QColor(255, 255, 255, config.edge_highlight_alpha),
-                    max(0.8, width * 0.18),
+                    max(0.7, width * 0.16),
                     Qt.PenStyle.SolidLine,
                     Qt.PenCapStyle.RoundCap,
                     Qt.PenJoinStyle.RoundJoin,
@@ -1835,33 +1817,29 @@ class _PenStyleEffects:
         # fountain & fallback styles
         stroke_area = cls._stroke_path(path, width * 1.04)
         if config.solid_fill:
-            painter.save()
-            painter.setPen(Qt.PenStyle.NoPen)
-            color.setAlpha(fill_alpha)
-            painter.setBrush(color)
-            painter.drawPath(stroke_area)
-            painter.restore()
+            body_color = QColor(color)
+            body_color.setAlpha(fill_alpha)
+            _fill(stroke_area, body_color)
 
-        if config.noise_strength > 0:
-            shade_color = QColor(color)
-            shade_color = shade_color.darker(120)
-            shade_color.setAlpha(int(60 + config.noise_strength * 110))
-            shading_pen = QPen(
-                shade_color,
-                max(0.6, width * 0.55),
-                Qt.PenStyle.SolidLine,
-                Qt.PenCapStyle.RoundCap,
-                Qt.PenJoinStyle.RoundJoin,
-            )
-            painter.save()
-            painter.setPen(shading_pen)
-            painter.drawPath(path)
-            painter.restore()
+        depth_color = QColor(color)
+        depth_color = depth_color.darker(120)
+        depth_color.setAlpha(int(fill_alpha * 0.4))
+        depth_pen = QPen(
+            depth_color,
+            max(0.6, width * 0.55),
+            Qt.PenStyle.SolidLine,
+            Qt.PenCapStyle.RoundCap,
+            Qt.PenJoinStyle.RoundJoin,
+        )
+        painter.save()
+        painter.setPen(depth_pen)
+        painter.drawPath(path)
+        painter.restore()
 
         if config.edge_highlight_alpha > 0:
             highlight_pen = QPen(
                 QColor(255, 255, 255, config.edge_highlight_alpha),
-                max(0.6, width * 0.1),
+                max(0.6, width * 0.12),
                 Qt.PenStyle.SolidLine,
                 Qt.PenCapStyle.RoundCap,
                 Qt.PenJoinStyle.RoundJoin,
