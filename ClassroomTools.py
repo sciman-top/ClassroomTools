@@ -1429,131 +1429,166 @@ class PenStyleConfig:
     texture: Optional[Qt.BrushStyle]
     composition_mode: QPainter.CompositionMode
     color_lighten: float = 1.0
+    target_max_factor: float = 2.0
+    width_change_limit: float = 0.35
+    noise_strength: float = 0.0
+    fill_alpha_boost: int = 0
+    feather_strength: float = 0.0
+    edge_highlight_alpha: int = 0
+    solid_fill: bool = False
 
 
-_DEFAULT_PEN_STYLE = PenStyle.CHALK
+_DEFAULT_PEN_STYLE = PenStyle.FOUNTAIN
 
 
 PEN_STYLE_CONFIGS: Dict[PenStyle, PenStyleConfig] = {
     PenStyle.CHALK: PenStyleConfig(
         key="chalk",
         display_name="粉笔",
-        description="粉笔质感，带轻微颗粒和阴影，适合板书书写。",
+        description="粉笔质感，颗粒柔和，书写时自然渐变。",
         slider_range=(6, 36),
         default_base=14,
-        width_multiplier=1.15,
-        smoothing=0.64,
-        speed_base_multiplier=14.0,
-        speed_base_offset=26.0,
-        target_min_factor=0.42,
-        target_speed_factor=0.46,
-        target_curve_factor=0.32,
-        curve_sensitivity=0.78,
-        pressure_factor=0.34,
-        width_memory=0.48,
+        width_multiplier=1.12,
+        smoothing=0.7,
+        speed_base_multiplier=18.0,
+        speed_base_offset=20.0,
+        target_min_factor=0.6,
+        target_speed_factor=0.35,
+        target_curve_factor=0.28,
+        curve_sensitivity=0.55,
+        pressure_factor=0.18,
+        width_memory=0.7,
         pressure_time_weight=3.2,
-        travel_weight=0.28,
-        fade_min_alpha=60,
-        fade_max_alpha=220,
-        fade_speed_weight=210.0,
+        travel_weight=0.22,
+        fade_min_alpha=120,
+        fade_max_alpha=255,
+        fade_speed_weight=140.0,
         fade_curve_weight=70.0,
-        base_alpha=240,
-        shadow_alpha=140,
-        shadow_alpha_scale=0.75,
-        shadow_width_scale=1.4,
-        texture=Qt.BrushStyle.Dense4Pattern,
+        base_alpha=250,
+        shadow_alpha=90,
+        shadow_alpha_scale=0.4,
+        shadow_width_scale=1.45,
+        texture=None,
         composition_mode=QPainter.CompositionMode.CompositionMode_SourceOver,
-        color_lighten=1.06,
+        color_lighten=1.0,
+        target_max_factor=1.72,
+        width_change_limit=0.24,
+        noise_strength=0.55,
+        fill_alpha_boost=12,
+        feather_strength=0.28,
+        edge_highlight_alpha=110,
+        solid_fill=True,
     ),
     PenStyle.HIGHLIGHTER: PenStyleConfig(
         key="highlighter",
         display_name="荧光笔",
-        description="半透明的划重点效果，适合标记文本。",
-        slider_range=(10, 52),
-        default_base=20,
-        width_multiplier=1.85,
-        smoothing=0.7,
-        speed_base_multiplier=22.0,
-        speed_base_offset=18.0,
+        description="柔和半透明，均匀覆盖文本的划重点效果。",
+        slider_range=(10, 30),
+        default_base=18,
+        width_multiplier=2.05,
+        smoothing=0.74,
+        speed_base_multiplier=20.0,
+        speed_base_offset=14.0,
         target_min_factor=0.92,
-        target_speed_factor=0.18,
-        target_curve_factor=0.18,
-        curve_sensitivity=0.5,
-        pressure_factor=0.12,
-        width_memory=0.68,
+        target_speed_factor=0.24,
+        target_curve_factor=0.16,
+        curve_sensitivity=0.42,
+        pressure_factor=0.08,
+        width_memory=0.82,
         pressure_time_weight=2.2,
-        travel_weight=0.18,
-        fade_min_alpha=20,
-        fade_max_alpha=160,
-        fade_speed_weight=140.0,
-        fade_curve_weight=60.0,
-        base_alpha=170,
+        travel_weight=0.12,
+        fade_min_alpha=60,
+        fade_max_alpha=200,
+        fade_speed_weight=120.0,
+        fade_curve_weight=40.0,
+        base_alpha=190,
         shadow_alpha=0,
         shadow_alpha_scale=0.0,
         shadow_width_scale=1.0,
         texture=None,
-        composition_mode=QPainter.CompositionMode.CompositionMode_Screen,
-        color_lighten=1.18,
+        composition_mode=QPainter.CompositionMode.CompositionMode_SourceOver,
+        color_lighten=1.0,
+        target_max_factor=1.36,
+        width_change_limit=0.2,
+        noise_strength=0.0,
+        fill_alpha_boost=24,
+        feather_strength=0.75,
+        edge_highlight_alpha=80,
+        solid_fill=True,
     ),
     PenStyle.FOUNTAIN: PenStyleConfig(
         key="fountain",
         display_name="钢笔",
-        description="细腻流畅的钢笔线条，转折处略显粗犷。",
+        description="细腻流畅，接近旧版画笔的书写体验。",
         slider_range=(4, 24),
         default_base=9,
-        width_multiplier=0.92,
-        smoothing=0.58,
-        speed_base_multiplier=18.0,
-        speed_base_offset=30.0,
-        target_min_factor=0.36,
-        target_speed_factor=0.4,
-        target_curve_factor=0.46,
-        curve_sensitivity=0.88,
-        pressure_factor=0.42,
-        width_memory=0.42,
-        pressure_time_weight=3.6,
-        travel_weight=0.24,
-        fade_min_alpha=50,
-        fade_max_alpha=235,
-        fade_speed_weight=240.0,
-        fade_curve_weight=90.0,
+        width_multiplier=1.0,
+        smoothing=0.62,
+        speed_base_multiplier=16.0,
+        speed_base_offset=28.0,
+        target_min_factor=0.48,
+        target_speed_factor=0.36,
+        target_curve_factor=0.44,
+        curve_sensitivity=0.72,
+        pressure_factor=0.32,
+        width_memory=0.64,
+        pressure_time_weight=3.0,
+        travel_weight=0.26,
+        fade_min_alpha=90,
+        fade_max_alpha=230,
+        fade_speed_weight=150.0,
+        fade_curve_weight=80.0,
         base_alpha=255,
-        shadow_alpha=160,
-        shadow_alpha_scale=0.85,
-        shadow_width_scale=1.22,
+        shadow_alpha=85,
+        shadow_alpha_scale=0.5,
+        shadow_width_scale=1.2,
         texture=None,
         composition_mode=QPainter.CompositionMode.CompositionMode_SourceOver,
         color_lighten=1.0,
+        target_max_factor=1.28,
+        width_change_limit=0.18,
+        noise_strength=0.05,
+        fill_alpha_boost=8,
+        feather_strength=0.18,
+        edge_highlight_alpha=60,
+        solid_fill=True,
     ),
     PenStyle.BRUSH: PenStyleConfig(
         key="brush",
         display_name="毛笔",
-        description="富有弹性的毛笔效果，笔锋随着速度明显变化。",
-        slider_range=(8, 48),
-        default_base=16,
-        width_multiplier=1.65,
-        smoothing=0.68,
-        speed_base_multiplier=12.0,
+        description="富有笔锋、墨色厚实的毛笔效果。",
+        slider_range=(6, 20),
+        default_base=12,
+        width_multiplier=1.55,
+        smoothing=0.64,
+        speed_base_multiplier=14.0,
         speed_base_offset=18.0,
         target_min_factor=0.5,
-        target_speed_factor=0.44,
-        target_curve_factor=0.36,
-        curve_sensitivity=0.82,
-        pressure_factor=0.56,
-        width_memory=0.46,
+        target_speed_factor=0.48,
+        target_curve_factor=0.42,
+        curve_sensitivity=0.68,
+        pressure_factor=0.38,
+        width_memory=0.6,
         pressure_time_weight=3.4,
-        travel_weight=0.32,
-        fade_min_alpha=70,
-        fade_max_alpha=240,
-        fade_speed_weight=200.0,
+        travel_weight=0.3,
+        fade_min_alpha=100,
+        fade_max_alpha=255,
+        fade_speed_weight=160.0,
         fade_curve_weight=90.0,
-        base_alpha=245,
-        shadow_alpha=150,
-        shadow_alpha_scale=0.9,
-        shadow_width_scale=1.55,
-        texture=Qt.BrushStyle.Dense2Pattern,
+        base_alpha=255,
+        shadow_alpha=120,
+        shadow_alpha_scale=0.45,
+        shadow_width_scale=1.3,
+        texture=None,
         composition_mode=QPainter.CompositionMode.CompositionMode_SourceOver,
-        color_lighten=1.04,
+        color_lighten=1.0,
+        target_max_factor=2.05,
+        width_change_limit=0.28,
+        noise_strength=0.24,
+        fill_alpha_boost=24,
+        feather_strength=0.32,
+        edge_highlight_alpha=130,
+        solid_fill=True,
     ),
 }
 
@@ -1625,6 +1660,216 @@ def configure_pen_for_style(
     shadow_pen.setCosmetic(False)
 
 
+class _PenStyleEffects:
+    _noise_cache: Dict[Tuple[int, int, int, int], QBrush] = {}
+
+    @classmethod
+    def _stroke_path(cls, path: QPainterPath, width: float) -> QPainterPath:
+        stroker = QPainterPathStroker()
+        stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
+        stroker.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        stroker.setWidth(max(1.0, width))
+        return stroker.createStroke(path)
+
+    @classmethod
+    def _noise_brush(
+        cls,
+        color: QColor,
+        alpha: int,
+        density: float,
+        scale: int = 2,
+    ) -> QBrush:
+        key = (color.rgba(), int(alpha), int(density * 1000), max(1, int(scale)))
+        cached = cls._noise_cache.get(key)
+        if cached is not None:
+            return cached
+        size = max(16, min(128, 32 * key[3]))
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        rng = random.Random(f"{key[0]}-{key[1]}-{key[2]}-{key[3]}")
+        dot_count = max(1, int(size * size * max(0.05, min(0.9, density))))
+        dot_color = QColor(color)
+        for _ in range(dot_count):
+            strength = 0.6 + rng.random() * 0.5
+            dot_color.setAlpha(max(0, min(255, int(alpha * strength))))
+            painter.setPen(dot_color)
+            painter.drawPoint(rng.randrange(size), rng.randrange(size))
+        painter.end()
+        brush = QBrush(pixmap)
+        cls._noise_cache[key] = brush
+        return brush
+
+    @classmethod
+    def apply(
+        cls,
+        painter: QPainter,
+        path: QPainterPath,
+        width: float,
+        config: PenStyleConfig,
+        base_color: QColor,
+    ) -> None:
+        if width <= 0.0:
+            return
+        style_key = config.key
+        fill_alpha = min(255, max(0, config.base_alpha + config.fill_alpha_boost))
+        color = QColor(base_color)
+
+        if style_key == "chalk":
+            stroke_area = cls._stroke_path(path, width * 1.35)
+            painter.save()
+            painter.setPen(Qt.PenStyle.NoPen)
+            color.setAlpha(fill_alpha)
+            painter.setBrush(color)
+            painter.drawPath(stroke_area)
+            painter.restore()
+
+            if config.noise_strength > 0:
+                density = 0.2 + config.noise_strength * 0.45
+                noise_alpha = int(80 + config.noise_strength * 120)
+                painter.save()
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(cls._noise_brush(color, noise_alpha, density, scale=2))
+                painter.drawPath(stroke_area)
+                painter.restore()
+
+            if config.edge_highlight_alpha > 0:
+                highlight_pen = QPen(
+                    QColor(255, 255, 255, config.edge_highlight_alpha),
+                    max(0.8, width * 0.18),
+                    Qt.PenStyle.SolidLine,
+                    Qt.PenCapStyle.RoundCap,
+                    Qt.PenJoinStyle.RoundJoin,
+                )
+                painter.save()
+                painter.setPen(highlight_pen)
+                painter.drawPath(path)
+                painter.restore()
+            return
+
+        if style_key == "highlighter":
+            stroke_area = cls._stroke_path(path, width * 1.08)
+            painter.save()
+            painter.setPen(Qt.PenStyle.NoPen)
+            color.setAlpha(fill_alpha)
+            painter.setBrush(color)
+            painter.drawPath(stroke_area)
+            painter.restore()
+
+            if config.feather_strength > 0:
+                glow_alpha = int(fill_alpha * 0.45)
+                glow_pen = QPen(
+                    QColor(color.red(), color.green(), color.blue(), glow_alpha),
+                    max(0.6, width * (1.0 + config.feather_strength)),
+                    Qt.PenStyle.SolidLine,
+                    Qt.PenCapStyle.RoundCap,
+                    Qt.PenJoinStyle.RoundJoin,
+                )
+                painter.save()
+                painter.setPen(glow_pen)
+                painter.drawPath(path)
+                painter.restore()
+
+            if config.edge_highlight_alpha > 0:
+                edge_pen = QPen(
+                    QColor(255, 255, 255, config.edge_highlight_alpha),
+                    max(0.6, width * 0.12),
+                    Qt.PenStyle.SolidLine,
+                    Qt.PenCapStyle.RoundCap,
+                    Qt.PenJoinStyle.RoundJoin,
+                )
+                painter.save()
+                painter.setPen(edge_pen)
+                painter.drawPath(path)
+                painter.restore()
+            return
+
+        if style_key == "brush":
+            stroke_area = cls._stroke_path(path, width * 1.12)
+            painter.save()
+            painter.setPen(Qt.PenStyle.NoPen)
+            color.setAlpha(fill_alpha)
+            painter.setBrush(color)
+            painter.drawPath(stroke_area)
+            painter.restore()
+
+            shade_color = QColor(color)
+            shade_color = shade_color.darker(130)
+            shade_color.setAlpha(int(90 + config.noise_strength * 90))
+            shading_pen = QPen(
+                shade_color,
+                max(0.6, width * 0.62),
+                Qt.PenStyle.SolidLine,
+                Qt.PenCapStyle.RoundCap,
+                Qt.PenJoinStyle.RoundJoin,
+            )
+            painter.save()
+            painter.setPen(shading_pen)
+            painter.drawPath(path)
+            painter.restore()
+
+            if config.noise_strength > 0:
+                density = 0.12 + config.noise_strength * 0.3
+                noise_alpha = int(60 + config.noise_strength * 140)
+                painter.save()
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(cls._noise_brush(color, noise_alpha, density, scale=3))
+                painter.drawPath(stroke_area)
+                painter.restore()
+
+            if config.edge_highlight_alpha > 0:
+                highlight_pen = QPen(
+                    QColor(255, 255, 255, config.edge_highlight_alpha),
+                    max(0.8, width * 0.18),
+                    Qt.PenStyle.SolidLine,
+                    Qt.PenCapStyle.RoundCap,
+                    Qt.PenJoinStyle.RoundJoin,
+                )
+                painter.save()
+                painter.setPen(highlight_pen)
+                painter.drawPath(path)
+                painter.restore()
+            return
+
+        # fountain & fallback styles
+        stroke_area = cls._stroke_path(path, width * 1.04)
+        if config.solid_fill:
+            painter.save()
+            painter.setPen(Qt.PenStyle.NoPen)
+            color.setAlpha(fill_alpha)
+            painter.setBrush(color)
+            painter.drawPath(stroke_area)
+            painter.restore()
+
+        if config.noise_strength > 0:
+            shade_color = QColor(color)
+            shade_color = shade_color.darker(120)
+            shade_color.setAlpha(int(60 + config.noise_strength * 110))
+            shading_pen = QPen(
+                shade_color,
+                max(0.6, width * 0.55),
+                Qt.PenStyle.SolidLine,
+                Qt.PenCapStyle.RoundCap,
+                Qt.PenJoinStyle.RoundJoin,
+            )
+            painter.save()
+            painter.setPen(shading_pen)
+            painter.drawPath(path)
+            painter.restore()
+
+        if config.edge_highlight_alpha > 0:
+            highlight_pen = QPen(
+                QColor(255, 255, 255, config.edge_highlight_alpha),
+                max(0.6, width * 0.1),
+                Qt.PenStyle.SolidLine,
+                Qt.PenCapStyle.RoundCap,
+                Qt.PenJoinStyle.RoundJoin,
+            )
+            painter.save()
+            painter.setPen(highlight_pen)
+            painter.drawPath(path)
+            painter.restore()
 def render_pen_preview_pixmap(
     color: QColor,
     style: PenStyle,
@@ -1662,6 +1907,7 @@ def render_pen_preview_pixmap(
     painter.drawPath(path)
     painter.setPen(pen)
     painter.drawPath(path)
+    _PenStyleEffects.apply(painter, path, effective_width, config, QColor(pen.color()))
     painter.end()
     return pixmap
 
@@ -2062,6 +2308,7 @@ class FloatingToolbar(QWidget):
         self.setWindowFlag(Qt.WindowType.WindowDoesNotAcceptFocus, True)
         self._tip = TipWindow()
         self._build_ui()
+        self._whiteboard_locked = False
 
         settings = self.settings_manager.load_settings().get("Paint", {})
         self.move(int(settings.get("x", "260")), int(settings.get("y", "260")))
@@ -2271,6 +2518,12 @@ class FloatingToolbar(QWidget):
                 button.blockSignals(prev)
         if mode == "brush":
             self.update_pen_tooltip(self.overlay.pen_style, self.overlay.pen_base_size, self.overlay.pen_size)
+        if self._whiteboard_locked:
+            for button in (self.btn_cursor, self.btn_slide_down, self.btn_slide_up):
+                button.setEnabled(False)
+                prev = button.blockSignals(True)
+                button.setChecked(False)
+                button.blockSignals(prev)
 
     def update_undo_state(self, enabled: bool) -> None:
         self.btn_undo.setEnabled(enabled)
@@ -2314,6 +2567,15 @@ class FloatingToolbar(QWidget):
         else:
             self._wb_click_timer.start()
 
+    def set_whiteboard_locked(self, locked: bool) -> None:
+        self._whiteboard_locked = locked
+        for button in (self.btn_cursor, self.btn_slide_down, self.btn_slide_up):
+            button.setEnabled(not locked)
+            if locked:
+                prev = button.blockSignals(True)
+                button.setChecked(False)
+                button.blockSignals(prev)
+
     def update_whiteboard_button_state(self, active: bool) -> None:
         self.btn_whiteboard.setObjectName("whiteboardButtonActive" if active else "")
         self.style().polish(self.btn_whiteboard)
@@ -2334,7 +2596,7 @@ class FloatingToolbar(QWidget):
         if forwarder is not None and (
             getattr(self.overlay, "mode", "") == "cursor"
             or getattr(self.overlay, "navigation_active", False)
-        ):
+        ) and not getattr(self.overlay, "whiteboard_active", False):
             try:
                 handled = forwarder.forward_wheel(
                     event,
@@ -3739,6 +4001,7 @@ class OverlayWindow(QWidget):
         self._update_brush_pen_appearance(base_width, config.fade_max_alpha)
         self._last_preview_bounds: Optional[QRect] = None
         self.whiteboard_active = False
+        self._mode_before_whiteboard: Optional[str] = None
         self.whiteboard_color = QColor(0, 0, 0, 0); self.last_board_color = QColor("#ffffff")
         self.cursor_pixmap = QPixmap()
         self._eraser_stroker = QPainterPathStroker()
@@ -3759,6 +4022,7 @@ class OverlayWindow(QWidget):
         self._update_pen_tooltip()
         self.set_mode("brush", initial=True)
         self.toolbar.update_undo_state(False)
+        self._apply_whiteboard_lock()
 
     def raise_toolbar(self) -> None:
         if getattr(self, "toolbar", None) is not None:
@@ -3821,6 +4085,7 @@ class OverlayWindow(QWidget):
             fade_alpha,
             self.pen_style,
         )
+        self._active_pen_color = QColor(self._brush_pen.color())
 
     def _apply_pen_style_change(self, *, update_cursor: bool = True) -> None:
         self.pen_base_size = clamp_base_size_for_style(self.pen_style, float(self.pen_base_size))
@@ -3842,6 +4107,27 @@ class OverlayWindow(QWidget):
             return
         effective = int(round(self._effective_brush_width()))
         toolbar.update_pen_tooltip(self.pen_style, float(self.pen_base_size), effective)
+
+    def _apply_whiteboard_lock(self) -> None:
+        toolbar = getattr(self, "toolbar", None)
+        if toolbar is not None:
+            toolbar.set_whiteboard_locked(self.whiteboard_active)
+        if self.whiteboard_active:
+            if self._mode_before_whiteboard is None:
+                self._mode_before_whiteboard = getattr(self, "mode", "brush")
+            if getattr(self, "mode", "brush") == "cursor":
+                self.set_mode("brush")
+            self._navigation_reasons.clear()
+            self._active_navigation_keys.clear()
+            self.navigation_active = False
+            self._cursor_button_navigation = False
+            self.update_cursor()
+            return
+        restore_mode = self._mode_before_whiteboard
+        self._mode_before_whiteboard = None
+        if restore_mode and restore_mode != getattr(self, "mode", restore_mode):
+            self.set_mode(restore_mode)
+        self.update_cursor()
 
     def show_overlay(self) -> None:
         self.show(); self.toolbar.show(); self.raise_toolbar()
@@ -3877,6 +4163,7 @@ class OverlayWindow(QWidget):
                 self.last_board_color = c
                 self.whiteboard_color = c
                 self.whiteboard_active = True
+                self._apply_whiteboard_lock()
                 if self._forwarder:
                     self._forwarder.clear_cached_target()
                 self.toolbar.update_whiteboard_button_state(True)
@@ -3887,6 +4174,7 @@ class OverlayWindow(QWidget):
     def toggle_whiteboard(self) -> None:
         self.whiteboard_active = not self.whiteboard_active
         self.whiteboard_color = self.last_board_color if self.whiteboard_active else QColor(0, 0, 0, 0)
+        self._apply_whiteboard_lock()
         if self._forwarder and self.whiteboard_active:
             self._forwarder.clear_cached_target()
         self._update_visibility_for_mode(initial=False)
@@ -3895,6 +4183,8 @@ class OverlayWindow(QWidget):
         self.update()
 
     def set_mode(self, mode: str, shape_type: Optional[str] = None, *, initial: bool = False) -> None:
+        if self.whiteboard_active and mode == "cursor":
+            return
         prev_mode = getattr(self, "mode", None)
         if prev_mode != mode:
             self._release_canvas_painters()
@@ -3999,6 +4289,8 @@ class OverlayWindow(QWidget):
         via_toolbar: bool = False,
         originating_key: Optional[int] = None,
     ) -> None:
+        if self.whiteboard_active:
+            return
         self._send_slide_virtual_key(
             VK_DOWN,
             via_toolbar=via_toolbar,
@@ -4011,6 +4303,8 @@ class OverlayWindow(QWidget):
         via_toolbar: bool = False,
         originating_key: Optional[int] = None,
     ) -> None:
+        if self.whiteboard_active:
+            return
         self._send_slide_virtual_key(
             VK_UP,
             via_toolbar=via_toolbar,
@@ -4071,7 +4365,7 @@ class OverlayWindow(QWidget):
         via_toolbar: bool = False,
         originating_key: Optional[int] = None,
     ) -> None:
-        if vk_code == 0:
+        if vk_code == 0 or self.whiteboard_active:
             return
         wheel_delta = self._wheel_delta_for_vk(vk_code)
         prefer_wheel = via_toolbar or self.navigation_active or self.mode == "cursor"
@@ -4107,7 +4401,7 @@ class OverlayWindow(QWidget):
         self.raise_toolbar()
 
     def _send_navigation_wheel(self, delta: int) -> bool:
-        if delta == 0:
+        if delta == 0 or self.whiteboard_active:
             return False
         handled = False
         if self._forwarder is not None:
@@ -4172,7 +4466,7 @@ class OverlayWindow(QWidget):
             self._restore_last_tool(mode, shape_type=shape)
 
     def _dispatch_virtual_key(self, vk_code: int) -> bool:
-        if vk_code == 0:
+        if vk_code == 0 or self.whiteboard_active:
             return False
         success = False
         if self._forwarder is not None:
@@ -4236,6 +4530,8 @@ class OverlayWindow(QWidget):
 
     def _set_navigation_reason(self, reason: str, active: bool) -> None:
         if not reason:
+            return
+        if self.whiteboard_active and active:
             return
         if active:
             self._navigation_reasons[reason] = self._navigation_reasons.get(reason, 0) + 1
@@ -4305,7 +4601,7 @@ class OverlayWindow(QWidget):
         self._restore_last_tool(mode, shape_type=shape)
 
     def _fallback_send_virtual_key(self, vk_code: int) -> bool:
-        if vk_code == 0 or _USER32 is None:
+        if vk_code == 0 or _USER32 is None or self.whiteboard_active:
             return False
         try:
             scan_code = _USER32.MapVirtualKeyW(vk_code, 0) if hasattr(_USER32, "MapVirtualKeyW") else 0
@@ -4981,6 +5277,9 @@ class OverlayWindow(QWidget):
 
     def keyPressEvent(self, e: QKeyEvent) -> None:
         if e.key() in _QT_NAVIGATION_KEYS:
+            if self.whiteboard_active:
+                e.accept()
+                return
             if not e.isAutoRepeat():
                 self._active_navigation_keys.add(e.key())
                 self._set_navigation_reason("keyboard", True)
@@ -4990,7 +5289,7 @@ class OverlayWindow(QWidget):
                 self.go_to_previous_slide(originating_key=e.key())
             e.accept()
             return
-        allow_cursor = self.mode == "cursor" or self.navigation_active
+        allow_cursor = (self.mode == "cursor" or self.navigation_active) and not self.whiteboard_active
         if self._forwarder and self._forwarder.forward_key(
             e,
             is_press=True,
@@ -5004,11 +5303,14 @@ class OverlayWindow(QWidget):
 
     def keyReleaseEvent(self, e: QKeyEvent) -> None:
         if e.key() in _QT_NAVIGATION_KEYS:
+            if self.whiteboard_active:
+                e.accept()
+                return
             if not e.isAutoRepeat():
                 self._release_keyboard_navigation_state(e.key())
             e.accept()
             return
-        allow_cursor = self.mode == "cursor" or self.navigation_active
+        allow_cursor = (self.mode == "cursor" or self.navigation_active) and not self.whiteboard_active
         if self._forwarder and self._forwarder.forward_key(
             e,
             is_press=False,
@@ -5088,9 +5390,17 @@ class OverlayWindow(QWidget):
             + config.target_curve_factor * curve_scale
         )
         target_w *= 1.0 + pressure * config.pressure_factor
+        min_w = effective_base * config.target_min_factor
+        max_w = effective_base * max(config.target_min_factor, config.target_max_factor)
+        target_w = max(min_w, min(max_w, target_w))
+        if self.last_width > 0:
+            step_limit = max(0.6, effective_base * config.width_change_limit)
+            delta = target_w - self.last_width
+            if abs(delta) > step_limit:
+                target_w = self.last_width + math.copysign(step_limit, delta)
         memory = min(max(config.width_memory, 0.05), 0.95)
         cur_w = self.last_width * memory + target_w * (1.0 - memory)
-        cur_w = max(1.0, cur_w)
+        cur_w = max(min_w, min(max_w, cur_w))
 
         last_mid = QPointF(self._stroke_last_midpoint) if self._stroke_last_midpoint else QPointF(last_point)
         current_mid = (last_point + cur_point) / 2.0
@@ -5113,6 +5423,7 @@ class OverlayWindow(QWidget):
         painter.drawPath(path)
         painter.setPen(self._brush_pen)
         painter.drawPath(path)
+        _PenStyleEffects.apply(painter, path, cur_w, config, QColor(self._active_pen_color))
 
         self.prev_point = QPointF(last_point)
         self.last_point = QPointF(cur_point)
@@ -5120,7 +5431,12 @@ class OverlayWindow(QWidget):
         self.last_width = cur_w
 
         dirty = path.boundingRect()
-        margin = cur_w * 0.9 + 4.0
+        overlay_factor = max(
+            config.shadow_width_scale,
+            1.0 + config.feather_strength,
+            1.0 + config.noise_strength * 0.45,
+        )
+        margin = max(cur_w * (0.6 + (overlay_factor - 1.0) * 0.7), cur_w * 0.6) + 6.0
         return dirty.adjusted(-margin, -margin, margin, margin)
 
     def _erase_at(self, pos) -> Optional[QRectF]:
