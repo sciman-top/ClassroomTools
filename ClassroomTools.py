@@ -3033,6 +3033,8 @@ class _PresentationForwarder:
         "wpsframeclass",
         "wpsmainframe",
     }
+    _WPS_WRITER_PREFIXES: Tuple[str, ...] = ("kwps", "wps")
+    _WPS_WRITER_KEYWORDS: Tuple[str, ...] = ("frame", "view", "doc", "page")
     _KEY_FORWARD_MAP: Dict[int, int] = (
         {
             int(Qt.Key.Key_PageUp): win32con.VK_PRIOR,
@@ -3548,10 +3550,9 @@ class _PresentationForwarder:
             return True
         if "word" in class_name:
             return True
-        if class_name.startswith("kwps") or class_name.startswith("wps"):
-            return True
-        if "wps" in class_name and "kwpp" not in class_name:
-            return True
+        if any(class_name.startswith(prefix) for prefix in self._WPS_WRITER_PREFIXES):
+            if any(keyword in class_name for keyword in self._WPS_WRITER_KEYWORDS):
+                return True
         return False
 
     def _locate_word_content_window(self, hwnd: int) -> Optional[int]:
@@ -4920,10 +4921,9 @@ class OverlayWindow(QWidget):
             return True
         if "word" in class_name:
             return True
-        if class_name.startswith("kwps") or class_name.startswith("wps"):
-            return True
-        if "wps" in class_name and "kwpp" not in class_name:
-            return True
+        if any(class_name.startswith(prefix) for prefix in self._WPS_WRITER_PREFIXES):
+            if any(keyword in class_name for keyword in self._WPS_WRITER_KEYWORDS):
+                return True
         return False
 
     def _word_navigation_vk(self, vk_code: int, target_hwnd: Optional[int]) -> int:
