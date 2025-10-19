@@ -2981,6 +2981,13 @@ class _PresentationForwarder:
         "kwppshowwndclass",
         "kwpsshowframe",
     }
+    _WPS_SLIDESHOW_CLASSES: Set[str] = {
+        "kwppshowframeclass",
+        "kwppshowframe",
+        "kwppshowwndclass",
+        "kwpsshowframe",
+        "wpsshowframe",
+    }
     _WORD_WINDOW_CLASSES: Set[str] = {
         "opusapp",
         "nuidocumentwindow",
@@ -2991,14 +2998,37 @@ class _PresentationForwarder:
         "worddocument",
         "_wwg",
         "_wwb",
+        "kwpsframeclass",
+        "kwpsmainframe",
+        "wpsframeclass",
+        "wpsmainframe",
+        "kwpsviewclass",
+        "wpsviewclass",
+        "kwpspageview",
+        "wpspageview",
     }
-    _WORD_CONTENT_CLASSES: Set[str] = {"worddocument", "paneclassdc", "_wwg", "_wwb"}
+    _WORD_CONTENT_CLASSES: Set[str] = {
+        "worddocument",
+        "paneclassdc",
+        "_wwg",
+        "_wwb",
+        "kwpsviewclass",
+        "wpsviewclass",
+        "kwpspageview",
+        "wpspageview",
+        "kwpsdocview",
+        "wpsdocview",
+    }
     _WORD_HOST_CLASSES: Set[str] = {
         "opusapp",
         "nuidocumentwindow",
         "netuihwnd",
         "documentwindow",
         "mdiclient",
+        "kwpsframeclass",
+        "kwpsmainframe",
+        "wpsframeclass",
+        "wpsmainframe",
     }
     _PRESENTATION_EDITOR_CLASSES: Set[str] = {
         "pptframeclass",
@@ -3010,6 +3040,9 @@ class _PresentationForwarder:
         "wpsframeclass",
         "wpsmainframe",
     }
+    _WPS_WRITER_PREFIXES: Tuple[str, ...] = ("kwps", "wps")
+    _WPS_WRITER_KEYWORDS: Tuple[str, ...] = ("frame", "view", "doc", "page")
+    _WPS_WRITER_EXCLUDE_KEYWORDS: Tuple[str, ...] = ("show", "slideshow")
     _KEY_FORWARD_MAP: Dict[int, int] = (
         {
             int(Qt.Key.Key_PageUp): win32con.VK_PRIOR,
@@ -3062,6 +3095,16 @@ class _PresentationForwarder:
                 return ""
         return _user32_window_class_name(hwnd)
 
+    def _is_wps_slideshow_class(self, class_name: str) -> bool:
+        if not class_name:
+            return False
+        if class_name in self._WPS_SLIDESHOW_CLASSES:
+            return True
+        return class_name.startswith("kwppshow")
+
+    def _is_wps_slideshow_window(self, hwnd: int) -> bool:
+        return self._is_wps_slideshow_class(self._window_class_name(hwnd))
+
     def _is_slideshow_class(self, class_name: str) -> bool:
         if not class_name:
             return False
@@ -3084,6 +3127,9 @@ class _PresentationForwarder:
     def bring_target_to_foreground(self, hwnd: int) -> bool:
         if hwnd == 0:
             return False
+        if self._is_wps_slideshow_window(hwnd):
+            self._last_target_hwnd = hwnd
+            return True
         activated = False
         attach_pair = self._attach_to_target_thread(hwnd)
         try:
@@ -3206,6 +3252,24 @@ class _PresentationForwarder:
         if not target:
             self._log_debug("send_virtual_key: target not found vk=%s", vk_code)
             return False
+        if self._is_wps_slideshow_window(target):
+            if win32con is None:
+                return False
+            down_param = self._build_basic_key_lparam(vk_code, is_press=True)
+            up_param = self._build_basic_key_lparam(vk_code, is_press=False)
+            press = self._deliver_key_message(target, win32con.WM_KEYDOWN, vk_code, down_param)
+            release = self._deliver_key_message(target, win32con.WM_KEYUP, vk_code, up_param)
+            success = press and release
+            if success:
+                self._last_target_hwnd = target
+            else:
+                self._log_debug(
+                    "send_virtual_key: wps slideshow delivery failed vk=%s press=%s release=%s",
+                    vk_code,
+                    press,
+                    release,
+                )
+            return success
         press = release = False
         with self._keyboard_capture_guard():
             attach_pair = self._attach_to_target_thread(target)
@@ -3312,6 +3376,8 @@ class _PresentationForwarder:
             or vk_code == 0
         ):
             return False
+        if self._is_wps_slideshow_window(hwnd):
+            return False
         success = False
         with self._keyboard_capture_guard():
             attach_pair = self._attach_to_target_thread(hwnd)
@@ -3405,6 +3471,8 @@ class _PresentationForwarder:
     def _activate_window_for_input(self, hwnd: int) -> bool:
         if _USER32 is None or hwnd == 0:
             return False
+        if self._is_wps_slideshow_window(hwnd):
+            return True
         root_hwnd = self._top_level_hwnd(hwnd)
         use_root = (
             root_hwnd
@@ -3525,6 +3593,11 @@ class _PresentationForwarder:
             return True
         if "word" in class_name:
             return True
+        if any(class_name.startswith(prefix) for prefix in self._WPS_WRITER_PREFIXES):
+            if any(excluded in class_name for excluded in self._WPS_WRITER_EXCLUDE_KEYWORDS):
+                return False
+            if any(keyword in class_name for keyword in self._WPS_WRITER_KEYWORDS):
+                return True
         return False
 
     def _locate_word_content_window(self, hwnd: int) -> Optional[int]:
@@ -3744,6 +3817,17 @@ class _PresentationForwarder:
             if is_auto_repeat:
                 l_param |= 1 << 30
         else:
+            l_param |= 1 << 30
+            l_param |= 1 << 31
+        return l_param & 0xFFFFFFFF
+
+    def _build_basic_key_lparam(self, vk_code: int, *, is_press: bool) -> int:
+        l_param = 1
+        scan_code = self._map_virtual_key(vk_code)
+        l_param |= (scan_code & 0xFF) << 16
+        if vk_code in self._EXTENDED_KEY_CODES:
+            l_param |= 1 << 24
+        if not is_press:
             l_param |= 1 << 30
             l_param |= 1 << 31
         return l_param & 0xFFFFFFFF
@@ -4354,6 +4438,12 @@ class OverlayWindow(QWidget):
     _WORD_WINDOW_CLASSES: Set[str] = _PresentationForwarder._WORD_WINDOW_CLASSES
     _WORD_CONTENT_CLASSES: Set[str] = _PresentationForwarder._WORD_CONTENT_CLASSES
     _WORD_HOST_CLASSES: Set[str] = _PresentationForwarder._WORD_HOST_CLASSES
+    _WPS_WRITER_PREFIXES: Tuple[str, ...] = _PresentationForwarder._WPS_WRITER_PREFIXES
+    _WPS_WRITER_KEYWORDS: Tuple[str, ...] = _PresentationForwarder._WPS_WRITER_KEYWORDS
+    _WPS_WRITER_EXCLUDE_KEYWORDS: Tuple[str, ...] = (
+        _PresentationForwarder._WPS_WRITER_EXCLUDE_KEYWORDS
+    )
+    _WPS_SLIDESHOW_CLASSES: Set[str] = _PresentationForwarder._WPS_SLIDESHOW_CLASSES
 
     def __init__(self, settings_manager: SettingsManager) -> None:
         super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
@@ -4893,7 +4983,19 @@ class OverlayWindow(QWidget):
             return True
         if "word" in class_name:
             return True
+        if any(class_name.startswith(prefix) for prefix in self._WPS_WRITER_PREFIXES):
+            if any(excluded in class_name for excluded in self._WPS_WRITER_EXCLUDE_KEYWORDS):
+                return False
+            if any(keyword in class_name for keyword in self._WPS_WRITER_KEYWORDS):
+                return True
         return False
+
+    def _is_wps_slideshow_class(self, class_name: str) -> bool:
+        if not class_name:
+            return False
+        if class_name in self._WPS_SLIDESHOW_CLASSES:
+            return True
+        return class_name.startswith("kwppshow")
 
     def _word_navigation_vk(self, vk_code: int, target_hwnd: Optional[int]) -> int:
         if win32con is None or not target_hwnd:
@@ -5555,7 +5657,14 @@ class OverlayWindow(QWidget):
                 self._last_target_hwnd = hwnd
         if not hwnd or not self._fallback_is_target_window_valid(hwnd):
             return False
+        class_name = self._presentation_window_class(hwnd)
         top_level = _user32_top_level_hwnd(hwnd)
+        if (
+            self._is_wps_slideshow_class(class_name)
+            or self._is_wps_slideshow_class(self._presentation_window_class(top_level))
+        ):
+            self._last_target_hwnd = hwnd
+            return True
         focused = _user32_focus_window(top_level)
         if not focused:
             focused = _user32_focus_window(hwnd)
