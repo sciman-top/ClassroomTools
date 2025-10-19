@@ -2963,9 +2963,12 @@ class _PresentationForwarder:
         "wpsmainframe",
         "nuidocumentwindow",
         "netuihwnd",
+        "mdiclient",
+        "documentwindow",
         "_wwg",
         "_wwb",
         "worddocument",
+        "paneclassdc",
     }
     _KNOWN_PRESENTATION_PREFIXES: Tuple[str, ...] = (
         ("kwpp", "kwps", "wpsframe", "wpsmain") if win32gui is not None else tuple()
@@ -2977,6 +2980,25 @@ class _PresentationForwarder:
         "kwppshowframe",
         "kwppshowwndclass",
         "kwpsshowframe",
+    }
+    _WORD_WINDOW_CLASSES: Set[str] = {
+        "opusapp",
+        "nuidocumentwindow",
+        "netuihwnd",
+        "documentwindow",
+        "mdiclient",
+        "paneclassdc",
+        "worddocument",
+        "_wwg",
+        "_wwb",
+    }
+    _WORD_CONTENT_CLASSES: Set[str] = {"worddocument", "paneclassdc", "_wwg", "_wwb"}
+    _WORD_HOST_CLASSES: Set[str] = {
+        "opusapp",
+        "nuidocumentwindow",
+        "netuihwnd",
+        "documentwindow",
+        "mdiclient",
     }
     _PRESENTATION_EDITOR_CLASSES: Set[str] = {
         "pptframeclass",
@@ -3133,6 +3155,13 @@ class _PresentationForwarder:
                 delivered = self._deliver_mouse_wheel(target, w_param, l_param)
         if not delivered:
             self.clear_cached_target()
+        if logger.isEnabledFor(logging.DEBUG):
+            self._log_debug(
+                "forward_wheel: target=%s class=%s delivered=%s",
+                hex(target) if target else "0x0",
+                self._window_class_name(target) if target else "",
+                delivered,
+            )
         return delivered
 
     def forward_key(
@@ -3470,6 +3499,76 @@ class _PresentationForwarder:
             except Exception:
                 return 0
         return 0
+
+    def _is_word_host_class(self, class_name: str) -> bool:
+        return bool(class_name and class_name in self._WORD_HOST_CLASSES)
+
+    def _is_word_content_class(self, class_name: str) -> bool:
+        if not class_name:
+            return False
+        if class_name in self._WORD_CONTENT_CLASSES:
+            return True
+        if class_name.startswith("_ww"):
+            return True
+        return False
+
+    def _is_word_like_class(self, class_name: str) -> bool:
+        if not class_name:
+            return False
+        if class_name in self._WORD_WINDOW_CLASSES:
+            return True
+        if class_name in self._WORD_CONTENT_CLASSES:
+            return True
+        if class_name in self._WORD_HOST_CLASSES:
+            return True
+        if class_name.startswith("_ww"):
+            return True
+        if "word" in class_name:
+            return True
+        return False
+
+    def _locate_word_content_window(self, hwnd: int) -> Optional[int]:
+        if win32gui is None or hwnd == 0:
+            return None
+        handles: List[int] = []
+        top_hwnd = self._top_level_hwnd(hwnd)
+        for candidate in (hwnd, top_hwnd):
+            if candidate and candidate not in handles:
+                handles.append(candidate)
+        roots: List[int] = []
+        for candidate in handles:
+            class_name = self._window_class_name(candidate)
+            if self._is_word_content_class(class_name):
+                if self._is_target_window_valid(candidate):
+                    return candidate
+            if self._is_word_host_class(class_name) or self._is_word_like_class(class_name):
+                roots.append(candidate)
+        if not roots:
+            return None
+        seen: Set[int] = set(handles)
+        for root in roots:
+            for child in self._collect_descendant_windows(root):
+                if child in seen:
+                    continue
+                seen.add(child)
+                class_name = self._window_class_name(child)
+                if self._is_word_content_class(class_name) and self._is_target_window_valid(child):
+                    return child
+        return None
+
+    def _normalize_presentation_target(self, hwnd: int) -> Optional[int]:
+        if hwnd == 0:
+            return None
+        word_hwnd = self._locate_word_content_window(hwnd)
+        if word_hwnd and self._is_target_window_valid(word_hwnd):
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "navigation: using word content hwnd=%s (source=%s)",
+                    hex(word_hwnd),
+                    hex(hwnd),
+                )
+            return word_hwnd
+        return hwnd
 
     def _target_priority(self, hwnd: int, *, base: int) -> int:
         score = base
@@ -4090,10 +4189,12 @@ class _PresentationForwarder:
             and not self._should_ignore_window(foreground)
             and self._is_candidate_window(foreground)
         ):
-            score = self._candidate_score(foreground)
-            if score > best_score:
-                best_score = score
-                best_hwnd = foreground
+            normalized = self._normalize_presentation_target(foreground)
+            if normalized and self._is_target_window_valid(normalized):
+                score = self._candidate_score(normalized)
+                if score > best_score:
+                    best_score = score
+                    best_hwnd = normalized
 
         candidates: List[int] = []
 
@@ -4120,16 +4221,23 @@ class _PresentationForwarder:
         for hwnd in candidates:
             if not self._is_candidate_window(hwnd):
                 continue
-            score = self._candidate_score(hwnd)
+            normalized = self._normalize_presentation_target(hwnd)
+            if not normalized or not self._is_target_window_valid(normalized):
+                continue
+            score = self._candidate_score(normalized)
             if score > best_score:
                 best_score = score
-                best_hwnd = hwnd
+                best_hwnd = normalized
         return best_hwnd
 
     def _resolve_presentation_target(self) -> Optional[int]:
         if win32gui is None:
             hwnd = self._last_target_hwnd
             if hwnd and self._fallback_is_target_window_valid(hwnd):
+                normalized = self._normalize_presentation_target(hwnd)
+                if normalized and normalized != hwnd and self._fallback_is_target_window_valid(normalized):
+                    self._last_target_hwnd = normalized
+                    return normalized
                 if self._should_refresh_cached_target(hwnd):
                     refreshed = self._fallback_detect_presentation_window_user32()
                     if (
@@ -4137,27 +4245,41 @@ class _PresentationForwarder:
                         and refreshed != hwnd
                         and self._fallback_is_target_window_valid(refreshed)
                     ):
+                        normalized = self._normalize_presentation_target(refreshed)
+                        if normalized and self._fallback_is_target_window_valid(normalized):
+                            self._last_target_hwnd = normalized
+                            return normalized
                         self._last_target_hwnd = refreshed
                         return refreshed
                 return hwnd
             hwnd = self._fallback_detect_presentation_window_user32()
-            if hwnd and self._fallback_is_target_window_valid(hwnd):
-                self._last_target_hwnd = hwnd
-                return hwnd
+            normalized = self._normalize_presentation_target(hwnd) if hwnd else None
+            target = normalized or hwnd
+            if target and self._fallback_is_target_window_valid(target):
+                self._last_target_hwnd = target
+                return target
             self._last_target_hwnd = None
             return None
         hwnd = self._last_target_hwnd
         if hwnd and self._is_target_window_valid(hwnd):
+            normalized = self._normalize_presentation_target(hwnd)
+            if normalized and normalized != hwnd and self._is_target_window_valid(normalized):
+                self._last_target_hwnd = normalized
+                hwnd = normalized
             if self._should_refresh_cached_target(hwnd):
                 refreshed = self._detect_presentation_window()
-                if refreshed and refreshed != hwnd and self._is_target_window_valid(refreshed):
-                    self._last_target_hwnd = refreshed
-                    return refreshed
+                normalized = self._normalize_presentation_target(refreshed) if refreshed else None
+                target = normalized or refreshed
+                if target and target != hwnd and self._is_target_window_valid(target):
+                    self._last_target_hwnd = target
+                    return target
             return hwnd
         hwnd = self._detect_presentation_window()
-        if hwnd and self._is_target_window_valid(hwnd):
-            self._last_target_hwnd = hwnd
-            return hwnd
+        normalized = self._normalize_presentation_target(hwnd) if hwnd else None
+        target = normalized or hwnd
+        if target and self._is_target_window_valid(target):
+            self._last_target_hwnd = target
+            return target
         self._last_target_hwnd = None
         return None
 
@@ -4168,14 +4290,9 @@ class OverlayWindow(QWidget):
     _SLIDESHOW_PRIORITY_CLASSES = _PresentationForwarder._SLIDESHOW_PRIORITY_CLASSES
     _SLIDESHOW_SECONDARY_CLASSES = _PresentationForwarder._SLIDESHOW_SECONDARY_CLASSES
     _NAVIGATION_RESTORE_DELAY_MS = 600
-    _WORD_WINDOW_CLASSES: Set[str] = {
-        "opusapp",
-        "worddocument",
-        "_wwg",
-        "_wwb",
-        "nuidocumentwindow",
-        "netuihwnd",
-    }
+    _WORD_WINDOW_CLASSES: Set[str] = _PresentationForwarder._WORD_WINDOW_CLASSES
+    _WORD_CONTENT_CLASSES: Set[str] = _PresentationForwarder._WORD_CONTENT_CLASSES
+    _WORD_HOST_CLASSES: Set[str] = _PresentationForwarder._WORD_HOST_CLASSES
 
     def __init__(self, settings_manager: SettingsManager) -> None:
         super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
@@ -4707,6 +4824,10 @@ class OverlayWindow(QWidget):
             return False
         if class_name in self._WORD_WINDOW_CLASSES:
             return True
+        if class_name in self._WORD_CONTENT_CLASSES:
+            return True
+        if class_name in self._WORD_HOST_CLASSES:
+            return True
         if class_name.startswith("_ww"):
             return True
         if "word" in class_name:
@@ -4727,7 +4848,7 @@ class OverlayWindow(QWidget):
 
     def _navigation_vk_candidates(self, vk_code: int) -> Tuple[int, ...]:
         candidates: List[int] = []
-        target_hwnd = self._resolve_presentation_target()
+        target_hwnd = self._current_navigation_target()
         alt_vk = self._word_navigation_vk(vk_code, target_hwnd)
         for candidate in (alt_vk, vk_code):
             if candidate and candidate not in candidates:
@@ -4752,35 +4873,65 @@ class OverlayWindow(QWidget):
         if vk_code == 0 or self.whiteboard_active:
             return
         wheel_delta = self._wheel_delta_for_vk(vk_code)
+        target_hwnd = self._current_navigation_target()
+        target_class = self._presentation_window_class(target_hwnd) if target_hwnd else ""
+        is_word_target = self._is_word_like_class(target_class)
         prefer_wheel = via_toolbar or self.navigation_active or self.mode == "cursor"
-        if wheel_delta and prefer_wheel:
-            if self._send_navigation_wheel(wheel_delta):
-                if originating_key is not None:
-                    self._release_keyboard_navigation_state(originating_key)
-                self.raise_toolbar()
-                return
+        success = False
+        wheel_used = False
+        if wheel_delta and (prefer_wheel or is_word_target):
+            success = self._send_navigation_wheel(wheel_delta)
+            wheel_used = success
+            self._log_navigation_debug(
+                "wheel_forward",
+                vk=vk_code,
+                delta=wheel_delta,
+                target=hex(target_hwnd) if target_hwnd else "0x0",
+                cls=target_class or "",
+                word=is_word_target,
+                success=success,
+            )
         prev_mode = self.mode
         if prev_mode in {"brush", "shape"}:
             self._update_last_tool_snapshot()
-        candidates = self._navigation_vk_candidates(vk_code)
-        success = False
-        with self._temporarily_release_keyboard() as had_keyboard_grab:
-            for candidate in candidates:
-                if not candidate:
-                    continue
-                success = self._dispatch_virtual_key(candidate)
-                if success:
-                    break
-            if originating_key is not None:
-                self._release_keyboard_navigation_state(originating_key)
+        had_keyboard_grab = False
+        if not success:
+            candidates = self._navigation_vk_candidates(vk_code)
+            with self._temporarily_release_keyboard() as had_keyboard_grab:
+                for candidate in candidates:
+                    if not candidate:
+                        continue
+                    success = self._dispatch_virtual_key(candidate)
+                    if success:
+                        current_target = self._current_navigation_target()
+                        current_class = (
+                            self._presentation_window_class(current_target)
+                            if current_target
+                            else ""
+                        )
+                        self._log_navigation_debug(
+                            "virtual_key_forward",
+                            vk=candidate,
+                            target=hex(current_target) if current_target else "0x0",
+                            cls=current_class or "",
+                            word=self._is_word_like_class(current_class),
+                        )
+                        break
         self._pending_tool_restore = None
         if originating_key is not None and not success:
             self._release_keyboard_navigation_state(originating_key)
         if not success:
+            self._log_navigation_debug(
+                "virtual_key_failed",
+                vk=vk_code,
+                target=hex(target_hwnd) if target_hwnd else "0x0",
+                cls=target_class or "",
+                word=is_word_target,
+            )
             if via_toolbar:
                 self._cancel_navigation_cursor_hold()
             return
-        if not had_keyboard_grab and self.mode != "cursor":
+        if not wheel_used and not had_keyboard_grab and self.mode != "cursor":
             self._ensure_keyboard_capture()
         self.raise_toolbar()
 
@@ -5234,6 +5385,9 @@ class OverlayWindow(QWidget):
             and not self._should_ignore_window(foreground)
             and self._fallback_is_candidate_window(foreground)
         ):
+            normalized = self._normalize_presentation_target(foreground)
+            if normalized and self._fallback_is_target_window_valid(normalized):
+                return normalized
             return foreground
         if _WNDENUMPROC is None:
             return None
@@ -5259,6 +5413,9 @@ class OverlayWindow(QWidget):
             return None
         for hwnd in candidates:
             if self._fallback_is_candidate_window(hwnd):
+                normalized = self._normalize_presentation_target(hwnd)
+                if normalized and self._fallback_is_target_window_valid(normalized):
+                    return normalized
                 return hwnd
         return None
 
@@ -5271,6 +5428,46 @@ class OverlayWindow(QWidget):
             except Exception:
                 return ""
         return _user32_window_class_name(hwnd)
+
+    def _normalize_presentation_target(self, hwnd: Optional[int]) -> Optional[int]:
+        if not hwnd:
+            return None
+        forwarder = getattr(self, "_forwarder", None)
+        if forwarder is not None:
+            try:
+                normalized = forwarder._normalize_presentation_target(hwnd)
+            except Exception:
+                normalized = None
+            else:
+                if normalized and normalized != hwnd and logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "navigation: overlay normalized hwnd=%s -> %s",
+                        hex(hwnd),
+                        hex(normalized),
+                    )
+                if normalized:
+                    return normalized
+        return hwnd
+
+    def _log_navigation_debug(self, message: str, **extra: Any) -> None:
+        if not logger.isEnabledFor(logging.DEBUG):
+            return
+        if extra:
+            formatted = " ".join(f"{key}={value}" for key, value in extra.items())
+            logger.debug("navigation: %s %s", message, formatted)
+        else:
+            logger.debug("navigation: %s", message)
+
+    def _current_navigation_target(self) -> Optional[int]:
+        target: Optional[int] = None
+        if self._forwarder is not None:
+            try:
+                target = self._forwarder.get_presentation_target()
+            except Exception:
+                target = None
+        if not target:
+            target = self._resolve_presentation_target()
+        return target
 
     def _is_preferred_presentation_class(self, class_name: str) -> bool:
         if not class_name:
@@ -5334,6 +5531,9 @@ class OverlayWindow(QWidget):
             and not self._should_ignore_window(foreground)
             and self._is_candidate_presentation_window(foreground)
         ):
+            normalized = self._normalize_presentation_target(foreground)
+            if normalized and self._is_target_window_valid(normalized):
+                return normalized
             return foreground
         candidates: List[int] = []
 
@@ -5359,6 +5559,9 @@ class OverlayWindow(QWidget):
             return None
         for hwnd in candidates:
             if self._is_candidate_presentation_window(hwnd):
+                normalized = self._normalize_presentation_target(hwnd)
+                if normalized and self._is_target_window_valid(normalized):
+                    return normalized
                 return hwnd
         return None
 
@@ -5366,6 +5569,10 @@ class OverlayWindow(QWidget):
         if win32gui is None:
             hwnd = self._last_target_hwnd
             if hwnd and self._fallback_is_target_window_valid(hwnd):
+                normalized = self._normalize_presentation_target(hwnd)
+                if normalized and normalized != hwnd and self._fallback_is_target_window_valid(normalized):
+                    self._last_target_hwnd = normalized
+                    return normalized
                 if self._should_refresh_cached_presentation_target(hwnd):
                     refreshed = self._fallback_detect_presentation_window_user32()
                     if (
@@ -5373,27 +5580,41 @@ class OverlayWindow(QWidget):
                         and refreshed != hwnd
                         and self._fallback_is_target_window_valid(refreshed)
                     ):
+                        normalized = self._normalize_presentation_target(refreshed)
+                        if normalized and self._fallback_is_target_window_valid(normalized):
+                            self._last_target_hwnd = normalized
+                            return normalized
                         self._last_target_hwnd = refreshed
                         return refreshed
                 return hwnd
             hwnd = self._fallback_detect_presentation_window_user32()
-            if hwnd and self._fallback_is_target_window_valid(hwnd):
-                self._last_target_hwnd = hwnd
-                return hwnd
+            normalized = self._normalize_presentation_target(hwnd) if hwnd else None
+            target = normalized or hwnd
+            if target and self._fallback_is_target_window_valid(target):
+                self._last_target_hwnd = target
+                return target
             self._last_target_hwnd = None
             return None
         hwnd = self._last_target_hwnd
         if hwnd and self._is_target_window_valid(hwnd):
+            normalized = self._normalize_presentation_target(hwnd)
+            if normalized and normalized != hwnd and self._is_target_window_valid(normalized):
+                self._last_target_hwnd = normalized
+                hwnd = normalized
             if self._should_refresh_cached_presentation_target(hwnd):
                 refreshed = self._detect_presentation_window()
-                if refreshed and refreshed != hwnd and self._is_target_window_valid(refreshed):
-                    self._last_target_hwnd = refreshed
-                    return refreshed
+                normalized = self._normalize_presentation_target(refreshed) if refreshed else None
+                target = normalized or refreshed
+                if target and target != hwnd and self._is_target_window_valid(target):
+                    self._last_target_hwnd = target
+                    return target
             return hwnd
         hwnd = self._detect_presentation_window()
-        if hwnd and self._is_target_window_valid(hwnd):
-            self._last_target_hwnd = hwnd
-            return hwnd
+        normalized = self._normalize_presentation_target(hwnd) if hwnd else None
+        target = normalized or hwnd
+        if target and self._is_target_window_valid(target):
+            self._last_target_hwnd = target
+            return target
         self._last_target_hwnd = None
         return None
 
