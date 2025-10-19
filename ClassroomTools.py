@@ -2885,7 +2885,7 @@ class FloatingToolbar(QWidget):
 class _PresentationForwarder:
     """在绘图模式下将特定输入事件转发给下层演示窗口。"""
 
-    __slots__ = ("overlay", "_last_target_hwnd", "_child_buffer")
+    __slots__ = ("overlay", "_last_target_hwnd", "_child_buffer", "_last_wheel_info")
 
     _SMTO_ABORTIFHUNG = 0x0002
     _MAX_CHILD_FORWARDS = 32
@@ -3051,6 +3051,7 @@ class _PresentationForwarder:
         self.overlay = overlay
         self._last_target_hwnd: Optional[int] = None
         self._child_buffer: List[int] = []
+        self._last_wheel_info: Tuple[int, int, str, bool] = (0, 0, "", False)
 
     def _log_debug(self, message: str, *args: Any) -> None:
         if logger.isEnabledFor(logging.DEBUG):
@@ -3126,6 +3127,7 @@ class _PresentationForwarder:
         return activated
 
     def forward_wheel(self, event: QWheelEvent, *, allow_cursor: bool = False) -> bool:
+        self._last_wheel_info = (0, 0, "", False)
         if not self._can_forward(allow_cursor=allow_cursor):
             self.clear_cached_target()
             return False
@@ -3148,6 +3150,8 @@ class _PresentationForwarder:
         y_word = ctypes.c_short(global_pos.y()).value & 0xFFFF
         l_param = x_word | (y_word << 16)
         delivered = False
+        delivered_hwnd = 0
+        delivered_class = ""
         with self._keyboard_capture_guard():
             focus_ok = self.bring_target_to_foreground(target)
             if not focus_ok:
@@ -3155,13 +3159,24 @@ class _PresentationForwarder:
             for hwnd, update_cache in self._iter_wheel_targets(target):
                 if self._deliver_mouse_wheel(hwnd, w_param, l_param):
                     delivered = True
+                    delivered_hwnd = hwnd
                     if update_cache:
                         self._last_target_hwnd = target
                     break
             if not delivered and focus_ok:
                 delivered = self._deliver_mouse_wheel(target, w_param, l_param)
+                if delivered:
+                    delivered_hwnd = target
         if not delivered:
             self.clear_cached_target()
+        if delivered_hwnd:
+            delivered_class = self._window_class_name(delivered_hwnd)
+        self._last_wheel_info = (
+            int(target) if target else 0,
+            int(delivered_hwnd) if delivered_hwnd else 0,
+            delivered_class,
+            delivered,
+        )
         if logger.isEnabledFor(logging.DEBUG):
             self._log_debug(
                 "forward_wheel: target=%s class=%s delivered=%s",
@@ -3170,6 +3185,11 @@ class _PresentationForwarder:
                 delivered,
             )
         return delivered
+
+    def get_last_wheel_delivery(self) -> Tuple[int, int, str, bool]:
+        """返回最近一次鼠标滚轮投递的目标与结果信息。"""
+
+        return self._last_wheel_info
 
     def forward_key(
         self,
@@ -4944,10 +4964,17 @@ class OverlayWindow(QWidget):
         target_hwnd = self._current_navigation_target()
         target_class = self._presentation_window_class(target_hwnd) if target_hwnd else ""
         is_word_target = self._is_word_like_class(target_class)
-        prefer_wheel = via_toolbar or self.navigation_active or self.mode == "cursor"
+        keyboard_reason_active = self._navigation_reasons.get("keyboard", 0) > 0
+        prefer_wheel = (
+            bool(wheel_delta)
+            and not via_toolbar
+            and not keyboard_reason_active
+            and originating_key is None
+            and (self.navigation_active or self.mode == "cursor")
+        )
         success = False
         wheel_used = False
-        if wheel_delta and (prefer_wheel or is_word_target):
+        if prefer_wheel:
             success, wheel_fallback = self._forward_wheel_with_fallback(
                 delta=wheel_delta,
                 allow_cursor=(self.mode == "cursor" or self.navigation_active),
@@ -5043,6 +5070,10 @@ class OverlayWindow(QWidget):
         handled = False
         fallback_used = False
         wheel_event = event
+        target_hwnd = self._current_navigation_target()
+        target_class = self._presentation_window_class(target_hwnd) if target_hwnd else ""
+        is_word_target = self._is_word_like_class(target_class)
+        forced_fallback = False
         if self._forwarder is not None:
             try:
                 if wheel_event is None:
@@ -5051,12 +5082,30 @@ class OverlayWindow(QWidget):
                     wheel_event,
                     allow_cursor=allow_cursor,
                 )
+                if handled:
+                    delivery = self._forwarder.get_last_wheel_delivery()
+                    delivery_target, delivery_hwnd, delivery_class, _ = delivery
+                    if not target_hwnd and delivery_target:
+                        target_hwnd = delivery_target
+                        target_class = self._presentation_window_class(target_hwnd)
+                        is_word_target = self._is_word_like_class(target_class)
+                    if is_word_target:
+                        if not delivery_hwnd or not self._is_word_content_class(delivery_class):
+                            handled = False
+                            forced_fallback = True
             except Exception:
                 handled = False
         if handled:
             return True, False
         with self._temporarily_release_keyboard():
             fallback_used = self._fallback_send_wheel(delta)
+        if forced_fallback and logger.isEnabledFor(logging.DEBUG):
+            self._log_navigation_debug(
+                "wheel_fallback_forced",
+                target=hex(target_hwnd) if target_hwnd else "0x0",
+                cls=target_class or "",
+                word=is_word_target,
+            )
         return fallback_used, fallback_used
 
     def _send_navigation_wheel(self, delta: int) -> bool:
