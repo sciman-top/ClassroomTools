@@ -3847,6 +3847,57 @@ class _PresentationForwarder:
                         queue.append(child)
         return None
 
+    def _locate_wps_slideshow_window(self, hwnd: int) -> Optional[int]:
+        if win32gui is None or hwnd == 0:
+            return None
+        if self._is_wps_slideshow_window(hwnd):
+            if self._is_target_window_valid(hwnd):
+                return hwnd
+        top_hwnd = self._top_level_hwnd(hwnd)
+        roots: List[int] = []
+        seen: Set[int] = set()
+        for candidate in (hwnd, top_hwnd):
+            if not candidate or candidate in seen:
+                continue
+            seen.add(candidate)
+            class_name = self._window_class_name(candidate)
+            if self._is_wps_slideshow_window(candidate):
+                if self._is_target_window_valid(candidate):
+                    return candidate
+            if class_name.startswith("kwpp") or "kwpp" in class_name or "wpsshow" in class_name:
+                roots.append(candidate)
+                continue
+            process_name = self._window_process_name(candidate)
+            if process_name.startswith("wpp"):
+                roots.append(candidate)
+        if not roots:
+            return None
+        buffer = self._child_buffer
+        for root in roots:
+            queue: deque[int] = deque([root])
+            local_seen: Set[int] = {root}
+
+            def _collector(child_hwnd: int, acc: List[int]) -> bool:
+                if child_hwnd in local_seen:
+                    return True
+                local_seen.add(child_hwnd)
+                acc.append(child_hwnd)
+                return True
+
+            while queue:
+                parent = queue.popleft()
+                buffer.clear()
+                try:
+                    win32gui.EnumChildWindows(parent, _collector, buffer)
+                except Exception:
+                    continue
+                for child in list(buffer):
+                    if self._is_wps_slideshow_window(child):
+                        if self._is_target_window_valid(child):
+                            return child
+                    queue.append(child)
+        return None
+
     def _word_host_chain(self, hwnd: int) -> Tuple[int, ...]:
         if win32gui is None or hwnd == 0:
             return ()
@@ -3880,6 +3931,15 @@ class _PresentationForwarder:
     def _normalize_presentation_target(self, hwnd: int) -> Optional[int]:
         if hwnd == 0:
             return None
+        slideshow_hwnd = self._locate_wps_slideshow_window(hwnd)
+        if slideshow_hwnd:
+            if logger.isEnabledFor(logging.DEBUG) and slideshow_hwnd != hwnd:
+                logger.debug(
+                    "navigation: using wps slideshow hwnd=%s (source=%s)",
+                    hex(slideshow_hwnd),
+                    hex(hwnd),
+                )
+            return slideshow_hwnd
         word_hwnd = self._locate_word_content_window(hwnd)
         if word_hwnd and self._is_target_window_valid(word_hwnd):
             if logger.isEnabledFor(logging.DEBUG):
@@ -6600,6 +6660,8 @@ class OverlayWindow(QWidget):
                     forwarder.clear_cached_target()
                 except Exception:
                     pass
+            if hasattr(self, "_last_target_hwnd"):
+                self._last_target_hwnd = None
 
     def save_settings(self) -> None:
         settings = self.settings_manager.load_settings()
