@@ -2284,10 +2284,10 @@ class PenSettingsDialog(QDialog):
         control_grid.setHorizontalSpacing(14)
         control_grid.setVerticalSpacing(6)
         control_items = [
-            ("ms_ppt", "控制PowerPoint"),
-            ("ms_word", "控制Word"),
-            ("wps_ppt", "控制WPS演示"),
-            ("wps_word", "控制WPS文档"),
+            ("ms_ppt", "控制PowerPoint放映"),
+            ("ms_word", "控制Word滚动"),
+            ("wps_ppt", "控制WPS演示放映"),
+            ("wps_word", "控制WPS文档滚动"),
         ]
         for index, (key, text) in enumerate(control_items):
             checkbox = QCheckBox(text, self)
@@ -4605,6 +4605,7 @@ class OverlayWindow(QWidget):
     _SLIDESHOW_PRIORITY_CLASSES = _PresentationForwarder._SLIDESHOW_PRIORITY_CLASSES
     _SLIDESHOW_SECONDARY_CLASSES = _PresentationForwarder._SLIDESHOW_SECONDARY_CLASSES
     _NAVIGATION_RESTORE_DELAY_MS = 600
+    _PRESENTATION_EDITOR_CLASSES: Set[str] = _PresentationForwarder._PRESENTATION_EDITOR_CLASSES
     _WORD_WINDOW_CLASSES: Set[str] = _PresentationForwarder._WORD_WINDOW_CLASSES
     _WORD_CONTENT_CLASSES: Set[str] = _PresentationForwarder._WORD_CONTENT_CLASSES
     _WORD_HOST_CLASSES: Set[str] = _PresentationForwarder._WORD_HOST_CLASSES
