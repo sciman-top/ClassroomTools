@@ -3258,6 +3258,9 @@ class _PresentationForwarder:
     def bring_target_to_foreground(self, hwnd: int) -> bool:
         if hwnd == 0:
             return False
+        if not self._is_control_allowed(hwnd, log=False):
+            self.clear_cached_target()
+            return False
         if self._is_wps_slideshow_window(hwnd):
             self._last_target_hwnd = hwnd
             return True
@@ -3472,6 +3475,18 @@ class _PresentationForwarder:
         mode = getattr(self.overlay, "mode", "cursor")
         if mode == "cursor" and not allow_cursor:
             return False
+        return True
+
+    def _is_control_allowed(self, hwnd: Optional[int], *, log: bool = False) -> bool:
+        overlay = getattr(self, "overlay", None)
+        if overlay is None:
+            return True
+        checker = getattr(overlay, "_presentation_control_allowed", None)
+        if callable(checker):
+            try:
+                return checker(hwnd, log=log)
+            except TypeError:
+                return checker(hwnd)
         return True
 
     def _translate_mouse_modifiers(self, event: QWheelEvent) -> int:
@@ -4391,7 +4406,7 @@ class _PresentationForwarder:
             and self._fallback_is_candidate_window(foreground)
         ):
             score = self._candidate_score(foreground)
-            if score > best_score:
+            if score > best_score and self._is_control_allowed(foreground, log=False):
                 best_score = score
                 best_hwnd = foreground
         if _WNDENUMPROC is None:
@@ -4420,7 +4435,7 @@ class _PresentationForwarder:
             if not self._fallback_is_candidate_window(hwnd):
                 continue
             score = self._candidate_score(hwnd)
-            if score > best_score:
+            if score > best_score and self._is_control_allowed(hwnd, log=False):
                 best_score = score
                 best_hwnd = hwnd
         return best_hwnd
@@ -4505,7 +4520,11 @@ class _PresentationForwarder:
             and self._is_candidate_window(foreground)
         ):
             normalized = self._normalize_presentation_target(foreground)
-            if normalized and self._is_target_window_valid(normalized):
+            if (
+                normalized
+                and self._is_target_window_valid(normalized)
+                and self._is_control_allowed(normalized, log=False)
+            ):
                 score = self._candidate_score(normalized)
                 if score > best_score:
                     best_score = score
@@ -4539,6 +4558,8 @@ class _PresentationForwarder:
             normalized = self._normalize_presentation_target(hwnd)
             if not normalized or not self._is_target_window_valid(normalized):
                 continue
+            if not self._is_control_allowed(normalized, log=False):
+                continue
             score = self._candidate_score(normalized)
             if score > best_score:
                 best_score = score
@@ -4548,6 +4569,9 @@ class _PresentationForwarder:
     def _resolve_presentation_target(self) -> Optional[int]:
         if win32gui is None:
             hwnd = self._last_target_hwnd
+            if hwnd and not self._is_control_allowed(hwnd, log=False):
+                self.clear_cached_target()
+                hwnd = None
             if hwnd and self._fallback_is_target_window_valid(hwnd):
                 normalized = self._normalize_presentation_target(hwnd)
                 if normalized and normalized != hwnd and self._fallback_is_target_window_valid(normalized):
@@ -4562,20 +4586,32 @@ class _PresentationForwarder:
                     ):
                         normalized = self._normalize_presentation_target(refreshed)
                         if normalized and self._fallback_is_target_window_valid(normalized):
-                            self._last_target_hwnd = normalized
-                            return normalized
-                        self._last_target_hwnd = refreshed
-                        return refreshed
+                            if self._is_control_allowed(normalized, log=False):
+                                self._last_target_hwnd = normalized
+                                return normalized
+                            self.clear_cached_target()
+                            return None
+                        if self._is_control_allowed(refreshed, log=False):
+                            self._last_target_hwnd = refreshed
+                            return refreshed
+                        self.clear_cached_target()
+                        return None
                 return hwnd
             hwnd = self._fallback_detect_presentation_window_user32()
             normalized = self._normalize_presentation_target(hwnd) if hwnd else None
             target = normalized or hwnd
             if target and self._fallback_is_target_window_valid(target):
-                self._last_target_hwnd = target
-                return target
+                if self._is_control_allowed(target, log=False):
+                    self._last_target_hwnd = target
+                    return target
+                self.clear_cached_target()
+                return None
             self._last_target_hwnd = None
             return None
         hwnd = self._last_target_hwnd
+        if hwnd and not self._is_control_allowed(hwnd, log=False):
+            self.clear_cached_target()
+            hwnd = None
         if hwnd and self._is_target_window_valid(hwnd):
             normalized = self._normalize_presentation_target(hwnd)
             if normalized and normalized != hwnd and self._is_target_window_valid(normalized):
@@ -4586,15 +4622,21 @@ class _PresentationForwarder:
                 normalized = self._normalize_presentation_target(refreshed) if refreshed else None
                 target = normalized or refreshed
                 if target and target != hwnd and self._is_target_window_valid(target):
-                    self._last_target_hwnd = target
-                    return target
+                    if self._is_control_allowed(target, log=False):
+                        self._last_target_hwnd = target
+                        return target
+                    self.clear_cached_target()
+                    return None
             return hwnd
         hwnd = self._detect_presentation_window()
         normalized = self._normalize_presentation_target(hwnd) if hwnd else None
         target = normalized or hwnd
         if target and self._is_target_window_valid(target):
-            self._last_target_hwnd = target
-            return target
+            if self._is_control_allowed(target, log=False):
+                self._last_target_hwnd = target
+                return target
+            self.clear_cached_target()
+            return None
         self._last_target_hwnd = None
         return None
 
@@ -5248,18 +5290,27 @@ class OverlayWindow(QWidget):
                 return "ms_word"
         return "other"
 
-    def _presentation_control_allowed(self, hwnd: Optional[int]) -> bool:
+    def _is_presentation_category_allowed(self, category: str) -> bool:
+        if not category or category == "other":
+            return True
+        flags = getattr(self, "_presentation_control_flags", None)
+        if isinstance(flags, Mapping) and category in flags:
+            return bool(flags[category])
+        attr_map = {
+            "ms_ppt": "control_ms_ppt",
+            "ms_word": "control_ms_word",
+            "wps_ppt": "control_wps_ppt",
+            "wps_word": "control_wps_word",
+        }
+        attr = attr_map.get(category)
+        if attr is not None and hasattr(self, attr):
+            return bool(getattr(self, attr))
+        return True
+
+    def _presentation_control_allowed(self, hwnd: Optional[int], *, log: bool = True) -> bool:
         category = self._presentation_target_category(hwnd)
-        allowed = True
-        if category == "ms_ppt":
-            allowed = getattr(self, "control_ms_ppt", True)
-        elif category == "ms_word":
-            allowed = getattr(self, "control_ms_word", True)
-        elif category == "wps_ppt":
-            allowed = getattr(self, "control_wps_ppt", True)
-        elif category == "wps_word":
-            allowed = getattr(self, "control_wps_word", True)
-        if not allowed:
+        allowed = self._is_presentation_category_allowed(category)
+        if not allowed and log:
             self._log_navigation_debug(
                 "control_disabled",
                 target=hex(hwnd) if hwnd else "0x0",
@@ -6007,6 +6058,8 @@ class OverlayWindow(QWidget):
                 self._last_target_hwnd = hwnd
         if not hwnd or not self._fallback_is_target_window_valid(hwnd):
             return False
+        if not self._presentation_control_allowed(hwnd, log=False):
+            return False
         class_name = self._presentation_window_class(hwnd)
         top_level = _user32_top_level_hwnd(hwnd)
         if (
@@ -6090,6 +6143,9 @@ class OverlayWindow(QWidget):
     def _resolve_presentation_target(self) -> Optional[int]:
         if win32gui is None:
             hwnd = self._last_target_hwnd
+            if hwnd and not self._presentation_control_allowed(hwnd, log=False):
+                self._last_target_hwnd = None
+                hwnd = None
             if hwnd and self._fallback_is_target_window_valid(hwnd):
                 normalized = self._normalize_presentation_target(hwnd)
                 if normalized and normalized != hwnd and self._fallback_is_target_window_valid(normalized):
@@ -6104,20 +6160,32 @@ class OverlayWindow(QWidget):
                     ):
                         normalized = self._normalize_presentation_target(refreshed)
                         if normalized and self._fallback_is_target_window_valid(normalized):
-                            self._last_target_hwnd = normalized
-                            return normalized
-                        self._last_target_hwnd = refreshed
-                        return refreshed
+                            if self._presentation_control_allowed(normalized, log=False):
+                                self._last_target_hwnd = normalized
+                                return normalized
+                            self._last_target_hwnd = None
+                            return None
+                        if self._presentation_control_allowed(refreshed, log=False):
+                            self._last_target_hwnd = refreshed
+                            return refreshed
+                        self._last_target_hwnd = None
+                        return None
                 return hwnd
             hwnd = self._fallback_detect_presentation_window_user32()
             normalized = self._normalize_presentation_target(hwnd) if hwnd else None
             target = normalized or hwnd
             if target and self._fallback_is_target_window_valid(target):
-                self._last_target_hwnd = target
-                return target
+                if self._presentation_control_allowed(target, log=False):
+                    self._last_target_hwnd = target
+                    return target
+                self._last_target_hwnd = None
+                return None
             self._last_target_hwnd = None
             return None
         hwnd = self._last_target_hwnd
+        if hwnd and not self._presentation_control_allowed(hwnd, log=False):
+            self._last_target_hwnd = None
+            hwnd = None
         if hwnd and self._is_target_window_valid(hwnd):
             normalized = self._normalize_presentation_target(hwnd)
             if normalized and normalized != hwnd and self._is_target_window_valid(normalized):
@@ -6128,15 +6196,21 @@ class OverlayWindow(QWidget):
                 normalized = self._normalize_presentation_target(refreshed) if refreshed else None
                 target = normalized or refreshed
                 if target and target != hwnd and self._is_target_window_valid(target):
-                    self._last_target_hwnd = target
-                    return target
+                    if self._presentation_control_allowed(target, log=False):
+                        self._last_target_hwnd = target
+                        return target
+                    self._last_target_hwnd = None
+                    return None
             return hwnd
         hwnd = self._detect_presentation_window()
         normalized = self._normalize_presentation_target(hwnd) if hwnd else None
         target = normalized or hwnd
         if target and self._is_target_window_valid(target):
-            self._last_target_hwnd = target
-            return target
+            if self._presentation_control_allowed(target, log=False):
+                self._last_target_hwnd = target
+                return target
+            self._last_target_hwnd = None
+            return None
         self._last_target_hwnd = None
         return None
 
