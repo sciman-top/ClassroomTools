@@ -3035,6 +3035,7 @@ class _PresentationForwarder:
     }
     _WPS_WRITER_PREFIXES: Tuple[str, ...] = ("kwps", "wps")
     _WPS_WRITER_KEYWORDS: Tuple[str, ...] = ("frame", "view", "doc", "page")
+    _WPS_WRITER_EXCLUDE_KEYWORDS: Tuple[str, ...] = ("show", "slideshow")
     _KEY_FORWARD_MAP: Dict[int, int] = (
         {
             int(Qt.Key.Key_PageUp): win32con.VK_PRIOR,
@@ -3551,6 +3552,8 @@ class _PresentationForwarder:
         if "word" in class_name:
             return True
         if any(class_name.startswith(prefix) for prefix in self._WPS_WRITER_PREFIXES):
+            if any(excluded in class_name for excluded in self._WPS_WRITER_EXCLUDE_KEYWORDS):
+                return False
             if any(keyword in class_name for keyword in self._WPS_WRITER_KEYWORDS):
                 return True
         return False
@@ -4382,6 +4385,11 @@ class OverlayWindow(QWidget):
     _WORD_WINDOW_CLASSES: Set[str] = _PresentationForwarder._WORD_WINDOW_CLASSES
     _WORD_CONTENT_CLASSES: Set[str] = _PresentationForwarder._WORD_CONTENT_CLASSES
     _WORD_HOST_CLASSES: Set[str] = _PresentationForwarder._WORD_HOST_CLASSES
+    _WPS_WRITER_PREFIXES: Tuple[str, ...] = _PresentationForwarder._WPS_WRITER_PREFIXES
+    _WPS_WRITER_KEYWORDS: Tuple[str, ...] = _PresentationForwarder._WPS_WRITER_KEYWORDS
+    _WPS_WRITER_EXCLUDE_KEYWORDS: Tuple[str, ...] = (
+        _PresentationForwarder._WPS_WRITER_EXCLUDE_KEYWORDS
+    )
 
     def __init__(self, settings_manager: SettingsManager) -> None:
         super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
@@ -4922,6 +4930,8 @@ class OverlayWindow(QWidget):
         if "word" in class_name:
             return True
         if any(class_name.startswith(prefix) for prefix in self._WPS_WRITER_PREFIXES):
+            if any(excluded in class_name for excluded in self._WPS_WRITER_EXCLUDE_KEYWORDS):
+                return False
             if any(keyword in class_name for keyword in self._WPS_WRITER_KEYWORDS):
                 return True
         return False
