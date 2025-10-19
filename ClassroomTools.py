@@ -2276,7 +2276,7 @@ class PenSettingsDialog(QDialog):
             color_layout.addWidget(button, index // 4, index % 4)
         layout.addLayout(color_layout)
 
-        control_label = QLabel("翻页与滚动控制：")
+        control_label = QLabel("放映与滚动控制：")
         control_label.setStyleSheet("font-weight: bold;")
         layout.addWidget(control_label)
         control_grid = QGridLayout()
@@ -5336,13 +5336,18 @@ class OverlayWindow(QWidget):
 
     def _resolve_control_target(self) -> Optional[int]:
         target = self._current_navigation_target()
+        if target and not self._presentation_control_allowed(target, log=False):
+            target = None
         if target:
             return target
         if self._forwarder is not None:
             try:
-                return self._forwarder.get_presentation_target()
+                candidate = self._forwarder.get_presentation_target()
             except Exception:
+                candidate = None
+            if candidate and not self._presentation_control_allowed(candidate, log=False):
                 return None
+            return candidate
         return None
 
     def _is_word_like_class(self, class_name: str) -> bool:
@@ -5362,6 +5367,28 @@ class OverlayWindow(QWidget):
             if any(excluded in class_name for excluded in self._WPS_WRITER_EXCLUDE_KEYWORDS):
                 return False
             if any(keyword in class_name for keyword in self._WPS_WRITER_KEYWORDS):
+                return True
+        return False
+
+    def _is_wps_slideshow_class(self, class_name: str) -> bool:
+        if not class_name:
+            return False
+        if class_name in self._WPS_SLIDESHOW_CLASSES:
+            return True
+        return class_name.startswith("kwppshow")
+
+    def _is_wps_slideshow_target(self, hwnd: Optional[int] = None) -> bool:
+        if hwnd is None:
+            hwnd = self._current_navigation_target()
+        if not hwnd:
+            return False
+        class_name = self._presentation_window_class(hwnd)
+        if self._is_wps_slideshow_class(class_name):
+            return True
+        if class_name in self._SLIDESHOW_PRIORITY_CLASSES or class_name in self._SLIDESHOW_SECONDARY_CLASSES:
+            top_hwnd = _user32_top_level_hwnd(hwnd)
+            process_name = self._window_process_name(top_hwnd or hwnd)
+            if process_name.startswith("wpp"):
                 return True
         return False
 
@@ -5452,9 +5479,18 @@ class OverlayWindow(QWidget):
             if via_toolbar:
                 self._cancel_navigation_cursor_hold()
             return
+        wps_slideshow_target = (
+            effective_target if effective_target and self._is_wps_slideshow_target(effective_target) else None
+        )
+        if wps_slideshow_target and self._send_wps_slideshow_virtual_key(wps_slideshow_target, vk_code):
+            if originating_key is not None:
+                self._release_keyboard_navigation_state(originating_key)
+            if via_toolbar:
+                self._cancel_navigation_cursor_hold()
+            return
         is_word_target = self._is_word_like_class(target_class)
         prefer_wheel = via_toolbar or self.navigation_active or self.mode == "cursor"
-        suppress_focus_restore = self._is_wps_slideshow_class(target_class)
+        suppress_focus_restore = bool(wps_slideshow_target) or self._is_wps_slideshow_class(target_class)
         success = False
         wheel_used = False
         if wheel_delta and (prefer_wheel or is_word_target):
@@ -5558,6 +5594,30 @@ class OverlayWindow(QWidget):
         if handled:
             return True
         return self._fallback_send_wheel(delta)
+
+    def _send_wps_slideshow_virtual_key(self, hwnd: int, vk_code: int) -> bool:
+        if not hwnd or vk_code == 0:
+            return False
+        forwarder = getattr(self, "_forwarder", None)
+        if forwarder is None or win32con is None:
+            return False
+        try:
+            down_param = forwarder._build_basic_key_lparam(vk_code, is_press=True)
+            up_param = forwarder._build_basic_key_lparam(vk_code, is_press=False)
+        except Exception:
+            return False
+        try:
+            press = forwarder._deliver_key_message(hwnd, win32con.WM_KEYDOWN, vk_code, down_param)
+            release = forwarder._deliver_key_message(hwnd, win32con.WM_KEYUP, vk_code, up_param)
+        except Exception:
+            return False
+        if press and release:
+            try:
+                forwarder._last_target_hwnd = hwnd
+            except Exception:
+                pass
+            return True
+        return False
 
     def _fallback_send_wheel(self, delta: int) -> bool:
         if delta == 0 or _USER32 is None:
@@ -6086,8 +6146,17 @@ class OverlayWindow(QWidget):
                 target = self._forwarder.get_presentation_target()
             except Exception:
                 target = None
+        if target and not self._presentation_control_allowed(target, log=False):
+            if self._forwarder is not None:
+                try:
+                    self._forwarder.clear_cached_target()
+                except Exception:
+                    pass
+            target = None
         if not target:
             target = self._resolve_presentation_target()
+            if target and not self._presentation_control_allowed(target, log=False):
+                target = None
         return target
 
     def _is_preferred_presentation_class(self, class_name: str) -> bool:
@@ -8581,8 +8650,8 @@ class RollCallTimerWindow(QWidget):
         self.show_name = str_to_bool(s.get("show_name", "True"), True)
         self.show_photo = str_to_bool(s.get("show_photo", "False"), False)
         self.photo_duration_seconds = max(0, _get_int("photo_duration_seconds", 0))
-        if not (self.show_id or self.show_name or self.show_photo):
-            self.show_id = True
+        if not (self.show_id or self.show_name):
+            self.show_name = True
 
         self.photo_root_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "student_photos")
         self._photo_extensions = [".png", ".jpg", ".jpeg", ".bmp", ".gif"]
@@ -9702,12 +9771,13 @@ class RollCallTimerWindow(QWidget):
 
     def _on_display_option_changed(self) -> None:
         photo_checked = getattr(self, "show_photo_action", None)
-        if (
-            not self.show_id_action.isChecked()
-            and not self.show_name_action.isChecked()
-            and not (photo_checked.isChecked() if photo_checked else False)
-        ):
-            self.show_id_action.setChecked(True)
+        sender = self.sender()
+        if not self.show_id_action.isChecked() and not self.show_name_action.isChecked():
+            if sender is self.show_id_action and hasattr(self, "show_name_action"):
+                self.show_name_action.setChecked(True)
+            else:
+                self.show_id_action.setChecked(True)
+            return
         self.show_id = self.show_id_action.isChecked()
         self.show_name = self.show_name_action.isChecked()
         if photo_checked is not None:
