@@ -3334,6 +3334,8 @@ class _PresentationForwarder:
             return False
         target = self._resolve_presentation_target()
         if not target:
+            target = self._detect_presentation_window()
+        if not target:
             self.clear_cached_target()
             return False
         if not self.overlay._presentation_control_allowed(target):
@@ -3397,6 +3399,8 @@ class _PresentationForwarder:
         if vk_code is None:
             return False
         target = self._resolve_presentation_target()
+        if not target:
+            target = self._detect_presentation_window()
         if not target:
             self._log_debug("forward_key: target window not found for key=%s", event.key())
             self.clear_cached_target()
@@ -5570,6 +5574,9 @@ class OverlayWindow(QWidget):
             if candidate and not self._presentation_control_allowed(candidate, log=False):
                 return None
             return candidate
+        fallback = self._fallback_detect_presentation_window_user32()
+        if fallback and self._presentation_control_allowed(fallback, log=False):
+            return fallback
         return None
 
     def _is_word_like_class(self, class_name: str) -> bool:
@@ -5851,65 +5858,69 @@ class OverlayWindow(QWidget):
     def _send_navigation_wheel(self, delta: int) -> bool:
         if delta == 0 or self.whiteboard_active:
             return False
-        handled = False
-        target_hwnd = self._resolve_control_target()
-        if (
-            target_hwnd
-            and self._presentation_target_category(target_hwnd) in {"ms_word", "wps_word"}
-            and not self.whiteboard_active
-            and self.mode != "cursor"
-        ):
-            self._apply_navigation_cursor_hold(
-                self.mode,
-                self.current_shape,
-                suppress_focus_restore=True,
-                persist=True,
-            )
-            try:
-                self._last_target_hwnd = target_hwnd
-            except Exception:
-                pass
-            forwarder = getattr(self, "_forwarder", None)
-            if forwarder is not None:
+        self._set_navigation_reason("wheel", True)
+        try:
+            handled = False
+            target_hwnd = self._resolve_control_target()
+            if (
+                target_hwnd
+                and self._presentation_target_category(target_hwnd) in {"ms_word", "wps_word"}
+                and not self.whiteboard_active
+                and self.mode != "cursor"
+            ):
+                self._apply_navigation_cursor_hold(
+                    self.mode,
+                    self.current_shape,
+                    suppress_focus_restore=True,
+                    persist=True,
+                )
                 try:
-                    forwarder._last_target_hwnd = target_hwnd  # type: ignore[attr-defined]
+                    self._last_target_hwnd = target_hwnd
                 except Exception:
                     pass
-        if target_hwnd and not self._presentation_control_allowed(target_hwnd):
-            self._log_navigation_debug(
-                "wheel_blocked",
-                delta=delta,
-                target=hex(target_hwnd),
-                category=self._presentation_target_category(target_hwnd),
-            )
-            return False
-        if self._forwarder is not None:
-            try:
-                global_pos = QCursor.pos()
-                local_pos = self.mapFromGlobal(global_pos)
-                wheel_event = QWheelEvent(
-                    QPointF(local_pos),
-                    QPointF(global_pos),
-                    QPoint(),
-                    QPoint(0, delta),
-                    Qt.MouseButton.NoButton,
-                    Qt.KeyboardModifier.NoModifier,
-                    Qt.ScrollPhase.ScrollUpdate,
-                    False,
+                forwarder = getattr(self, "_forwarder", None)
+                if forwarder is not None:
+                    try:
+                        forwarder._last_target_hwnd = target_hwnd  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
+            if target_hwnd and not self._presentation_control_allowed(target_hwnd):
+                self._log_navigation_debug(
+                    "wheel_blocked",
+                    delta=delta,
+                    target=hex(target_hwnd),
+                    category=self._presentation_target_category(target_hwnd),
                 )
-                handled = self._forwarder.forward_wheel(
-                    wheel_event,
-                    allow_cursor=(self.mode == "cursor" or self.navigation_active),
-                )
-            except Exception:
-                handled = False
-        if handled:
-            return True
-        focused = self._focus_presentation_window_fallback()
-        fallback = self._fallback_send_wheel(delta)
-        if not fallback and not focused:
-            return False
-        return fallback
+                return False
+            if self._forwarder is not None:
+                try:
+                    global_pos = QCursor.pos()
+                    local_pos = self.mapFromGlobal(global_pos)
+                    wheel_event = QWheelEvent(
+                        QPointF(local_pos),
+                        QPointF(global_pos),
+                        QPoint(),
+                        QPoint(0, delta),
+                        Qt.MouseButton.NoButton,
+                        Qt.KeyboardModifier.NoModifier,
+                        Qt.ScrollPhase.ScrollUpdate,
+                        False,
+                    )
+                    handled = self._forwarder.forward_wheel(
+                        wheel_event,
+                        allow_cursor=(self.mode == "cursor" or self.navigation_active),
+                    )
+                except Exception:
+                    handled = False
+            if handled:
+                return True
+            focused = self._focus_presentation_window_fallback()
+            fallback = self._fallback_send_wheel(delta)
+            if not fallback and not focused:
+                return False
+            return fallback
+        finally:
+            self._set_navigation_reason("wheel", False)
 
     def _send_wps_slideshow_virtual_key(self, hwnd: int, vk_code: int) -> bool:
         if not hwnd or vk_code == 0:
@@ -6081,6 +6092,19 @@ class OverlayWindow(QWidget):
         if not success:
             self._focus_presentation_window_fallback()
             success = self._fallback_send_virtual_key(vk_code)
+        if success:
+            resolved_target = self._current_navigation_target() or self._resolve_control_target()
+            if resolved_target:
+                try:
+                    self._last_target_hwnd = resolved_target
+                except Exception:
+                    pass
+                forwarder = getattr(self, "_forwarder", None)
+                if forwarder is not None:
+                    try:
+                        forwarder._last_target_hwnd = resolved_target  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
         if success and self.mode != "cursor" and not suppress_focus_restore:
             QTimer.singleShot(100, self._ensure_keyboard_capture)
         return success
@@ -6949,7 +6973,15 @@ class OverlayWindow(QWidget):
         if target and not self._presentation_control_allowed(target):
             super().wheelEvent(e)
             return
-        if self._forwarder and self._forwarder.forward_wheel(e, allow_cursor=allow_cursor):
+        handled = False
+        if self._forwarder:
+            handled = self._forwarder.forward_wheel(e, allow_cursor=allow_cursor)
+        if not handled and not self.whiteboard_active and self.mode != "cursor":
+            delta_vec = e.angleDelta()
+            wheel_delta = int(delta_vec.y() or delta_vec.x())
+            if wheel_delta and self._send_navigation_wheel(wheel_delta):
+                handled = True
+        if handled:
             e.accept()
             return
         super().wheelEvent(e)
@@ -7085,9 +7117,20 @@ class OverlayWindow(QWidget):
             e.accept()
         super().mouseReleaseEvent(e)
 
+    def _should_handle_navigation_key(self, key: int) -> bool:
+        if key not in _QT_NAVIGATION_KEYS:
+            return False
+        target = self._resolve_control_target()
+        if not target or not self._presentation_control_allowed(target, log=False):
+            return False
+        category = self._presentation_target_category(target)
+        if category in {"ms_word", "wps_word"}:
+            return False
+        return True
+
     def keyPressEvent(self, e: QKeyEvent) -> None:
         key = e.key()
-        if key in _QT_NAVIGATION_KEYS:
+        if self._should_handle_navigation_key(key):
             if self.whiteboard_active:
                 e.accept()
                 return
@@ -7119,15 +7162,16 @@ class OverlayWindow(QWidget):
         super().keyPressEvent(e)
 
     def keyReleaseEvent(self, e: QKeyEvent) -> None:
-        if e.key() in _QT_NAVIGATION_KEYS:
+        key = e.key()
+        if self._should_handle_navigation_key(key):
             if self.whiteboard_active:
                 e.accept()
                 return
-            if e.key() not in self._active_navigation_keys:
+            if key not in self._active_navigation_keys:
                 super().keyReleaseEvent(e)
                 return
             if not e.isAutoRepeat():
-                self._release_keyboard_navigation_state(e.key())
+                self._release_keyboard_navigation_state(key)
             e.accept()
             return
         allow_cursor = (self.mode == "cursor" or self.navigation_active) and not self.whiteboard_active
