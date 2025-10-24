@@ -4783,6 +4783,7 @@ class OverlayWindow(QWidget):
         self._nav_restore_timer.timeout.connect(self._restore_navigation_tool)
         self._wps_binding_retry_timer: Optional[QTimer] = None
         self._wps_binding_retry_attempts = 0
+        self._pending_wps_cursor_pulse = False
         base_width = self._effective_brush_width()
         self._brush_pen = QPen(
             self.pen_color,
@@ -5464,6 +5465,27 @@ class OverlayWindow(QWidget):
                 forwarder.focus_presentation_window()
             except Exception:
                 pass
+        self._maybe_pulse_cursor_for_wps_control()
+
+    def _maybe_pulse_cursor_for_wps_control(self) -> None:
+        if self.whiteboard_active:
+            return
+        if self.mode == "cursor":
+            self._ensure_keyboard_capture()
+            return
+        if self._pending_wps_cursor_pulse:
+            return
+        restore_mode = self.mode
+        restore_shape = self.current_shape if self.mode == "shape" else None
+        if restore_mode not in {"brush", "shape", "eraser"}:
+            return
+        self._pending_wps_cursor_pulse = True
+
+        def _apply_pulse() -> None:
+            self._pending_wps_cursor_pulse = False
+            self._apply_navigation_cursor_hold(restore_mode, restore_shape)
+
+        QTimer.singleShot(50, _apply_pulse)
 
     def _resolve_control_target(self) -> Optional[int]:
         target = self._current_navigation_target()
@@ -6612,6 +6634,8 @@ class OverlayWindow(QWidget):
                     pass
             if hasattr(self, "_last_target_hwnd"):
                 self._last_target_hwnd = None
+        if not resolved.get("wps_ppt"):
+            self._cancel_wps_slideshow_binding_retry()
         if resolved.get("wps_ppt") and not parse_bool(previous_flags.get("wps_ppt"), True):
             try:
                 self._refresh_wps_slideshow_binding()
