@@ -4663,6 +4663,7 @@ class OverlayWindow(QWidget):
     _SLIDESHOW_PRIORITY_CLASSES = _PresentationForwarder._SLIDESHOW_PRIORITY_CLASSES
     _SLIDESHOW_SECONDARY_CLASSES = _PresentationForwarder._SLIDESHOW_SECONDARY_CLASSES
     _NAVIGATION_RESTORE_DELAY_MS = 600
+    _NAVIGATION_HOLD_DURATION_MS = 2400
     _PRESENTATION_EDITOR_CLASSES: Set[str] = _PresentationForwarder._PRESENTATION_EDITOR_CLASSES
     _WORD_WINDOW_CLASSES: Set[str] = _PresentationForwarder._WORD_WINDOW_CLASSES
     _WORD_CONTENT_CLASSES: Set[str] = _PresentationForwarder._WORD_CONTENT_CLASSES
@@ -4778,12 +4779,20 @@ class OverlayWindow(QWidget):
         self._last_target_hwnd: Optional[int] = None
         self._pending_tool_restore: Optional[Tuple[str, Optional[str]]] = None
         self._nav_restore_mode: Optional[Tuple[str, Optional[str]]] = None
+        self._nav_hold_persistent = False
         self._nav_restore_timer = QTimer(self)
         self._nav_restore_timer.setSingleShot(True)
         self._nav_restore_timer.timeout.connect(self._restore_navigation_tool)
+        self._nav_hold_active = False
+        self._nav_hold_timer = QTimer(self)
+        self._nav_hold_timer.setSingleShot(True)
+        self._nav_hold_timer.timeout.connect(self._release_navigation_hold)
+        self._skip_focus_reactivation = False
         self._wps_binding_retry_timer: Optional[QTimer] = None
         self._wps_binding_retry_attempts = 0
         self._pending_wps_cursor_pulse = False
+        self._pending_wps_cursor_reset = False
+        self._wps_cursor_reset_timer: Optional[QTimer] = None
         base_width = self._effective_brush_width()
         self._brush_pen = QPen(
             self.pen_color,
@@ -5192,6 +5201,7 @@ class OverlayWindow(QWidget):
         *,
         via_toolbar: bool = False,
         originating_key: Optional[int] = None,
+        from_keyboard: bool = False,
     ) -> None:
         if self.whiteboard_active:
             return
@@ -5199,6 +5209,7 @@ class OverlayWindow(QWidget):
             VK_DOWN,
             via_toolbar=via_toolbar,
             originating_key=originating_key,
+            from_keyboard=from_keyboard,
         )
 
     def go_to_previous_slide(
@@ -5206,6 +5217,7 @@ class OverlayWindow(QWidget):
         *,
         via_toolbar: bool = False,
         originating_key: Optional[int] = None,
+        from_keyboard: bool = False,
     ) -> None:
         if self.whiteboard_active:
             return
@@ -5213,6 +5225,7 @@ class OverlayWindow(QWidget):
             VK_UP,
             via_toolbar=via_toolbar,
             originating_key=originating_key,
+            from_keyboard=from_keyboard,
         )
 
     def _wheel_delta_for_vk(self, vk_code: int) -> int:
@@ -5487,6 +5500,62 @@ class OverlayWindow(QWidget):
 
         QTimer.singleShot(50, _apply_pulse)
 
+    def _reset_wps_presentation_state(self, *, trigger_cursor: bool = True) -> None:
+        forwarder = getattr(self, "_forwarder", None)
+        if forwarder is not None:
+            try:
+                forwarder.clear_cached_target()
+            except Exception:
+                pass
+        try:
+            self._last_target_hwnd = None
+        except Exception:
+            pass
+        self._pending_wps_cursor_pulse = False
+        if not trigger_cursor:
+            return
+        mode = getattr(self, "mode", None)
+        if not mode:
+            return
+        if mode == "cursor":
+            try:
+                self.set_mode("cursor")
+            except Exception:
+                pass
+            return
+        if mode in {"brush", "shape", "eraser"}:
+            self._maybe_pulse_cursor_for_wps_control()
+
+    def _schedule_wps_cursor_reactivation(self) -> None:
+        timer = getattr(self, "_wps_cursor_reset_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._apply_wps_cursor_reactivation)
+            self._wps_cursor_reset_timer = timer
+        else:
+            if timer.isActive():
+                timer.stop()
+        self._pending_wps_cursor_reset = True
+        timer.start(0)
+
+    def _apply_wps_cursor_reactivation(self) -> None:
+        self._pending_wps_cursor_reset = False
+        self._reset_wps_presentation_state()
+
+    def _auto_activate_cursor_for_wps(self) -> None:
+        if getattr(self, "whiteboard_active", False):
+            return
+        if getattr(self, "mode", None) == "cursor":
+            return
+        try:
+            self.toggle_cursor_mode()
+        except Exception:
+            try:
+                self.set_mode("cursor")
+            except Exception:
+                pass
+
     def _resolve_control_target(self) -> Optional[int]:
         target = self._current_navigation_target()
         if target and not self._presentation_control_allowed(target, log=False):
@@ -5580,10 +5649,12 @@ class OverlayWindow(QWidget):
         *,
         via_toolbar: bool = False,
         originating_key: Optional[int] = None,
+        from_keyboard: bool = False,
     ) -> None:
         if vk_code == 0 or self.whiteboard_active:
             return
         wheel_delta = self._wheel_delta_for_vk(vk_code)
+        original_mode = getattr(self, "mode", None)
         target_hwnd = self._current_navigation_target()
         effective_target = target_hwnd or self._resolve_control_target()
         if not target_hwnd and effective_target:
@@ -5609,7 +5680,75 @@ class OverlayWindow(QWidget):
                 self._cancel_navigation_cursor_hold()
             return
         is_word_target = self._is_word_like_class(target_class)
-        prefer_wheel = via_toolbar or self.navigation_active or self.mode == "cursor"
+        category = (
+            self._presentation_target_category(effective_target)
+            if effective_target
+            else "other"
+        )
+        top_for_process = _user32_top_level_hwnd(effective_target) if effective_target else 0
+        process_name = ""
+        if effective_target:
+            try:
+                process_name = self._window_process_name(top_for_process or effective_target)
+            except Exception:
+                process_name = ""
+        is_ms_ppt_target = (
+            category == "ms_ppt"
+            or (target_class and self._class_has_ms_presentation_signature(target_class))
+            or (process_name and "powerpnt" in process_name)
+        )
+        is_word_category = category in {"ms_word", "wps_word"}
+        persist_hold = is_ms_ppt_target or is_word_category
+        if (
+            is_ms_ppt_target
+            and not self.whiteboard_active
+            and original_mode not in {None, "cursor"}
+        ):
+            self._apply_navigation_cursor_hold(
+                original_mode,
+                self.current_shape,
+                suppress_focus_restore=True,
+                persist=persist_hold,
+            )
+            self._focus_presentation_window_fallback()
+            if effective_target:
+                try:
+                    self._last_target_hwnd = effective_target
+                except Exception:
+                    pass
+                    forwarder = getattr(self, "_forwarder", None)
+                    if forwarder is not None:
+                        try:
+                            forwarder._last_target_hwnd = effective_target  # type: ignore[attr-defined]
+                        except Exception:
+                            pass
+        if (
+            is_word_category
+            and not self.whiteboard_active
+            and original_mode not in {None, "cursor"}
+        ):
+            self._apply_navigation_cursor_hold(
+                original_mode,
+                self.current_shape,
+                suppress_focus_restore=True,
+                persist=persist_hold,
+            )
+            self._focus_presentation_window_fallback()
+            if effective_target:
+                try:
+                    self._last_target_hwnd = effective_target
+                except Exception:
+                    pass
+                forwarder = getattr(self, "_forwarder", None)
+                if forwarder is not None:
+                    try:
+                        forwarder._last_target_hwnd = effective_target  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
+        prefer_wheel = (
+            (via_toolbar or self.navigation_active or original_mode == "cursor" or is_word_category)
+            and not is_ms_ppt_target
+        )
         suppress_focus_restore = bool(wps_slideshow_target) or self._is_wps_slideshow_class(target_class)
         success = False
         wheel_used = False
@@ -5623,9 +5762,11 @@ class OverlayWindow(QWidget):
                 target=hex(target_hwnd) if target_hwnd else "0x0",
                 cls=target_class or "",
                 word=is_word_target,
+                category=category,
+                ppt=is_ms_ppt_target,
                 success=success,
             )
-        prev_mode = self.mode
+        prev_mode = original_mode
         if prev_mode in {"brush", "shape"}:
             self._update_last_tool_snapshot()
         had_keyboard_grab = False
@@ -5656,6 +5797,30 @@ class OverlayWindow(QWidget):
                             word=self._is_word_like_class(current_class),
                         )
                         break
+        if not success and is_word_category and win32con is not None:
+            doc_candidates: List[int] = []
+            if vk_code in (VK_DOWN, VK_RIGHT):
+                doc_candidates.extend(
+                    [
+                        getattr(win32con, "VK_NEXT", 0),
+                        VK_DOWN,
+                        getattr(win32con, "VK_SPACE", 0),
+                    ]
+                )
+            elif vk_code in (VK_UP, VK_LEFT):
+                doc_candidates.extend(
+                    [
+                        getattr(win32con, "VK_PRIOR", 0),
+                        VK_UP,
+                        getattr(win32con, "VK_BACK", 0),
+                    ]
+                )
+            for candidate in doc_candidates:
+                if not candidate:
+                    continue
+                if self._dispatch_virtual_key(candidate):
+                    success = True
+                    break
         self._pending_tool_restore = None
         if not success:
             if originating_key is not None:
@@ -5674,7 +5839,12 @@ class OverlayWindow(QWidget):
             self._release_keyboard_navigation_state(originating_key)
         if suppress_focus_restore:
             return
-        if not wheel_used and not had_keyboard_grab and self.mode != "cursor":
+        if (
+            not wheel_used
+            and not had_keyboard_grab
+            and original_mode != "cursor"
+            and not (is_ms_ppt_target or is_word_category)
+        ):
             self._ensure_keyboard_capture()
         self.raise_toolbar()
 
@@ -5683,6 +5853,28 @@ class OverlayWindow(QWidget):
             return False
         handled = False
         target_hwnd = self._resolve_control_target()
+        if (
+            target_hwnd
+            and self._presentation_target_category(target_hwnd) in {"ms_word", "wps_word"}
+            and not self.whiteboard_active
+            and self.mode != "cursor"
+        ):
+            self._apply_navigation_cursor_hold(
+                self.mode,
+                self.current_shape,
+                suppress_focus_restore=True,
+                persist=True,
+            )
+            try:
+                self._last_target_hwnd = target_hwnd
+            except Exception:
+                pass
+            forwarder = getattr(self, "_forwarder", None)
+            if forwarder is not None:
+                try:
+                    forwarder._last_target_hwnd = target_hwnd  # type: ignore[attr-defined]
+                except Exception:
+                    pass
         if target_hwnd and not self._presentation_control_allowed(target_hwnd):
             self._log_navigation_debug(
                 "wheel_blocked",
@@ -5713,7 +5905,11 @@ class OverlayWindow(QWidget):
                 handled = False
         if handled:
             return True
-        return self._fallback_send_wheel(delta)
+        focused = self._focus_presentation_window_fallback()
+        fallback = self._fallback_send_wheel(delta)
+        if not fallback and not focused:
+            return False
+        return fallback
 
     def _send_wps_slideshow_virtual_key(self, hwnd: int, vk_code: int) -> bool:
         if not hwnd or vk_code == 0:
@@ -5748,24 +5944,41 @@ class OverlayWindow(QWidget):
         except Exception:
             return False
 
-    def _apply_navigation_cursor_hold(self, restore_mode: str, restore_shape: Optional[str]) -> None:
+    def _apply_navigation_cursor_hold(
+        self,
+        restore_mode: str,
+        restore_shape: Optional[str],
+        *,
+        suppress_focus_restore: bool = False,
+        persist: bool = False,
+    ) -> None:
         if restore_mode not in {"brush", "shape", "eraser"}:
             return
+        if persist:
+            self._activate_navigation_hold()
+        else:
+            self._deactivate_navigation_hold(restore=False)
+        if suppress_focus_restore:
+            self._skip_focus_reactivation = True
         self._nav_restore_mode = (restore_mode, restore_shape)
         if self.mode != "cursor":
             self.set_mode("cursor")
         if self._nav_restore_timer.isActive():
             self._nav_restore_timer.stop()
-        self._nav_restore_timer.start(self._NAVIGATION_RESTORE_DELAY_MS)
+        if not persist:
+            self._nav_restore_timer.start(self._NAVIGATION_RESTORE_DELAY_MS)
 
     def _cancel_navigation_cursor_hold(self) -> None:
         if self._nav_restore_timer.isActive():
             self._nav_restore_timer.stop()
         self._nav_restore_mode = None
+        self._deactivate_navigation_hold(restore=False)
+        self._skip_focus_reactivation = False
 
     def _restore_navigation_tool(self) -> None:
         pending = self._nav_restore_mode
         self._nav_restore_mode = None
+        self._nav_hold_persistent = False
         if not pending:
             return
         if self.mode != "cursor":
@@ -5775,6 +5988,28 @@ class OverlayWindow(QWidget):
             self.set_mode("eraser")
         else:
             self._restore_last_tool(mode, shape_type=shape)
+
+    def _activate_navigation_hold(self) -> None:
+        self._nav_hold_persistent = True
+        if self._nav_hold_timer.isActive():
+            self._nav_hold_timer.stop()
+        if not self._nav_hold_active:
+            self._nav_hold_active = True
+            self._set_navigation_reason("auto-hold", True)
+        self._nav_hold_timer.start(self._NAVIGATION_HOLD_DURATION_MS)
+
+    def _deactivate_navigation_hold(self, *, restore: bool) -> None:
+        if self._nav_hold_timer.isActive():
+            self._nav_hold_timer.stop()
+        if self._nav_hold_active:
+            self._nav_hold_active = False
+            self._set_navigation_reason("auto-hold", False)
+        self._nav_hold_persistent = False
+        if restore and not self.navigation_active and self.mode == "cursor" and self._nav_restore_mode:
+            self._restore_navigation_tool()
+
+    def _release_navigation_hold(self) -> None:
+        self._deactivate_navigation_hold(restore=True)
 
     def _dispatch_virtual_key(self, vk_code: int) -> bool:
         if vk_code == 0 or self.whiteboard_active:
@@ -5883,7 +6118,11 @@ class OverlayWindow(QWidget):
             return
         self.navigation_active = active
         if active:
-            self._cancel_navigation_cursor_hold()
+            if not self._nav_hold_persistent:
+                self._cancel_navigation_cursor_hold()
+            else:
+                if self._nav_restore_timer.isActive():
+                    self._nav_restore_timer.stop()
             self._pending_tool_restore = None
             if self.drawing:
                 self.drawing = False
@@ -5893,6 +6132,10 @@ class OverlayWindow(QWidget):
                     self.raise_toolbar()
                 except Exception:
                     pass
+        else:
+            if not self._nav_hold_persistent:
+                if self._nav_restore_mode and not self._nav_restore_timer.isActive():
+                    self._nav_restore_timer.start(self._NAVIGATION_RESTORE_DELAY_MS)
         self.update_cursor()
 
     def handle_toolbar_enter(self) -> None:
@@ -6536,7 +6779,15 @@ class OverlayWindow(QWidget):
             return
         if not self.isVisible():
             self.show()
-        self._ensure_keyboard_capture()
+        suppress_focus = False
+        if self._skip_focus_reactivation:
+            suppress_focus = True
+            self._skip_focus_reactivation = False
+        if suppress_focus:
+            if self._keyboard_grabbed:
+                self._release_keyboard_capture()
+        else:
+            self._ensure_keyboard_capture()
         if initial:
             return
 
@@ -6639,6 +6890,18 @@ class OverlayWindow(QWidget):
         if resolved.get("wps_ppt") and not parse_bool(previous_flags.get("wps_ppt"), True):
             try:
                 self._refresh_wps_slideshow_binding()
+            except Exception:
+                pass
+            try:
+                self._reset_wps_presentation_state(trigger_cursor=False)
+            except Exception:
+                pass
+            try:
+                self._schedule_wps_cursor_reactivation()
+            except Exception:
+                pass
+            try:
+                self._auto_activate_cursor_for_wps()
             except Exception:
                 pass
 
@@ -6838,9 +7101,9 @@ class OverlayWindow(QWidget):
                 self._set_navigation_reason("keyboard", True)
             origin_key = None if is_auto else key
             if key in (Qt.Key.Key_Down, Qt.Key.Key_Right):
-                self.go_to_next_slide(originating_key=origin_key)
+                self.go_to_next_slide(originating_key=origin_key, from_keyboard=True)
             else:
-                self.go_to_previous_slide(originating_key=origin_key)
+                self.go_to_previous_slide(originating_key=origin_key, from_keyboard=True)
             e.accept()
             return
         allow_cursor = (self.mode == "cursor" or self.navigation_active) and not self.whiteboard_active
