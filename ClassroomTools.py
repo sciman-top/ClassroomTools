@@ -3847,57 +3847,6 @@ class _PresentationForwarder:
                         queue.append(child)
         return None
 
-    def _locate_wps_slideshow_window(self, hwnd: int) -> Optional[int]:
-        if win32gui is None or hwnd == 0:
-            return None
-        if self._is_wps_slideshow_window(hwnd):
-            if self._is_target_window_valid(hwnd):
-                return hwnd
-        top_hwnd = self._top_level_hwnd(hwnd)
-        roots: List[int] = []
-        seen: Set[int] = set()
-        for candidate in (hwnd, top_hwnd):
-            if not candidate or candidate in seen:
-                continue
-            seen.add(candidate)
-            class_name = self._window_class_name(candidate)
-            if self._is_wps_slideshow_window(candidate):
-                if self._is_target_window_valid(candidate):
-                    return candidate
-            if class_name.startswith("kwpp") or "kwpp" in class_name or "wpsshow" in class_name:
-                roots.append(candidate)
-                continue
-            process_name = self._window_process_name(candidate)
-            if process_name.startswith("wpp"):
-                roots.append(candidate)
-        if not roots:
-            return None
-        buffer = self._child_buffer
-        for root in roots:
-            queue: deque[int] = deque([root])
-            local_seen: Set[int] = {root}
-
-            def _collector(child_hwnd: int, acc: List[int]) -> bool:
-                if child_hwnd in local_seen:
-                    return True
-                local_seen.add(child_hwnd)
-                acc.append(child_hwnd)
-                return True
-
-            while queue:
-                parent = queue.popleft()
-                buffer.clear()
-                try:
-                    win32gui.EnumChildWindows(parent, _collector, buffer)
-                except Exception:
-                    continue
-                for child in list(buffer):
-                    if self._is_wps_slideshow_window(child):
-                        if self._is_target_window_valid(child):
-                            return child
-                    queue.append(child)
-        return None
-
     def _word_host_chain(self, hwnd: int) -> Tuple[int, ...]:
         if win32gui is None or hwnd == 0:
             return ()
@@ -3931,15 +3880,6 @@ class _PresentationForwarder:
     def _normalize_presentation_target(self, hwnd: int) -> Optional[int]:
         if hwnd == 0:
             return None
-        slideshow_hwnd = self._locate_wps_slideshow_window(hwnd)
-        if slideshow_hwnd:
-            if logger.isEnabledFor(logging.DEBUG) and slideshow_hwnd != hwnd:
-                logger.debug(
-                    "navigation: using wps slideshow hwnd=%s (source=%s)",
-                    hex(slideshow_hwnd),
-                    hex(hwnd),
-                )
-            return slideshow_hwnd
         word_hwnd = self._locate_word_content_window(hwnd)
         if word_hwnd and self._is_target_window_valid(word_hwnd):
             if logger.isEnabledFor(logging.DEBUG):
@@ -5413,52 +5353,6 @@ class OverlayWindow(QWidget):
             )
         return allowed
 
-    def _enumerate_wps_slideshow_handles(self) -> Tuple[int, ...]:
-        handles: List[int] = []
-        seen: Set[int] = set()
-        if win32gui is not None:
-            validator: Callable[[int], bool] = self._is_target_window_valid
-
-            def _collector(hwnd: int, acc: List[int]) -> bool:
-                if hwnd in seen:
-                    return True
-                seen.add(hwnd)
-                try:
-                    class_name = win32gui.GetClassName(hwnd).strip().lower()
-                except Exception:
-                    return True
-                if not self._is_wps_slideshow_class(class_name):
-                    return True
-                if not validator(hwnd):
-                    return True
-                acc.append(hwnd)
-                return True
-
-            try:
-                win32gui.EnumWindows(_collector, handles)
-            except Exception:
-                handles.clear()
-        elif _USER32 is not None and _WNDENUMPROC is not None:
-            validator = self._fallback_is_target_window_valid
-
-            def _collector(hwnd: int, _l_param: int) -> int:
-                if hwnd in seen:
-                    return True
-                seen.add(hwnd)
-                class_name = _user32_window_class_name(hwnd)
-                if not self._is_wps_slideshow_class(class_name):
-                    return True
-                if not validator(int(hwnd)):
-                    return True
-                handles.append(int(hwnd))
-                return True
-
-            try:
-                _USER32.EnumWindows(_WNDENUMPROC(_collector), 0)
-            except Exception:
-                handles.clear()
-        return tuple(handles)
-
     def _find_wps_slideshow_target(self, *, require_allowed: bool = True) -> Optional[int]:
         if require_allowed and not getattr(self, "control_wps_ppt", True):
             return None
@@ -5505,48 +5399,37 @@ class OverlayWindow(QWidget):
                         return candidate
                     if not require_allowed:
                         return candidate
-        for hwnd in self._enumerate_wps_slideshow_handles():
-            if hwnd in candidates:
-                continue
-            candidates.append(hwnd)
-            allowed = self._presentation_control_allowed(hwnd, log=False)
-            if not allowed and require_allowed:
-                continue
-            if self._is_wps_slideshow_target(hwnd):
-                if allowed:
-                    if forwarder is not None:
-                        try:
-                            forwarder._last_target_hwnd = hwnd  # type: ignore[attr-defined]
-                        except Exception:
-                            pass
-                    try:
-                        self._last_target_hwnd = hwnd
-                    except Exception:
-                        pass
-                    return hwnd
-                if not require_allowed:
-                    return hwnd
         return None
 
-    def _prime_wps_slideshow_target(self) -> None:
+    def _refresh_wps_slideshow_binding(self) -> None:
         if not getattr(self, "control_wps_ppt", True):
             return
-        target = self._find_wps_slideshow_target()
-        if target:
-            return
-        fallback = self._find_wps_slideshow_target(require_allowed=False)
-        if not fallback:
-            return
-        if not self._presentation_control_allowed(fallback, log=False):
+        forwarder = getattr(self, "_forwarder", None)
+        candidate: Optional[int] = None
+        try:
+            candidate = self._find_wps_slideshow_target()
+        except Exception:
+            candidate = None
+        if not candidate:
+            try:
+                fallback = self._find_wps_slideshow_target(require_allowed=False)
+            except Exception:
+                fallback = None
+            if fallback and self._presentation_control_allowed(fallback, log=False):
+                candidate = fallback
+        if not candidate:
             return
         try:
-            self._last_target_hwnd = fallback
+            self._last_target_hwnd = candidate
         except Exception:
             pass
-        forwarder = getattr(self, "_forwarder", None)
         if forwarder is not None:
             try:
-                forwarder._last_target_hwnd = fallback  # type: ignore[attr-defined]
+                forwarder._last_target_hwnd = candidate  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            try:
+                forwarder.focus_presentation_window()
             except Exception:
                 pass
 
@@ -5608,87 +5491,6 @@ class OverlayWindow(QWidget):
                 return True
         return False
 
-    def _is_wps_slideshow_class(self, class_name: str) -> bool:
-        if not class_name:
-            return False
-        if class_name in self._WPS_SLIDESHOW_CLASSES:
-            return True
-        return class_name.startswith("kwppshow")
-
-    def _is_wps_slideshow_target(self, hwnd: Optional[int] = None) -> bool:
-        if hwnd is None:
-            hwnd = self._current_navigation_target()
-        if not hwnd:
-            return False
-        class_name = self._presentation_window_class(hwnd)
-        if self._is_wps_slideshow_class(class_name):
-            return True
-        if class_name in self._SLIDESHOW_PRIORITY_CLASSES or class_name in self._SLIDESHOW_SECONDARY_CLASSES:
-            top_hwnd = _user32_top_level_hwnd(hwnd)
-            process_name = self._window_process_name(top_hwnd or hwnd)
-            if process_name.startswith("wpp"):
-                return True
-        return False
-
-    def _is_wps_slideshow_class(self, class_name: str) -> bool:
-        if not class_name:
-            return False
-        if class_name in self._WPS_SLIDESHOW_CLASSES:
-            return True
-        return class_name.startswith("kwppshow")
-
-    def _is_wps_slideshow_target(self, hwnd: Optional[int] = None) -> bool:
-        if hwnd is None:
-            hwnd = self._current_navigation_target()
-        if not hwnd:
-            return False
-        class_name = self._presentation_window_class(hwnd)
-        if self._is_wps_slideshow_class(class_name):
-            return True
-        if class_name in self._SLIDESHOW_PRIORITY_CLASSES or class_name in self._SLIDESHOW_SECONDARY_CLASSES:
-            top_hwnd = _user32_top_level_hwnd(hwnd)
-            process_name = self._window_process_name(top_hwnd or hwnd)
-            if process_name.startswith("wpp"):
-                return True
-        return False
-
-    def _is_wps_slideshow_class(self, class_name: str) -> bool:
-        if not class_name:
-            return False
-        if class_name in self._WPS_SLIDESHOW_CLASSES:
-            return True
-        return class_name.startswith("kwppshow")
-
-    def _is_wps_slideshow_target(self, hwnd: Optional[int] = None) -> bool:
-        if hwnd is None:
-            hwnd = self._current_navigation_target()
-        if not hwnd:
-            return False
-        class_name = self._presentation_window_class(hwnd)
-        if self._is_wps_slideshow_class(class_name):
-            return True
-        if class_name in self._SLIDESHOW_PRIORITY_CLASSES or class_name in self._SLIDESHOW_SECONDARY_CLASSES:
-            top_hwnd = _user32_top_level_hwnd(hwnd)
-            process_name = self._window_process_name(top_hwnd or hwnd)
-            if process_name.startswith("wpp"):
-                return True
-        return False
-
-    def _is_wps_slideshow_class(self, class_name: str) -> bool:
-        if not class_name:
-            return False
-        if class_name in self._WPS_SLIDESHOW_CLASSES:
-            return True
-        return class_name.startswith("kwppshow")
-
-    def _is_wps_slideshow_target(self, hwnd: Optional[int] = None) -> bool:
-        if hwnd is None:
-            hwnd = self._current_navigation_target()
-        if not hwnd:
-            return False
-        class_name = self._presentation_window_class(hwnd)
-        return self._is_wps_slideshow_class(class_name)
-
     def _word_navigation_vk(self, vk_code: int, target_hwnd: Optional[int]) -> int:
         if win32con is None or not target_hwnd:
             return 0
@@ -5732,32 +5534,11 @@ class OverlayWindow(QWidget):
         effective_target = target_hwnd or self._resolve_control_target()
         if not target_hwnd and effective_target:
             target_hwnd = effective_target
-        allowed_wps_target = self._find_wps_slideshow_target()
-        known_wps_target: Optional[int] = allowed_wps_target or self._find_wps_slideshow_target(
-            require_allowed=False
-        )
-        if allowed_wps_target:
-            target_hwnd = allowed_wps_target
-            effective_target = allowed_wps_target
-        elif (
-            getattr(self, "control_wps_ppt", True)
-            and known_wps_target
-            and self._presentation_control_allowed(known_wps_target, log=False)
-        ):
-            target_hwnd = known_wps_target
-            effective_target = known_wps_target
-            allowed_wps_target = known_wps_target
+        wps_override = self._find_wps_slideshow_target()
+        if wps_override:
+            target_hwnd = wps_override
+            effective_target = wps_override
         target_class = self._presentation_window_class(target_hwnd) if target_hwnd else ""
-        if (
-            target_hwnd
-            and not getattr(self, "control_wps_ppt", True)
-            and self._presentation_target_category(target_hwnd) == "wps_ppt"
-        ):
-            if originating_key is not None:
-                self._release_keyboard_navigation_state(originating_key)
-            if via_toolbar:
-                self._cancel_navigation_cursor_hold()
-            return
         if effective_target and not self._presentation_control_allowed(effective_target):
             if originating_key is not None:
                 self._release_keyboard_navigation_state(originating_key)
@@ -5767,34 +5548,6 @@ class OverlayWindow(QWidget):
         wps_slideshow_target = (
             effective_target if effective_target and self._is_wps_slideshow_target(effective_target) else None
         )
-        if not wps_slideshow_target and allowed_wps_target:
-            wps_slideshow_target = allowed_wps_target
-        if (
-            not wps_slideshow_target
-            and effective_target
-            and (
-                self._class_has_wps_presentation_signature(target_class)
-                or self._window_process_name(_user32_top_level_hwnd(effective_target) or effective_target).startswith(
-                    "wpp"
-                )
-            )
-        ):
-            fallback_wps = known_wps_target or self._find_wps_slideshow_target(require_allowed=False)
-            if (
-                fallback_wps
-                and self._presentation_control_allowed(fallback_wps, log=False)
-                and self._is_wps_slideshow_target(fallback_wps)
-            ):
-                target_hwnd = fallback_wps
-                effective_target = fallback_wps
-                target_class = self._presentation_window_class(fallback_wps)
-                wps_slideshow_target = fallback_wps
-            else:
-                if originating_key is not None:
-                    self._release_keyboard_navigation_state(originating_key)
-                if via_toolbar:
-                    self._cancel_navigation_cursor_hold()
-                return
         if wps_slideshow_target and self._send_wps_slideshow_virtual_key(wps_slideshow_target, vk_code):
             if originating_key is not None:
                 self._release_keyboard_navigation_state(originating_key)
@@ -6811,7 +6564,7 @@ class OverlayWindow(QWidget):
                     raw = source.get(f"control_{key}")
             resolved[key] = parse_bool(raw, default)
         previous = getattr(self, "_presentation_control_flags", None)
-        previous_flags = previous or {}
+        previous_flags: Mapping[str, Any] = previous or {}
         changed = previous != resolved
         self._presentation_control_flags = resolved
         self.control_ms_ppt = resolved["ms_ppt"]
@@ -6827,8 +6580,11 @@ class OverlayWindow(QWidget):
                     pass
             if hasattr(self, "_last_target_hwnd"):
                 self._last_target_hwnd = None
-        if resolved.get("wps_ppt") and not bool(previous_flags.get("wps_ppt", True)):
-            self._prime_wps_slideshow_target()
+        if resolved.get("wps_ppt") and not parse_bool(previous_flags.get("wps_ppt"), True):
+            try:
+                self._refresh_wps_slideshow_binding()
+            except Exception:
+                pass
 
     def save_settings(self) -> None:
         settings = self.settings_manager.load_settings()
