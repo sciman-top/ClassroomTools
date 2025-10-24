@@ -4781,6 +4781,8 @@ class OverlayWindow(QWidget):
         self._nav_restore_timer = QTimer(self)
         self._nav_restore_timer.setSingleShot(True)
         self._nav_restore_timer.timeout.connect(self._restore_navigation_tool)
+        self._wps_binding_retry_timer: Optional[QTimer] = None
+        self._wps_binding_retry_attempts = 0
         base_width = self._effective_brush_width()
         self._brush_pen = QPen(
             self.pen_color,
@@ -5401,10 +5403,38 @@ class OverlayWindow(QWidget):
                         return candidate
         return None
 
+    def _cancel_wps_slideshow_binding_retry(self) -> None:
+        self._wps_binding_retry_attempts = 0
+        timer = getattr(self, "_wps_binding_retry_timer", None)
+        if timer is not None and timer.isActive():
+            timer.stop()
+
+    def _schedule_wps_slideshow_binding_retry(self, delay_ms: int = 200) -> None:
+        if not getattr(self, "control_wps_ppt", True):
+            self._cancel_wps_slideshow_binding_retry()
+            return
+        attempts = getattr(self, "_wps_binding_retry_attempts", 0)
+        if attempts >= 3:
+            return
+        self._wps_binding_retry_attempts = attempts + 1
+        timer = getattr(self, "_wps_binding_retry_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._refresh_wps_slideshow_binding)
+            self._wps_binding_retry_timer = timer
+        timer.start(max(0, int(delay_ms)))
+
     def _refresh_wps_slideshow_binding(self) -> None:
         if not getattr(self, "control_wps_ppt", True):
+            self._cancel_wps_slideshow_binding_retry()
             return
         forwarder = getattr(self, "_forwarder", None)
+        if forwarder is not None and not getattr(self, "_wps_binding_retry_attempts", 0):
+            try:
+                forwarder.clear_cached_target()
+            except Exception:
+                pass
         candidate: Optional[int] = None
         try:
             candidate = self._find_wps_slideshow_target()
@@ -5418,7 +5448,9 @@ class OverlayWindow(QWidget):
             if fallback and self._presentation_control_allowed(fallback, log=False):
                 candidate = fallback
         if not candidate:
+            self._schedule_wps_slideshow_binding_retry()
             return
+        self._cancel_wps_slideshow_binding_retry()
         try:
             self._last_target_hwnd = candidate
         except Exception:
