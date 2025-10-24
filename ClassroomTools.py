@@ -3334,6 +3334,8 @@ class _PresentationForwarder:
             return False
         target = self._resolve_presentation_target()
         if not target:
+            target = self._detect_presentation_window()
+        if not target:
             self.clear_cached_target()
             return False
         if not self.overlay._presentation_control_allowed(target):
@@ -3397,6 +3399,8 @@ class _PresentationForwarder:
         if vk_code is None:
             return False
         target = self._resolve_presentation_target()
+        if not target:
+            target = self._detect_presentation_window()
         if not target:
             self._log_debug("forward_key: target window not found for key=%s", event.key())
             self.clear_cached_target()
@@ -5570,6 +5574,9 @@ class OverlayWindow(QWidget):
             if candidate and not self._presentation_control_allowed(candidate, log=False):
                 return None
             return candidate
+        fallback = self._fallback_detect_presentation_window_user32()
+        if fallback and self._presentation_control_allowed(fallback, log=False):
+            return fallback
         return None
 
     def _is_word_like_class(self, class_name: str) -> bool:
@@ -6081,6 +6088,19 @@ class OverlayWindow(QWidget):
         if not success:
             self._focus_presentation_window_fallback()
             success = self._fallback_send_virtual_key(vk_code)
+        if success:
+            resolved_target = self._current_navigation_target() or self._resolve_control_target()
+            if resolved_target:
+                try:
+                    self._last_target_hwnd = resolved_target
+                except Exception:
+                    pass
+                forwarder = getattr(self, "_forwarder", None)
+                if forwarder is not None:
+                    try:
+                        forwarder._last_target_hwnd = resolved_target  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
         if success and self.mode != "cursor" and not suppress_focus_restore:
             QTimer.singleShot(100, self._ensure_keyboard_capture)
         return success
