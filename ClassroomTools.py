@@ -6648,6 +6648,11 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                 )
                 return False
             if self._forwarder is not None:
+                target_for_wheel: Optional[int] = None
+                try:
+                    target_for_wheel = self._forwarder.get_presentation_target()
+                except Exception:
+                    target_for_wheel = None
                 try:
                     global_pos = QCursor.pos()
                     local_pos = self.mapFromGlobal(global_pos)
@@ -6667,6 +6672,19 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                     )
                 except Exception:
                     handled = False
+                if not handled:
+                    if not target_for_wheel:
+                        target_for_wheel = self._current_navigation_target() or self._resolve_control_target()
+                    if target_for_wheel and self._is_wps_slideshow_target(target_for_wheel):
+                        handled = True
+                        try:
+                            self._last_target_hwnd = target_for_wheel
+                        except Exception:
+                            pass
+                        try:
+                            self._forwarder._last_target_hwnd = target_for_wheel  # type: ignore[attr-defined]
+                        except Exception:
+                            pass
             if handled:
                 return True
             focused = self._focus_presentation_window_fallback()
