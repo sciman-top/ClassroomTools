@@ -313,6 +313,22 @@ def test_presentation_category_accepts_non_string_hints(tmp_path: Path) -> None:
     assert _compute_category(bytearray(), None, None) == "other"
 
 
+def test_prefix_keyword_classifier_normalizes_tokens() -> None:
+    classifier = helpers._PresentationWindowMixin._PrefixKeywordClassifier(  # type: ignore[attr-defined]
+        prefixes=[" WPP", "Wpp", "kwp"],
+        keywords=["Show", "SHOW"],
+        excludes=["Beta", "BETA"],
+        canonical=["KwppsFrame"],
+    )
+    assert classifier.prefixes == ("wpp", "kwp")
+    assert classifier.keywords == ("show",)
+    assert classifier.excludes == ("beta",)
+    assert "kwppsframe" in classifier.canonical
+    assert classifier.has_signature("KWPPSFRAME") is True
+    assert classifier.has_signature(" wppBetaWindow ") is False
+    assert classifier.has_signature("wpp main show window") is True
+
+
 class _MixinHarness(helpers._PresentationWindowMixin):  # type: ignore[attr-defined]
     def _overlay_widget(self):  # pragma: no cover - interface requirement
         return None

@@ -1054,13 +1054,17 @@ def _compute_presentation_category(
 
     def _normalize(value: Any) -> str:
         text = _to_text(value)
+        if not text:
+            return ""
         stripped = text.strip()
-        return stripped.lower()
+        return stripped.casefold()
 
     def _normalize_process(value: Any) -> Tuple[str, str]:
         text = _to_text(value)
+        if not text:
+            return "", ""
         stripped = text.strip()
-        lowered = stripped.lower()
+        lowered = stripped.casefold()
         return stripped, lowered
 
     primary = _normalize(class_name)
@@ -3601,10 +3605,23 @@ class _PresentationWindowMixin:
             excludes: Iterable[str] = (),
             canonical: Iterable[str] = (),
         ) -> None:
-            self.prefixes = tuple(prefixes)
-            self.keywords = tuple(keywords)
-            self.excludes = tuple(excludes)
-            self.canonical = frozenset(canonical)
+            normalizer = self._normalize
+
+            def _normalize_sequence(values: Iterable[str]) -> Tuple[str, ...]:
+                seen: Set[str] = set()
+                normalized: List[str] = []
+                for value in values:
+                    candidate = normalizer(value)
+                    if not candidate or candidate in seen:
+                        continue
+                    seen.add(candidate)
+                    normalized.append(candidate)
+                return tuple(normalized)
+
+            self.prefixes = _normalize_sequence(prefixes)
+            self.keywords = _normalize_sequence(keywords)
+            self.excludes = _normalize_sequence(excludes)
+            self.canonical = frozenset(_normalize_sequence(canonical))
 
         @staticmethod
         def _normalize(value: Any) -> str:
@@ -3617,26 +3634,24 @@ class _PresentationWindowMixin:
                     text = str(value)
                 except Exception:
                     return ""
-            return text.strip().lower()
-
-        def _analyze(self, class_name: Any) -> Tuple[str, bool, bool]:
-            normalized = self._normalize(class_name)
-            if not normalized:
-                return "", False, False
-            has_prefix = any(normalized.startswith(prefix) for prefix in self.prefixes)
-            has_exclusion = has_prefix and any(token in normalized for token in self.excludes)
-            return normalized, has_prefix, has_exclusion
+            return text.strip().casefold()
 
         def has_signature(self, class_name: Any) -> bool:
-            normalized, has_prefix, has_exclusion = self._analyze(class_name)
+            normalized = self._normalize(class_name)
             if not normalized:
                 return False
-            if has_prefix:
-                if has_exclusion:
-                    return False
-                if any(keyword in normalized for keyword in self.keywords):
-                    return True
-            return normalized in self.canonical
+            if normalized in self.canonical:
+                return True
+            if not self.prefixes:
+                return False
+            has_prefix = any(normalized.startswith(prefix) for prefix in self.prefixes)
+            if not has_prefix:
+                return False
+            if self.excludes and any(token in normalized for token in self.excludes):
+                return False
+            if self.keywords:
+                return any(keyword in normalized for keyword in self.keywords)
+            return False
 
     _KNOWN_PRESENTATION_CLASSES: Set[str] = {
         "screenclass",
@@ -3914,213 +3929,9 @@ class _PresentationWindowMixin:
             return None
         return candidates
 
-    def _wps_writer_prefix_state(self, class_name: str) -> Tuple[bool, bool]:
-        if not class_name:
-            return False, False
-        has_prefix = any(
-            class_name.startswith(prefix) for prefix in self._WPS_WRITER_PREFIXES
-        )
-        if not has_prefix:
-            return False, False
-        has_exclusion = any(
-            excluded in class_name for excluded in self._WPS_WRITER_EXCLUDE_KEYWORDS
-        )
-        return True, has_exclusion
-
-    def _wps_writer_keyword_match(self, class_name: str) -> bool:
-        return any(keyword in class_name for keyword in self._WPS_WRITER_KEYWORDS)
-
-    def _is_wps_slideshow_class(self, class_name: str) -> bool:
-        if not class_name:
-            return False
-        if class_name in self._WPS_SLIDESHOW_CLASSES:
-            return True
-        return class_name.startswith("kwppshow")
-
-    def _is_word_like_class(self, class_name: str) -> bool:
-        if not class_name:
-            return False
-        if class_name in self._WORD_WINDOW_CLASSES:
-            return True
-        if class_name in self._WORD_CONTENT_CLASSES:
-            return True
-        if class_name in self._WORD_HOST_CLASSES:
-            return True
-        if class_name.startswith("_ww"):
-            return True
-        if "word" in class_name:
-            return True
-        has_prefix, has_exclusion = self._wps_writer_prefix_state(class_name)
-        if has_prefix:
-            if has_exclusion:
-                return False
-            if self._wps_writer_keyword_match(class_name):
-                return True
-        return False
-
-    def _class_has_wps_writer_signature(self, class_name: str) -> bool:
-        if not class_name:
-            return False
-        has_prefix, has_exclusion = self._wps_writer_prefix_state(class_name)
-        if has_prefix:
-            if has_exclusion:
-                return False
-            if self._wps_writer_keyword_match(class_name):
-                return True
-        if class_name in {
-            "kwpsdocview",
-            "wpsdocview",
-            "kwpsframeclass",
-            "kwpsmainframe",
-            "wpsframeclass",
-            "wpsmainframe",
-        }:
-            return True
-        return False
-
-    def _class_has_wps_presentation_signature(self, class_name: str) -> bool:
-        if not class_name:
-            return False
-        if self._is_wps_slideshow_class(class_name):
-            return True
-        if class_name.startswith("kwpp") or "kwpp" in class_name:
-            return True
-        if class_name.startswith("wpp") and "wps" not in class_name:
-            return True
-        if class_name.startswith("wpsshow") or "wpsshow" in class_name:
-            return True
-        return False
-
-    def _class_has_ms_presentation_signature(self, class_name: str) -> bool:
-        if not class_name:
-            return False
-        if self._class_has_wps_presentation_signature(class_name):
-            return False
-        if class_name in self._SLIDESHOW_PRIORITY_CLASSES:
-            return True
-        if class_name in self._SLIDESHOW_SECONDARY_CLASSES:
-            return True
-        if class_name in self._PRESENTATION_EDITOR_CLASSES:
-            if class_name.startswith("kwpp") or class_name.startswith("kwps"):
-                return False
-            if class_name.startswith("wps"):
-                return False
-            return True
-        keywords = ("ppt", "powerpnt", "powerpoint", "screenclass")
-        return any(keyword in class_name for keyword in keywords)
-
-    def _normalized_class_hints(self, *classes: str) -> Tuple[str, ...]:
-        normalized: List[str] = []
-        for value in classes:
-            if not value:
-                continue
-            hint = value.strip().lower()
-            if hint:
-                normalized.append(hint)
-        return tuple(normalized)
-
-    def _is_wps_presentation_process(self, process_name: str, *classes: str) -> bool:
-        name = (process_name or "").strip().lower()
-        if not name:
-            return False
-        if name.startswith(("wpp", "wppt")):
-            return True
-        if "wpspresentation" in name:
-            return True
-        if not name.startswith("wps"):
-            return False
-        normalized_classes = self._normalized_class_hints(*classes)
-        if not normalized_classes:
-            return False
-        if any(self._is_wps_slideshow_class(cls) for cls in normalized_classes):
-            return True
-        if any(self._class_has_wps_presentation_signature(cls) for cls in normalized_classes):
-            return True
-        return False
-
-    def _is_wps_writer_process(self, process_name: str, *classes: str) -> bool:
-        name = (process_name or "").strip().lower()
-        if not name:
-            return False
-        if self._is_wps_presentation_process(process_name, *classes):
-            return False
-        if "wpswriter" in name:
-            return True
-        normalized_classes = self._normalized_class_hints(*classes)
-        if any(self._class_has_wps_writer_signature(cls) for cls in normalized_classes):
-            return True
-        if not name.startswith("wps"):
-            return False
-        if any(self._is_wps_slideshow_class(cls) for cls in normalized_classes):
-            return False
-        return False
-
-    def _window_thread_id(self, hwnd: int) -> int:
-        if _USER32 is None or hwnd == 0:
-            return 0
-        pid = wintypes.DWORD()
-        try:
-            thread_id = int(_USER32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(pid)))
-        except Exception:
-            thread_id = 0
-        return thread_id
-
-    def _attach_to_target_thread(self, hwnd: int) -> Optional[Tuple[int, int]]:
-        if _USER32 is None or hwnd == 0:
-            return None
-        target_thread = self._window_thread_id(hwnd)
-        if not target_thread:
-            return None
-        try:
-            current_thread = int(_USER32.GetCurrentThreadId())
-        except Exception:
-            current_thread = 0
-        if not current_thread or current_thread == target_thread:
-            return None
-        try:
-            attached = bool(_USER32.AttachThreadInput(current_thread, target_thread, True))
-        except Exception:
-            attached = False
-        return (current_thread, target_thread) if attached else None
-
-    def _detach_from_target_thread(self, pair: Optional[Tuple[int, int]]) -> None:
-        if _USER32 is None or not pair:
-            return
-        src, dst = pair
-        if not src or not dst or src == dst:
-            return
-        try:
-            _USER32.AttachThreadInput(src, dst, False)
-        except Exception:
-            pass
-
-    def _enumerate_overlay_candidate_windows(self, overlay_hwnd: int) -> Optional[List[int]]:
-        if _USER32 is None or _WNDENUMPROC is None:
-            return None
-        candidates: List[int] = []
-
-        def _enum_callback(hwnd: int, _l_param: int) -> int:
-            if hwnd == overlay_hwnd:
-                return True
-            if self._should_ignore_window(hwnd):
-                return True
-            if not _user32_is_window_visible(hwnd) or _user32_is_window_iconic(hwnd):
-                return True
-            rect = _user32_window_rect(hwnd)
-            if not rect or not self._rect_intersects_overlay(rect):
-                return True
-            candidates.append(int(hwnd))
-            return True
-
-        enum_proc = _WNDENUMPROC(_enum_callback)
-        try:
-            _USER32.EnumWindows(enum_proc, 0)
-        except Exception:
-            return None
-        return candidates
-
-    def _overlay_widget(self) -> Optional[QWidget]:
-        raise NotImplementedError
+    @classmethod
+    def _normalize_class_hint(cls, value: Any) -> str:
+        return cls._PrefixKeywordClassifier._normalize(value)
 
     def _overlay_child_widget(self, attribute: str) -> Optional[QWidget]:
         overlay = self._overlay_widget()
@@ -4129,11 +3940,27 @@ class _PresentationWindowMixin:
     def _widget_hwnd(self, widget: Optional[QWidget]) -> int:
         if widget is None:
             return 0
+        pid = wintypes.DWORD()
         try:
-            wid = widget.winId()
+            thread_id = int(_USER32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(pid)))
         except Exception:
-            return 0
-        return int(wid) if wid else 0
+            thread_id = 0
+        return thread_id
+
+    def _toolbar_widget(self) -> Optional[QWidget]:
+        return self._overlay_child_widget("toolbar")
+
+    def _photo_overlay_widget(self) -> Optional[QWidget]:
+        return self._overlay_child_widget("_photo_overlay")
+
+    def _overlay_hwnd(self) -> int:
+        return self._widget_hwnd(self._overlay_widget())
+
+    def _toolbar_hwnd(self) -> int:
+        return self._widget_hwnd(self._toolbar_widget())
+
+    def _photo_overlay_hwnd(self) -> int:
+        return self._widget_hwnd(self._photo_overlay_widget())
 
     def _toolbar_widget(self) -> Optional[QWidget]:
         return self._overlay_child_widget("toolbar")
