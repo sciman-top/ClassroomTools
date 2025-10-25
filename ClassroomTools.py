@@ -119,6 +119,307 @@ def parse_bool(value: Any, default: bool = False) -> bool:
     return default
 
 
+def _preferred_app_directory() -> str:
+    """Return the user-specific data directory without creating it."""
+
+    home = os.path.expanduser("~")
+    if sys.platform.startswith("win"):
+        base = os.environ.get("APPDATA") or os.path.join(home, "AppData", "Roaming")
+    elif sys.platform == "darwin":
+        base = os.path.join(home, "Library", "Application Support")
+    else:
+        base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
+    return os.path.abspath(os.path.join(base, "ClassroomTools"))
+
+
+def _ensure_directory(path: str) -> bool:
+    if not path:
+        return False
+    try:
+        os.makedirs(path, exist_ok=True)
+    except Exception:
+        return False
+    return os.path.isdir(path)
+
+
+def _ensure_writable_directory(path: str) -> bool:
+    if not path:
+        return False
+    if not _ensure_directory(path):
+        return False
+    test_path: Optional[str] = None
+    fd: Optional[int] = None
+    try:
+        fd, test_path = tempfile.mkstemp(prefix="ctools_", dir=path)
+    except OSError:
+        return os.access(path, os.W_OK)
+    except Exception:
+        return False
+    finally:
+        if fd is not None:
+            with contextlib.suppress(Exception):
+                os.close(fd)
+        if test_path:
+            with contextlib.suppress(Exception):
+                os.remove(test_path)
+    return True
+
+
+def _collect_resource_roots() -> List[str]:
+    """Return an ordered list of candidate directories containing bundled resources."""
+
+    roots: List[str] = []
+    seen: Set[str] = set()
+
+    def _append(path: Optional[str]) -> None:
+        if not path:
+            return
+        normalized = os.path.normpath(os.path.abspath(path))
+        if normalized in seen:
+            return
+        seen.add(normalized)
+        roots.append(normalized)
+
+    app_dir = _preferred_app_directory()
+    if _ensure_directory(app_dir):
+        _append(app_dir)
+
+    exe_dir: Optional[str] = None
+    with contextlib.suppress(Exception):
+        exe_dir = os.path.dirname(os.path.abspath(getattr(sys, "executable", "")))
+    if getattr(sys, "frozen", False) and exe_dir:
+        _append(exe_dir)
+
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        _append(meipass)
+
+    script_dir: Optional[str] = None
+    with contextlib.suppress(Exception):
+        script_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+    if script_dir:
+        _append(script_dir)
+
+    module_dir = os.path.dirname(os.path.abspath(__file__))
+    _append(module_dir)
+
+    with contextlib.suppress(Exception):
+        cwd = os.getcwd()
+        _append(cwd)
+
+    return roots
+
+
+class _ResourceLocator:
+    """Centralised helper for resolving bundled and user data paths."""
+
+    __slots__ = ("_roots", "_cache")
+
+    def __init__(self) -> None:
+        self._roots: Tuple[str, ...] = tuple(_collect_resource_roots())
+        self._cache: Dict[str, Tuple[str, ...]] = {}
+
+    def candidates(self, relative_path: str) -> Tuple[str, ...]:
+        normalized_key = os.path.normpath(str(relative_path).strip().replace("\\", "/"))
+        cached = self._cache.get(normalized_key)
+        if cached is not None:
+            return cached
+        norm_rel = normalized_key.lstrip("./")
+        if not norm_rel:
+            result = self._roots
+            self._cache[normalized_key] = result
+            return result
+        paths: List[str] = []
+        seen: Set[str] = set()
+        for root in self._roots:
+            candidate = os.path.join(root, norm_rel)
+            normalized = os.path.normpath(candidate)
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            paths.append(normalized)
+        result = tuple(paths)
+        self._cache[normalized_key] = result
+        return result
+
+
+@functools.lru_cache(maxsize=1)
+def _get_resource_locator() -> _ResourceLocator:
+    return _ResourceLocator()
+
+
+def _any_existing_path(paths: Iterable[str]) -> Optional[str]:
+    for path in paths:
+        if path and os.path.exists(path):
+            return path
+    return None
+
+
+def _choose_writable_target(
+    candidates: Tuple[str, ...],
+    *,
+    is_dir: bool,
+    fallback_name: str,
+) -> str:
+    for target in candidates:
+        directory = target if is_dir else os.path.dirname(target)
+        if _ensure_writable_directory(directory or os.getcwd()):
+            return target
+    app_dir = _preferred_app_directory()
+    base_dir = app_dir if _ensure_writable_directory(app_dir) else os.getcwd()
+    fallback = os.path.join(base_dir, fallback_name)
+    directory = fallback if is_dir else os.path.dirname(fallback)
+    if directory and not _ensure_writable_directory(directory):
+        fallback = os.path.abspath(fallback_name)
+        directory = fallback if is_dir else os.path.dirname(fallback)
+        _ensure_writable_directory(directory or os.getcwd())
+    return fallback
+
+
+def _mirror_resource_to_primary(primary: str, candidates: Tuple[str, ...]) -> None:
+    if os.path.exists(primary):
+        return
+    source = None
+    for candidate in candidates:
+        if not candidate:
+            continue
+        if os.path.normcase(os.path.abspath(candidate)) == os.path.normcase(os.path.abspath(primary)):
+            continue
+        if os.path.exists(candidate):
+            source = candidate
+            break
+    if source is None:
+        return
+    directory = os.path.dirname(primary)
+    if directory and not _ensure_directory(directory):
+        return
+    try:
+        shutil.copy2(source, primary)
+    except Exception:
+        logger.debug("Failed to mirror %s to %s", source, primary, exc_info=True)
+
+
+@dataclass(frozen=True)
+class _ResolvedPathGroup:
+    primary: str
+    candidates: Tuple[str, ...]
+
+    def first_existing(self) -> Optional[str]:
+        return _any_existing_path(self.candidates)
+
+
+@functools.lru_cache(maxsize=None)
+def _resolve_writable_resource(
+    relative_path: str,
+    *,
+    fallback_name: Optional[str] = None,
+    is_dir: bool = False,
+    extra_candidates: Tuple[str, ...] = (),
+    ensure_primary_exists: bool = False,
+    copy_from_candidates: bool = True,
+    prefer_extra_candidates: bool = False,
+) -> _ResolvedPathGroup:
+    normalized_rel = str(relative_path).strip().replace("\\", "/")
+    locator = _get_resource_locator()
+    candidate_list: List[str] = []
+    seen: Set[str] = set()
+
+    def _append(path: Optional[str]) -> None:
+        if not path:
+            return
+        normalized = os.path.normpath(os.path.abspath(path))
+        marker = os.path.normcase(normalized)
+        if marker in seen:
+            return
+        seen.add(marker)
+        candidate_list.append(normalized)
+
+    locator_candidates = locator.candidates(normalized_rel)
+    if prefer_extra_candidates:
+        for extra in extra_candidates:
+            _append(extra)
+        for candidate in locator_candidates:
+            _append(candidate)
+    else:
+        for candidate in locator_candidates:
+            _append(candidate)
+        for extra in extra_candidates:
+            _append(extra)
+
+    if not candidate_list:
+        module_dir = os.path.dirname(os.path.abspath(__file__))
+        _append(os.path.join(module_dir, normalized_rel))
+
+    fallback = fallback_name or os.path.basename(normalized_rel) or normalized_rel.replace("/", "_")
+    primary = _choose_writable_target(tuple(candidate_list), is_dir=is_dir, fallback_name=fallback)
+    unique_candidates = (primary,) + tuple(
+        candidate for candidate in candidate_list if os.path.normcase(candidate) != os.path.normcase(primary)
+    )
+
+    if is_dir:
+        if ensure_primary_exists:
+            _ensure_directory(primary)
+    elif copy_from_candidates:
+        _mirror_resource_to_primary(primary, unique_candidates)
+
+    return _ResolvedPathGroup(primary=primary, candidates=unique_candidates)
+
+
+@dataclass(frozen=True)
+class _StudentResourcePaths:
+    plain: str
+    encrypted: str
+    plain_candidates: Tuple[str, ...]
+    encrypted_candidates: Tuple[str, ...]
+
+
+@functools.lru_cache(maxsize=1)
+def _resolve_student_resource_paths() -> _StudentResourcePaths:
+    legacy_plain = os.path.abspath("students.xlsx")
+    plain_group = _resolve_writable_resource(
+        "students.xlsx",
+        fallback_name="students.xlsx",
+        extra_candidates=(legacy_plain,),
+        is_dir=False,
+        copy_from_candidates=True,
+    )
+
+    preferred_encrypted = os.path.join(os.path.dirname(plain_group.primary), "students.xlsx.enc")
+    legacy_encrypted = os.path.abspath("students.xlsx.enc")
+    encrypted_group = _resolve_writable_resource(
+        "students.xlsx.enc",
+        fallback_name="students.xlsx.enc",
+        extra_candidates=(preferred_encrypted, legacy_encrypted),
+        is_dir=False,
+        copy_from_candidates=True,
+        prefer_extra_candidates=True,
+    )
+
+    return _StudentResourcePaths(
+        plain=plain_group.primary,
+        encrypted=encrypted_group.primary,
+        plain_candidates=plain_group.candidates,
+        encrypted_candidates=encrypted_group.candidates,
+    )
+
+
+_STUDENT_RESOURCES = _resolve_student_resource_paths()
+
+
+def _determine_student_photo_roots() -> Tuple[str, List[str]]:
+    """Select the most appropriate student photo root and provide the fallback list."""
+
+    group = _resolve_writable_resource(
+        "student_photos",
+        fallback_name="student_photos",
+        is_dir=True,
+        extra_candidates=(os.path.abspath("student_photos"),),
+        ensure_primary_exists=True,
+        copy_from_candidates=False,
+    )
+    return group.primary, list(group.candidates)
+
+
 def _user32_window_rect(hwnd: int) -> Optional[Tuple[int, int, int, int]]:
     if _USER32 is None or hwnd == 0:
         return None
@@ -1358,50 +1659,35 @@ class SettingsManager:
     def _get_config_dir(self) -> str:
         """返回当前系统下建议的配置目录。"""
 
-        home = os.path.expanduser("~")
-        if sys.platform.startswith("win"):
-            base = os.environ.get("APPDATA") or os.path.join(home, "AppData", "Roaming")
-            return os.path.join(base, "ClassroomTools")
-        if sys.platform == "darwin":
-            return os.path.join(home, "Library", "Application Support", "ClassroomTools")
-        base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
-        return os.path.join(base, "ClassroomTools")
+        return _preferred_app_directory()
 
     def _prepare_storage_path(self, filename: str) -> str:
         """根据平台选择合适的设置文件路径，并在需要时迁移旧文件。"""
 
         base_name = os.path.basename(filename) or "settings.ini"
         legacy_path = os.path.abspath(filename)
-        config_dir = self._get_config_dir()
-        try:
-            os.makedirs(config_dir, exist_ok=True)
-        except OSError:
-            config_dir = os.path.dirname(legacy_path) or os.getcwd()
-        target_path = os.path.join(config_dir, base_name)
+        resolved = _resolve_writable_resource(
+            base_name,
+            fallback_name=base_name,
+            extra_candidates=(legacy_path,),
+            is_dir=False,
+            copy_from_candidates=True,
+        )
 
-        if os.path.exists(legacy_path):
-            same_file = False
-            try:
-                same_file = os.path.samefile(legacy_path, target_path)
-            except (OSError, FileNotFoundError):
-                same_file = False
-            if not same_file and not os.path.exists(target_path):
-                try:
-                    shutil.copy2(legacy_path, target_path)
-                except Exception:
-                    target_path = legacy_path
-            if not same_file:
-                legacy_dir = os.path.dirname(legacy_path) or os.getcwd()
-                if os.access(legacy_dir, os.W_OK):
-                    self._mirror_targets.add(legacy_path)
+        for candidate in resolved.candidates[1:]:
+            if not os.path.exists(candidate):
+                continue
+            directory = os.path.dirname(candidate) or os.getcwd()
+            if os.access(directory, os.W_OK):
+                self._mirror_targets.add(candidate)
 
         try:
-            with open(target_path, "a", encoding="utf-8"):
+            with open(resolved.primary, "a", encoding="utf-8"):
                 pass
         except OSError:
-            target_path = legacy_path
+            return legacy_path
 
-        return target_path
+        return resolved.primary
 
     def get_defaults(self) -> Dict[str, Dict[str, str]]:
         return {section: values.copy() for section, values in self.defaults.items()}
@@ -1466,6 +1752,37 @@ class SettingsManager:
 
         self._settings_cache = {section: values.copy() for section, values in snapshot.items()}
 
+    def get_launcher_state(self) -> Tuple["LauncherSettings", "StartupSettings"]:
+        """Return launcher geometry and startup flags in a single pass."""
+
+        settings = self.load_settings()
+        launcher_defaults = self.defaults.get("Launcher", {})
+        startup_defaults = self.defaults.get("Startup", {})
+        launcher_section = settings.get("Launcher", {})
+        startup_section = settings.get("Startup", {})
+        launcher_settings = LauncherSettings.from_mapping(launcher_section, launcher_defaults)
+        startup_settings = StartupSettings.from_mapping(startup_section, startup_defaults)
+        return launcher_settings, startup_settings
+
+    def update_launcher_settings(
+        self,
+        launcher_settings: "LauncherSettings",
+        startup_settings: Optional["StartupSettings"] = None,
+    ) -> None:
+        """Persist the launcher configuration alongside optional startup flags."""
+
+        settings = self.load_settings()
+        launcher_section = dict(settings.get("Launcher", {}))
+        launcher_section.update(launcher_settings.to_mapping())
+        settings["Launcher"] = launcher_section
+
+        if startup_settings is not None:
+            startup_section = dict(settings.get("Startup", {}))
+            startup_section.update(startup_settings.to_mapping())
+            settings["Startup"] = startup_section
+
+        self.save_settings(settings)
+
     def clear_roll_call_history(self) -> None:
         """清除点名历史信息，仅在用户主动重置时调用。"""
 
@@ -1479,6 +1796,72 @@ class SettingsManager:
         if removed:
             settings["RollCallTimer"] = section
             self.save_settings(settings)
+
+
+@dataclass(frozen=True)
+class LauncherSettings:
+    position: QPoint
+    bubble_position: QPoint
+    minimized: bool
+
+    @staticmethod
+    def from_mapping(
+        mapping: Mapping[str, str],
+        defaults: Mapping[str, str],
+    ) -> "LauncherSettings":
+        def _to_int(key: str, fallback: int) -> int:
+            raw_value = mapping.get(key, defaults.get(key, str(fallback)))
+            try:
+                return int(str(raw_value))
+            except (TypeError, ValueError):
+                return fallback
+
+        def _int_from_defaults(key: str, fallback: int) -> int:
+            raw_default = defaults.get(key)
+            if raw_default is None:
+                return fallback
+            try:
+                return int(str(raw_default))
+            except (TypeError, ValueError):
+                return fallback
+
+        default_x = _int_from_defaults("x", 120)
+        default_y = _int_from_defaults("y", 120)
+        x = _to_int("x", default_x)
+        y = _to_int("y", default_y)
+        bubble_default_x = _int_from_defaults("bubble_x", x)
+        bubble_default_y = _int_from_defaults("bubble_y", y)
+        bubble_x = _to_int("bubble_x", bubble_default_x)
+        bubble_y = _to_int("bubble_y", bubble_default_y)
+        minimized_raw = mapping.get("minimized", defaults.get("minimized", "False"))
+        minimized = str_to_bool(str(minimized_raw), False)
+        return LauncherSettings(QPoint(x, y), QPoint(bubble_x, bubble_y), minimized)
+
+    def to_mapping(self) -> Dict[str, str]:
+        return {
+            "x": str(self.position.x()),
+            "y": str(self.position.y()),
+            "bubble_x": str(self.bubble_position.x()),
+            "bubble_y": str(self.bubble_position.y()),
+            "minimized": bool_to_str(self.minimized),
+        }
+
+
+@dataclass(frozen=True)
+class StartupSettings:
+    autostart_enabled: bool
+
+    @staticmethod
+    def from_mapping(
+        mapping: Mapping[str, str],
+        defaults: Mapping[str, str],
+    ) -> "StartupSettings":
+        raw_value = mapping.get("autostart_enabled", defaults.get("autostart_enabled", "False"))
+        enabled = str_to_bool(str(raw_value), False)
+        return StartupSettings(enabled)
+
+    def to_mapping(self) -> Dict[str, str]:
+        return {"autostart_enabled": bool_to_str(self.autostart_enabled)}
 
 
 # ---------- 画笔风格 ----------
@@ -9004,8 +9387,10 @@ class RollCallTimerWindow(QWidget):
     window_closed = pyqtSignal()
     visibility_changed = pyqtSignal(bool)
 
-    STUDENT_FILE = "students.xlsx"
-    ENCRYPTED_STUDENT_FILE = "students.xlsx.enc"
+    STUDENT_FILE = _STUDENT_RESOURCES.plain
+    STUDENT_FILE_CANDIDATES = _STUDENT_RESOURCES.plain_candidates
+    ENCRYPTED_STUDENT_FILE = _STUDENT_RESOURCES.encrypted
+    ENCRYPTED_STUDENT_FILE_CANDIDATES = _STUDENT_RESOURCES.encrypted_candidates
     MIN_FONT_SIZE = 5
     MAX_FONT_SIZE = 220
 
@@ -9051,8 +9436,8 @@ class RollCallTimerWindow(QWidget):
             elif self.student_data is not None:
                 base_empty = False
             if base_empty:
-                has_plain = os.path.exists(self.STUDENT_FILE)
-                has_encrypted = os.path.exists(self._encrypted_file_path)
+                has_plain = _any_existing_path(self.STUDENT_FILE_CANDIDATES) is not None
+                has_encrypted = _any_existing_path(self.ENCRYPTED_STUDENT_FILE_CANDIDATES) is not None
                 if has_plain or has_encrypted:
                     self._student_data_pending_load = True
                     if self.student_data is None and PANDAS_READY:
@@ -9092,7 +9477,7 @@ class RollCallTimerWindow(QWidget):
         if not (self.show_id or self.show_name):
             self.show_name = True
 
-        self.photo_root_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "student_photos")
+        self.photo_root_path, self._photo_search_roots = _determine_student_photo_roots()
         self._photo_extensions = [".png", ".jpg", ".jpeg", ".bmp", ".gif"]
         self._photo_overlay: Optional[StudentPhotoOverlay] = None
         self._last_photo_student_id: Optional[str] = None
@@ -9123,7 +9508,9 @@ class RollCallTimerWindow(QWidget):
         order_value = str(s.get("scoreboard_order", "rank")).strip().lower()
         self.scoreboard_order = order_value if order_value in {"rank", "id"} else "rank"
         saved_encrypted = str_to_bool(s.get("students_encrypted", bool_to_str(self._student_file_encrypted)), self._student_file_encrypted)
-        disk_encrypted = os.path.exists(self._encrypted_file_path) and not os.path.exists(self.STUDENT_FILE)
+        plain_exists = _any_existing_path(self.STUDENT_FILE_CANDIDATES) is not None
+        encrypted_exists = _any_existing_path(self.ENCRYPTED_STUDENT_FILE_CANDIDATES) is not None
+        disk_encrypted = encrypted_exists and not plain_exists
         if disk_encrypted:
             self._student_file_encrypted = True
         elif not saved_encrypted:
@@ -9378,10 +9765,12 @@ class RollCallTimerWindow(QWidget):
     def _update_encryption_button(self) -> None:
         if not hasattr(self, "encrypt_button"):
             return
-        disk_encrypted = os.path.exists(self._encrypted_file_path) and not os.path.exists(self.STUDENT_FILE)
+        plain_exists = _any_existing_path(self.STUDENT_FILE_CANDIDATES) is not None
+        encrypted_exists = _any_existing_path(self.ENCRYPTED_STUDENT_FILE_CANDIDATES) is not None
+        disk_encrypted = encrypted_exists and not plain_exists
         if disk_encrypted and not self._student_file_encrypted:
             self._student_file_encrypted = True
-        elif not disk_encrypted and self._student_file_encrypted and not os.path.exists(self._encrypted_file_path):
+        elif not disk_encrypted and self._student_file_encrypted and not encrypted_exists:
             self._student_file_encrypted = False
             self._student_password = None
         self.encrypt_button.setText("解密" if self._student_file_encrypted else "加密")
@@ -11214,34 +11603,48 @@ class RollCallTimerWindow(QWidget):
         class_name = self._sanitize_photo_segment(self._resolve_active_class_name())
         if not class_name:
             class_name = "default"
-        base_dir = os.path.join(self.photo_root_path, class_name)
-        try:
-            os.makedirs(base_dir, exist_ok=True)
-        except OSError:
-            logger.debug("Unable to ensure photo directory %s", base_dir, exc_info=True)
-        if not os.path.isdir(base_dir):
-            return None
-        for ext in self._photo_extensions:
-            candidate = os.path.join(base_dir, f"{student_id}{ext}")
-            if os.path.isfile(candidate):
-                return candidate
-            upper = os.path.join(base_dir, f"{student_id}{ext.upper()}")
-            if os.path.isfile(upper):
-                return upper
-        lower_id = student_id.lower()
-        try:
-            for entry in os.listdir(base_dir):
-                name, ext = os.path.splitext(entry)
-                if not ext:
-                    continue
-                if ext.lower() not in self._photo_extensions:
-                    continue
-                if name.lower() == lower_id:
-                    candidate = os.path.join(base_dir, entry)
-                    if os.path.isfile(candidate):
-                        return candidate
-        except OSError:
-            logger.debug("Failed to scan photo directory %s", base_dir, exc_info=True)
+        search_roots = list(getattr(self, "_photo_search_roots", []))
+        if not search_roots:
+            search_roots = [self.photo_root_path]
+        primary_root = os.path.normpath(self.photo_root_path)
+        visited: Set[str] = set()
+
+        for root in search_roots:
+            if not root:
+                continue
+            normalized_root = os.path.normpath(root)
+            if normalized_root in visited:
+                continue
+            visited.add(normalized_root)
+            base_dir = os.path.join(root, class_name)
+            if normalized_root == primary_root:
+                try:
+                    os.makedirs(base_dir, exist_ok=True)
+                except OSError:
+                    logger.debug("Unable to ensure photo directory %s", base_dir, exc_info=True)
+            if not os.path.isdir(base_dir):
+                continue
+            for ext in self._photo_extensions:
+                candidate = os.path.join(base_dir, f"{student_id}{ext}")
+                if os.path.isfile(candidate):
+                    return candidate
+                upper = os.path.join(base_dir, f"{student_id}{ext.upper()}")
+                if os.path.isfile(upper):
+                    return upper
+            lower_id = student_id.lower()
+            try:
+                for entry in os.listdir(base_dir):
+                    name, ext = os.path.splitext(entry)
+                    if not ext:
+                        continue
+                    if ext.lower() not in self._photo_extensions:
+                        continue
+                    if name.lower() == lower_id:
+                        candidate = os.path.join(base_dir, entry)
+                        if os.path.isfile(candidate):
+                            return candidate
+            except OSError:
+                logger.debug("Failed to scan photo directory %s", base_dir, exc_info=True)
         return None
 
     @staticmethod
@@ -11752,7 +12155,10 @@ class StudentWorkbook:
 
 def _write_student_workbook(file_path: str, data: Mapping[str, PandasDataFrame]) -> None:
     payload = _export_student_workbook_bytes(data)
-    tmp_dir = os.path.dirname(os.path.abspath(file_path)) or "."
+    target_dir = os.path.dirname(os.path.abspath(file_path))
+    if target_dir and not _ensure_directory(target_dir):
+        target_dir = os.getcwd()
+    tmp_dir = target_dir or "."
     fd, tmp_path = tempfile.mkstemp(suffix=".xlsx", dir=tmp_dir)
     try:
         with os.fdopen(fd, "wb") as tmp_file:
@@ -11766,7 +12172,10 @@ def _write_student_workbook(file_path: str, data: Mapping[str, PandasDataFrame])
 def _write_encrypted_student_workbook(file_path: str, data: Mapping[str, PandasDataFrame], password: str) -> None:
     payload = _export_student_workbook_bytes(data)
     encrypted = _encrypt_student_bytes(password, payload)
-    tmp_dir = os.path.dirname(os.path.abspath(file_path)) or "."
+    target_dir = os.path.dirname(os.path.abspath(file_path))
+    if target_dir and not _ensure_directory(target_dir):
+        target_dir = os.getcwd()
+    tmp_dir = target_dir or "."
     fd, tmp_path = tempfile.mkstemp(suffix=".enc", dir=tmp_dir)
     try:
         with os.fdopen(fd, "wb") as tmp_file:
@@ -11832,11 +12241,14 @@ def load_student_data(parent: Optional[QWidget]) -> Optional[StudentWorkbook]:
         QMessageBox.warning(parent, "提示", "未安装 pandas/openpyxl，点名功能不可用。")
         return None
 
-    file_path = RollCallTimerWindow.STUDENT_FILE
-    encrypted_path = getattr(RollCallTimerWindow, "ENCRYPTED_STUDENT_FILE", file_path + ".enc")
+    resources = _STUDENT_RESOURCES
+    file_path = resources.plain
+    existing_plain = _any_existing_path(resources.plain_candidates)
+    existing_encrypted = _any_existing_path(resources.encrypted_candidates)
 
-    if not os.path.exists(file_path) and os.path.exists(encrypted_path):
+    if existing_plain is None and existing_encrypted is not None:
         attempts = 0
+        encrypted_source = existing_encrypted
         while attempts < 3:
             password, ok = PasswordPromptDialog.get_password(
                 parent,
@@ -11853,13 +12265,17 @@ def load_student_data(parent: Optional[QWidget]) -> Optional[StudentWorkbook]:
                 attempts += 1
                 continue
             try:
-                with open(encrypted_path, "rb") as fh:
+                with open(encrypted_source, "rb") as fh:
                     payload = fh.read()
                 plain_bytes = _decrypt_student_bytes(password, payload)
                 buffer = io.BytesIO(plain_bytes)
                 raw_data = pd.read_excel(buffer, sheet_name=None)
                 workbook = StudentWorkbook(OrderedDict(raw_data), active_class="")
                 _set_session_student_encryption(True, password)
+                try:
+                    _write_student_workbook(file_path, workbook.as_dict())
+                except Exception:
+                    logger.debug("Failed to persist decrypted workbook to %s", file_path, exc_info=True)
                 return workbook
             except Exception as exc:
                 attempts += 1
@@ -11867,7 +12283,7 @@ def load_student_data(parent: Optional[QWidget]) -> Optional[StudentWorkbook]:
         QMessageBox.critical(parent, "错误", "多次输入密码失败，无法加载学生名单。")
         return None
 
-    if not os.path.exists(file_path):
+    if existing_plain is None:
         try:
             template = pd.DataFrame(
                 {"学号": [101, 102, 103], "姓名": ["张三", "李四", "王五"], "分组": ["A", "B", "A"], "成绩": [0, 0, 0]}
@@ -11876,16 +12292,18 @@ def load_student_data(parent: Optional[QWidget]) -> Optional[StudentWorkbook]:
             _write_student_workbook(file_path, workbook.as_dict())
             show_quiet_information(parent, f"未找到学生名单，已为您创建模板文件：{file_path}")
             _set_session_student_encryption(False, None)
+            existing_plain = file_path
         except Exception as exc:
             QMessageBox.critical(parent, "错误", f"创建模板文件失败：{exc}")
             return None
 
     try:
-        raw_data = pd.read_excel(file_path, sheet_name=None)
+        read_path = existing_plain if existing_plain and os.path.exists(existing_plain) else file_path
+        raw_data = pd.read_excel(read_path, sheet_name=None)
         workbook = StudentWorkbook(OrderedDict(raw_data), active_class="")
         _write_student_workbook(file_path, workbook.as_dict())
         _set_session_student_encryption(False, None)
-        if os.path.exists(encrypted_path):
+        if _any_existing_path(resources.encrypted_candidates):
             show_quiet_information(parent, "检测到同时存在加密文件，将优先使用明文 students.xlsx。")
         return workbook
     except Exception as exc:
@@ -12009,9 +12427,21 @@ class LauncherBubble(QWidget):
 
 class LauncherWindow(QWidget):
     def __init__(self, settings_manager: SettingsManager, student_workbook: Optional[StudentWorkbook]) -> None:
-        super().__init__(None, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
+        super().__init__(
+            None,
+            Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint,
+        )
         self.settings_manager = settings_manager
-        self.student_workbook: Optional[StudentWorkbook] = student_workbook
+        self._init_state(student_workbook)
+        self._configure_window()
+        container = self._build_ui()
+        self._apply_button_metrics()
+        self._finalize_drag_regions(container)
+        self._apply_saved_state()
+        self._enforce_feature_availability()
+
+    def _init_state(self, student_workbook: Optional[StudentWorkbook]) -> None:
+        self.student_workbook = student_workbook
         self.student_data: Optional[PandasDataFrame] = None
         if PANDAS_READY and student_workbook is not None:
             try:
@@ -12020,13 +12450,15 @@ class LauncherWindow(QWidget):
                 self.student_data = pd.DataFrame(columns=["学号", "姓名", "分组", "成绩"])
         self.overlay: Optional[OverlayWindow] = None
         self.roll_call_window: Optional[RollCallTimerWindow] = None
-        self._dragging = False; self._drag_offset = QPoint()
+        self._dragging = False
+        self._drag_offset = QPoint()
         self.bubble: Optional[LauncherBubble] = None
         self._last_position = QPoint()
         self._bubble_position = QPoint()
         self._minimized = False
         self._minimized_on_start = False
 
+    def _configure_window(self) -> None:
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet(
             """
@@ -12065,88 +12497,147 @@ class LauncherWindow(QWidget):
             }
             """
         )
-        container = QWidget(self); container.setObjectName("launcherContainer")
-        layout = QVBoxLayout(self); layout.setContentsMargins(0, 0, 0, 0); layout.addWidget(container)
-        v = QVBoxLayout(container); v.setContentsMargins(8, 8, 8, 8); v.setSpacing(5)
 
-        # 通过三段可伸缩空白保证“画笔”“点名/计时”两侧及中间留白一致
-        row = QGridLayout(); row.setContentsMargins(0, 0, 0, 0); row.setHorizontalSpacing(0)
-        for col in (0, 2, 4):
-            row.setColumnMinimumWidth(col, 12)
-            row.setColumnStretch(col, 1)
+    def _build_ui(self) -> QWidget:
+        container = QWidget(self)
+        container.setObjectName("launcherContainer")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(container)
+
+        container_layout = QVBoxLayout(container)
+        container_layout.setContentsMargins(8, 8, 8, 8)
+        container_layout.setSpacing(5)
+
+        action_row = QGridLayout()
+        action_row.setContentsMargins(0, 0, 0, 0)
+        action_row.setHorizontalSpacing(0)
+        for column in (0, 2, 4):
+            action_row.setColumnMinimumWidth(column, 12)
+            action_row.setColumnStretch(column, 1)
+
         self.paint_button = QPushButton("画笔")
         self.paint_button.clicked.connect(self.toggle_paint)
-        row.addItem(QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum), 0, 0)
-        row.addWidget(self.paint_button, 0, 1)
-        row.addItem(QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum), 0, 2)
+        action_row.addItem(
+            QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum),
+            0,
+            0,
+        )
+        action_row.addWidget(self.paint_button, 0, 1)
+        action_row.addItem(
+            QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum),
+            0,
+            2,
+        )
+
         self.roll_call_button = QPushButton("点名/计时")
         self.roll_call_button.clicked.connect(self.toggle_roll_call)
-        row.addWidget(self.roll_call_button, 0, 3)
-        row.addItem(QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum), 0, 4)
+        action_row.addWidget(self.roll_call_button, 0, 3)
+        action_row.addItem(
+            QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum),
+            0,
+            4,
+        )
+
+        container_layout.addLayout(action_row)
+
+        bottom_row = QHBoxLayout()
+        bottom_row.setSpacing(3)
+
+        self.minimize_button = QPushButton("缩小")
+        self.minimize_button.clicked.connect(self.minimize_launcher)
+        bottom_row.addWidget(self.minimize_button)
+
+        self.autostart_check = QCheckBox("开机启动")
+        self.autostart_check.stateChanged.connect(self.toggle_autostart)
+        bottom_row.addWidget(self.autostart_check)
+
+        bottom_row.addStretch(1)
+
+        self.about_button = QPushButton("关于")
+        self.about_button.clicked.connect(self.show_about)
+        bottom_row.addWidget(self.about_button)
+
+        self.exit_button = QPushButton("退出")
+        self.exit_button.clicked.connect(self.request_exit)
+        bottom_row.addWidget(self.exit_button)
+
+        container_layout.addLayout(bottom_row)
+
+        return container
+
+    def _apply_button_metrics(self) -> None:
         unified_width = self._action_button_width()
         self.paint_button.setFixedWidth(unified_width)
         self.roll_call_button.setFixedWidth(unified_width)
-        v.addLayout(row)
 
-        bottom = QHBoxLayout(); bottom.setSpacing(3)
-        self.minimize_button = QPushButton("缩小"); self.minimize_button.clicked.connect(self.minimize_launcher)
-        bottom.addWidget(self.minimize_button)
+        auxiliary_width = max(self.minimize_button.sizeHint().width(), 52)
+        self.minimize_button.setFixedWidth(auxiliary_width)
 
-        self.autostart_check = QCheckBox("开机启动"); self.autostart_check.stateChanged.connect(self.toggle_autostart); bottom.addWidget(self.autostart_check)
-        bottom.addStretch(1)
-
-        self.about_button = QPushButton("关于"); self.about_button.clicked.connect(self.show_about); bottom.addWidget(self.about_button)
-        self.exit_button = QPushButton("退出")
-        self.exit_button.clicked.connect(self.request_exit)
-        bottom.addWidget(self.exit_button)
-        v.addLayout(bottom)
-
-        aux_width = max(self.minimize_button.sizeHint().width(), 52)
-        self.minimize_button.setFixedWidth(aux_width)
         about_width = max(self.about_button.sizeHint().width(), 52)
-        exit_width = max(self.exit_button.sizeHint().width(), 52)
         self.about_button.setFixedWidth(about_width)
+
+        exit_width = max(self.exit_button.sizeHint().width(), 52)
         self.exit_button.setFixedWidth(exit_width)
 
-        button_height = max(
+        button_heights = [
             self.paint_button.sizeHint().height(),
             self.roll_call_button.sizeHint().height(),
             self.minimize_button.sizeHint().height(),
             self.about_button.sizeHint().height(),
             self.exit_button.sizeHint().height(),
-        )
-        for btn in (self.paint_button, self.roll_call_button, self.minimize_button, self.about_button, self.exit_button):
-            btn.setFixedHeight(button_height)
+        ]
+        target_height = max(button_heights)
+        for button in (
+            self.paint_button,
+            self.roll_call_button,
+            self.minimize_button,
+            self.about_button,
+            self.exit_button,
+        ):
+            button.setFixedHeight(target_height)
 
-        s = self.settings_manager.load_settings().get("Launcher", {})
-        x = int(s.get("x", "120")); y = int(s.get("y", "120"))
-        self.move(x, y)
-        self._last_position = QPoint(x, y)
-        bubble_x = int(s.get("bubble_x", str(x)))
-        bubble_y = int(s.get("bubble_y", str(y)))
-        self._bubble_position = QPoint(bubble_x, bubble_y)
-        minimized = str_to_bool(s.get("minimized", "False"), False)
-        self._minimized = minimized
-        self._minimized_on_start = minimized
+    def _finalize_drag_regions(self, container: QWidget) -> None:
+        for widget in (
+            self,
+            container,
+            self.paint_button,
+            self.roll_call_button,
+            self.minimize_button,
+            self.autostart_check,
+        ):
+            widget.installEventFilter(self)
 
-        startup = self.settings_manager.load_settings().get("Startup", {})
-        autostart_enabled = str_to_bool(startup.get("autostart_enabled", "False"), False)
-        self.autostart_check.setChecked(autostart_enabled and WINREG_AVAILABLE)
-        self.autostart_check.setEnabled(WINREG_AVAILABLE)
-
-        if not (PANDAS_AVAILABLE and OPENPYXL_AVAILABLE):
-            self.roll_call_button.setEnabled(False)
-
-        for w in (self, container, self.paint_button, self.roll_call_button, self.minimize_button, self.autostart_check):
-            w.installEventFilter(self)
-
-        # 锁定启动器的推荐尺寸，避免误拖拽造成遮挡
         self.adjustSize()
         self.setFixedSize(self.sizeHint())
         self._base_minimum_width = self.minimumWidth()
         self._base_minimum_height = self.minimumHeight()
         self._ensure_min_width = self.width()
         self._ensure_min_height = self.height()
+
+    def _apply_saved_state(self) -> None:
+        launcher_settings, startup_settings = self.settings_manager.get_launcher_state()
+
+        position = QPoint(launcher_settings.position)
+        self.move(position)
+        self._last_position = QPoint(position)
+
+        bubble_position = QPoint(launcher_settings.bubble_position)
+        if bubble_position.isNull():
+            bubble_position = QPoint(position)
+        self._bubble_position = bubble_position
+
+        self._minimized = launcher_settings.minimized
+        self._minimized_on_start = launcher_settings.minimized
+
+        autostart_enabled = startup_settings.autostart_enabled and WINREG_AVAILABLE
+        self.autostart_check.setChecked(autostart_enabled)
+        self.autostart_check.setEnabled(WINREG_AVAILABLE)
+
+    def _enforce_feature_availability(self) -> None:
+        if not (PANDAS_AVAILABLE and OPENPYXL_AVAILABLE):
+            self.roll_call_button.setEnabled(False)
 
     def _action_button_width(self) -> int:
         """计算“画笔”与“点名/计时”按钮的统一宽度，保证观感一致。"""
@@ -12180,18 +12671,20 @@ class LauncherWindow(QWidget):
         return super().eventFilter(obj, e)
 
     def save_position(self) -> None:
-        settings = self.settings_manager.load_settings()
-        pos = self._last_position if (self._minimized and not self._last_position.isNull()) else self.pos()
-        launcher = settings.get("Launcher", {})
-        launcher["x"] = str(pos.x())
-        launcher["y"] = str(pos.y())
-        bubble_pos = self._bubble_position if not self._bubble_position.isNull() else pos
-        launcher["bubble_x"] = str(bubble_pos.x())
-        launcher["bubble_y"] = str(bubble_pos.y())
-        launcher["minimized"] = bool_to_str(self._minimized)
-        settings["Launcher"] = launcher
-        startup = settings.get("Startup", {}); startup["autostart_enabled"] = bool_to_str(self.autostart_check.isChecked()); settings["Startup"] = startup
-        self.settings_manager.save_settings(settings)
+        anchor_position = (
+            self._last_position if (self._minimized and not self._last_position.isNull()) else self.pos()
+        )
+        position = QPoint(anchor_position)
+        bubble_source = self._bubble_position if not self._bubble_position.isNull() else position
+        bubble_position = QPoint(bubble_source)
+
+        launcher_settings = LauncherSettings(
+            position=position,
+            bubble_position=bubble_position,
+            minimized=self._minimized,
+        )
+        startup_settings = StartupSettings(autostart_enabled=self.autostart_check.isChecked())
+        self.settings_manager.update_launcher_settings(launcher_settings, startup_settings)
 
     def toggle_paint(self) -> None:
         """打开或隐藏屏幕画笔覆盖层。"""
@@ -12402,6 +12895,25 @@ class LauncherWindow(QWidget):
         super().closeEvent(e)
 
 
+@dataclass
+class ApplicationContext:
+    settings_manager: SettingsManager
+    student_workbook: Optional[StudentWorkbook]
+
+    @classmethod
+    def create(cls) -> "ApplicationContext":
+        settings_manager = SettingsManager()
+        workbook: Optional[StudentWorkbook] = None
+        encrypted_path = getattr(RollCallTimerWindow, "ENCRYPTED_STUDENT_FILE", "")
+        encrypted_exists = bool(encrypted_path and os.path.exists(encrypted_path))
+        if PANDAS_AVAILABLE and not encrypted_exists:
+            workbook = load_student_data(None)
+        return cls(settings_manager=settings_manager, student_workbook=workbook)
+
+    def create_launcher_window(self) -> LauncherWindow:
+        return LauncherWindow(self.settings_manager, self.student_workbook)
+
+
 # ---------- 入口 ----------
 def main() -> None:
     """应用程序入口：初始化 DPI、加载设置并启动启动器窗口。"""
@@ -12410,12 +12922,8 @@ def main() -> None:
     app.setQuitOnLastWindowClosed(False)
     QToolTip.setFont(QFont("Microsoft YaHei UI", 9))
 
-    settings_manager = SettingsManager()
-    student_workbook = load_student_data(None) if PANDAS_AVAILABLE and not os.path.exists(
-        RollCallTimerWindow.ENCRYPTED_STUDENT_FILE
-    ) else None
-
-    window = LauncherWindow(settings_manager, student_workbook)
+    context = ApplicationContext.create()
+    window = context.create_launcher_window()
     app.aboutToQuit.connect(window.handle_about_to_quit)
     window.show()
     sys.exit(app.exec())
