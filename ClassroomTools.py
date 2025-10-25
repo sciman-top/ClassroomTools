@@ -186,6 +186,44 @@ def parse_bool(value: Any, default: bool = False) -> bool:
     return bool(result)
 
 
+def _compute_presentation_category(
+    class_name: str,
+    top_class: str,
+    process_name: str,
+    *,
+    has_wps_presentation_signature: Callable[[str], bool],
+    is_wps_slideshow_class: Callable[[str], bool],
+    has_wps_writer_signature: Callable[[str], bool],
+    is_word_like_class: Callable[[str], bool],
+    has_ms_presentation_signature: Callable[[str], bool],
+    is_wps_presentation_process: Callable[[str, str, str], bool],
+    is_wps_writer_process: Callable[[str, str, str], bool],
+) -> str:
+    lowered_process = process_name.strip().lower() if process_name else ""
+    if lowered_process:
+        if is_wps_presentation_process(process_name, class_name, top_class):
+            return "wps_ppt"
+        if is_wps_writer_process(process_name, class_name, top_class):
+            return "wps_word"
+        if "powerpnt" in lowered_process:
+            return "ms_ppt"
+        if "winword" in lowered_process:
+            return "ms_word"
+    if has_wps_presentation_signature(class_name) or has_wps_presentation_signature(top_class):
+        return "wps_ppt"
+    if is_wps_slideshow_class(class_name) or is_wps_slideshow_class(top_class):
+        return "wps_ppt"
+    if has_wps_writer_signature(class_name) or has_wps_writer_signature(top_class):
+        return "wps_word"
+    if is_word_like_class(class_name) or is_word_like_class(top_class):
+        return "ms_word"
+    if has_ms_presentation_signature(class_name) or has_ms_presentation_signature(top_class):
+        return "ms_ppt"
+    if lowered_process and ("ppt" in lowered_process or "powerpoint" in lowered_process):
+        return "ms_ppt"
+    return "other"
+
+
 def _preferred_app_directory() -> str:
     """Return the user-specific data directory without creating it."""
 
@@ -2758,7 +2796,6 @@ class PenSettingsDialog(QDialog):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
 
-        disabled_control_keys = {"ms_word", "wps_word"}
         control_defaults = {
             "ms_ppt": True,
             "ms_word": False,
@@ -2771,8 +2808,6 @@ class PenSettingsDialog(QDialog):
                     control_defaults[key] = parse_bool(
                         initial_control_flags[key], control_defaults[key]
                     )
-        for key in disabled_control_keys:
-            control_defaults[key] = False
         self._control_checkboxes: Dict[str, QCheckBox] = {}
 
         style_layout = QHBoxLayout()
@@ -2870,10 +2905,9 @@ class PenSettingsDialog(QDialog):
         ]
         for index, (key, text) in enumerate(control_items):
             checkbox = QCheckBox(text, self)
+            prev_block = checkbox.blockSignals(True)
             checkbox.setChecked(control_defaults.get(key, True))
-            if key in disabled_control_keys:
-                checkbox.setChecked(False)
-                checkbox.setEnabled(False)
+            checkbox.blockSignals(prev_block)
             checkbox.setToolTip("关闭后将不会向对应应用发送翻页或滚动指令。")
             self._control_checkboxes[key] = checkbox
             control_grid.addWidget(checkbox, index // 2, index % 2)
@@ -6194,27 +6228,19 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         class_name = self._presentation_window_class(hwnd)
         top_hwnd = _user32_top_level_hwnd(hwnd)
         top_class = self._presentation_window_class(top_hwnd) if top_hwnd else ""
-        if self._class_has_wps_presentation_signature(class_name) or self._class_has_wps_presentation_signature(top_class):
-            return "wps_ppt"
-        if self._class_has_wps_writer_signature(class_name) or self._class_has_wps_writer_signature(top_class):
-            return "wps_word"
-        if self._is_wps_slideshow_class(class_name) or self._is_wps_slideshow_class(top_class):
-            return "wps_ppt"
-        if self._is_word_like_class(class_name) or self._is_word_like_class(top_class):
-            return "ms_word"
         process_name = self._window_process_name(top_hwnd or hwnd)
-        if process_name:
-            if self._is_wps_presentation_process(process_name, class_name, top_class):
-                return "wps_ppt"
-            if self._is_wps_writer_process(process_name, class_name, top_class):
-                return "wps_word"
-            if "powerpnt" in process_name:
-                return "ms_ppt"
-            if "winword" in process_name:
-                return "ms_word"
-        if self._class_has_ms_presentation_signature(class_name) or self._class_has_ms_presentation_signature(top_class):
-            return "ms_ppt"
-        return "other"
+        return _compute_presentation_category(
+            class_name or "",
+            top_class or "",
+            process_name or "",
+            has_wps_presentation_signature=self._class_has_wps_presentation_signature,
+            is_wps_slideshow_class=self._is_wps_slideshow_class,
+            has_wps_writer_signature=self._class_has_wps_writer_signature,
+            is_word_like_class=self._is_word_like_class,
+            has_ms_presentation_signature=self._class_has_ms_presentation_signature,
+            is_wps_presentation_process=self._is_wps_presentation_process,
+            is_wps_writer_process=self._is_wps_writer_process,
+        )
 
     def _is_presentation_category_allowed(self, category: str) -> bool:
         if not category or category == "other":
@@ -8004,19 +8030,18 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         }
         resolved: Dict[str, bool] = {}
         source = flags or {}
+        source_mapping: Mapping[str, Any] = source if isinstance(source, Mapping) else {}
         for key, default in defaults.items():
             raw = None
-            if isinstance(source, Mapping):
-                raw = source.get(key)
-                if raw is None:
-                    raw = source.get(f"control_{key}")
+            raw = source_mapping.get(key)
+            if raw is None:
+                raw = source_mapping.get(f"control_{key}")
             resolved[key] = parse_bool(raw, default)
-        for key in ("ms_word", "wps_word"):
-            resolved[key] = False
         previous = getattr(self, "_presentation_control_flags", None)
         previous_flags: Mapping[str, Any] = previous or {}
-        changed = previous != resolved
-        self._presentation_control_flags = resolved
+        previous_mapping = dict(previous_flags)
+        changed = previous_mapping != resolved
+        self._presentation_control_flags = dict(resolved)
         self.control_ms_ppt = resolved["ms_ppt"]
         self.control_ms_word = resolved["ms_word"]
         self.control_wps_ppt = resolved["wps_ppt"]

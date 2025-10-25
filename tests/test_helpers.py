@@ -12,7 +12,7 @@ import tempfile
 import types
 from functools import singledispatch
 from pathlib import Path
-from typing import Iterable, List, Optional, Set, Tuple
+from typing import Iterable, List, Mapping, Optional, Set, Tuple
 
 
 def _load_helper_module() -> types.ModuleType:
@@ -37,9 +37,12 @@ def _load_helper_module() -> types.ModuleType:
             "List": List,
             "Iterable": Iterable,
             "Set": Set,
+            "Mapping": Mapping,
             "Enum": enum.Enum,
             "math": math,
             "singledispatch": singledispatch,
+            "win32gui": None,
+            "_user32_top_level_hwnd": lambda hwnd: 0,
         }
     )
     sys.modules[module.__name__] = module
@@ -55,6 +58,8 @@ def _load_helper_module() -> types.ModuleType:
         "_preferred_app_directory",
         "_choose_writable_target",
         "str_to_bool",
+        "_compute_presentation_category",
+        "_PresentationWindowMixin",
     }
     def _should_include_function(node: ast.FunctionDef) -> bool:
         if node.name in targets:
@@ -161,3 +166,119 @@ def test_choose_writable_target_falls_back_when_parent_is_file(tmp_path: Path) -
     )
     assert Path(result).name == "students.xlsx"
     assert Path(result).parent != blocker
+
+
+_WPS_WRITER_CLASSES = {
+    "kwpsframeclass",
+    "kwpsmainframe",
+    "wpsframeclass",
+    "wpsmainframe",
+    "kwpsdocview",
+    "wpsdocview",
+}
+
+
+def _stub_has_wps_presentation_signature(name: str) -> bool:
+    if not name:
+        return False
+    lowered = name.lower()
+    if lowered.startswith("kwpp") or "kwpp" in lowered:
+        return True
+    if lowered.startswith("wpsshow") or "wpsshow" in lowered:
+        return True
+    return False
+
+
+def _stub_is_wps_slideshow_class(name: str) -> bool:
+    lowered = name.lower()
+    return lowered in {
+        "kwppshowframeclass",
+        "kwppshowframe",
+        "kwppshowwndclass",
+        "kwpsshowframe",
+        "wpsshowframe",
+    }
+
+
+def _stub_has_wps_writer_signature(name: str) -> bool:
+    return name.lower() in _WPS_WRITER_CLASSES
+
+
+def _stub_is_word_like_class(name: str) -> bool:
+    lowered = name.lower()
+    if lowered in _WPS_WRITER_CLASSES:
+        return True
+    return lowered in {
+        "opusapp",
+        "nuidocumentwindow",
+        "netuihwnd",
+        "documentwindow",
+        "mdiclient",
+        "paneclassdc",
+        "worddocument",
+        "_wwg",
+        "_wwb",
+    }
+
+
+def _stub_has_ms_presentation_signature(name: str) -> bool:
+    lowered = name.lower()
+    if lowered in {"screenclass", "pptviewwndclass", "pptframeclass"}:
+        return True
+    return "ppt" in lowered
+
+
+def _stub_is_wps_presentation_process(process_name: str, *classes: str) -> bool:
+    lowered = process_name.strip().lower()
+    if not lowered:
+        return False
+    if lowered.startswith(("wpp", "wppt")):
+        return True
+    if "wpspresentation" in lowered:
+        return True
+    if lowered.startswith("wps"):
+        return any(_stub_has_wps_presentation_signature(cls) for cls in classes if cls)
+    return False
+
+
+def _stub_is_wps_writer_process(process_name: str, *classes: str) -> bool:
+    lowered = process_name.strip().lower()
+    if not lowered:
+        return False
+    if _stub_is_wps_presentation_process(process_name, *classes):
+        return False
+    if any(_stub_has_wps_writer_signature(cls) for cls in classes if cls):
+        return True
+    if lowered.startswith("wps"):
+        return True
+    return "wpswriter" in lowered
+
+
+def _compute_category(class_name: str, top_class: str, process_name: str) -> str:
+    return helpers._compute_presentation_category(  # type: ignore[attr-defined]
+        class_name,
+        top_class,
+        process_name,
+        has_wps_presentation_signature=_stub_has_wps_presentation_signature,
+        is_wps_slideshow_class=_stub_is_wps_slideshow_class,
+        has_wps_writer_signature=_stub_has_wps_writer_signature,
+        is_word_like_class=_stub_is_word_like_class,
+        has_ms_presentation_signature=_stub_has_ms_presentation_signature,
+        is_wps_presentation_process=_stub_is_wps_presentation_process,
+        is_wps_writer_process=_stub_is_wps_writer_process,
+    )
+
+
+def test_presentation_category_prefers_wps_slideshow() -> None:
+    assert (
+        _compute_category("screenclass", "kwpsframeclass", "wppt.exe")
+        == "wps_ppt"
+    )
+
+
+def test_presentation_category_identifies_wps_writer() -> None:
+    assert _compute_category("kwpsframeclass", "", "wps.exe") == "wps_word"
+
+
+def test_presentation_category_detects_ms_powerpoint() -> None:
+    assert _compute_category("screenclass", "", "powerpnt.exe") == "ms_ppt"
