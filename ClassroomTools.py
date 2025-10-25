@@ -3864,19 +3864,64 @@ class _PresentationWindowMixin:
         if not classes:
             return self._WPSProcessHints(classes, False, False, False, False)
 
-        def _matches(predicate: Callable[[str], bool]) -> bool:
-            return any(predicate(cls) for cls in classes)
+        slideshow_predicate = self._is_wps_slideshow_class
+        wps_presentation_predicate = self._class_has_wps_presentation_signature
+        ms_presentation_predicate = self._class_has_ms_presentation_signature
+        writer_predicate = self._class_has_wps_writer_signature
+
+        has_slideshow = False
+        has_wps_presentation_signature = False
+        has_ms_presentation_signature = False
+        has_writer_signature = False
+
+        def _safe_call(
+            predicate: Callable[[str], bool],
+            class_name: str,
+        ) -> bool:
+            try:
+                return bool(predicate(class_name))
+            except Exception:
+                logger_ref = globals().get("logger")
+                if logger_ref is None:  # pragma: no cover - fallback for helper extraction
+                    logging_module = globals().get("logging")
+                    if logging_module is None:
+                        import logging as logging_module  # type: ignore[import-not-found]
+                    logger_ref = logging_module.getLogger(__name__)
+                logger_ref.debug(
+                    "WPS process hint predicate failed",  # pragma: no cover - debug logging
+                    exc_info=True,
+                )
+                return False
+
+        for class_name in classes:
+            if not has_slideshow and _safe_call(slideshow_predicate, class_name):
+                has_slideshow = True
+            if not has_wps_presentation_signature and _safe_call(
+                wps_presentation_predicate, class_name
+            ):
+                has_wps_presentation_signature = True
+            if not has_ms_presentation_signature and _safe_call(
+                ms_presentation_predicate, class_name
+            ):
+                has_ms_presentation_signature = True
+            if not has_writer_signature and _safe_call(
+                writer_predicate, class_name
+            ):
+                has_writer_signature = True
+            if (
+                has_slideshow
+                and has_wps_presentation_signature
+                and has_ms_presentation_signature
+                and has_writer_signature
+            ):
+                break
 
         return self._WPSProcessHints(
             classes=classes,
-            has_slideshow=_matches(self._is_wps_slideshow_class),
-            has_wps_presentation_signature=_matches(
-                self._class_has_wps_presentation_signature
-            ),
-            has_ms_presentation_signature=_matches(
-                self._class_has_ms_presentation_signature
-            ),
-            has_writer_signature=_matches(self._class_has_wps_writer_signature),
+            has_slideshow=has_slideshow,
+            has_wps_presentation_signature=has_wps_presentation_signature,
+            has_ms_presentation_signature=has_ms_presentation_signature,
+            has_writer_signature=has_writer_signature,
         )
 
     def _classify_wps_process(
@@ -4002,14 +4047,27 @@ class _PresentationWindowMixin:
         normalized_classes = self._normalized_class_hints(*classes)
         return normalized_name, normalized_classes
 
-    def _classify_wps_process(
-        self, process_name: Any, *classes: Any
-    ) -> Literal["presentation", "writer", "other"]:
-        name, normalized_classes = self._normalized_process_context(process_name, classes)
-        if not name:
-            return "other"
-        if name.startswith(("wpp", "wppt")) or "wpspresentation" in name:
-            return "presentation"
+    def _summarize_wps_process_hints(
+        self, normalized_classes: Iterable[str]
+    ) -> "_PresentationWindowMixin._WPSProcessHints":
+        classes = tuple(normalized_classes)
+        if not classes:
+            return self._WPSProcessHints(classes, False, False, False, False)
+
+        def _matches(predicate: Callable[[str], bool]) -> bool:
+            return any(predicate(cls) for cls in classes)
+
+        return self._WPSProcessHints(
+            classes=classes,
+            has_slideshow=_matches(self._is_wps_slideshow_class),
+            has_wps_presentation_signature=_matches(
+                self._class_has_wps_presentation_signature
+            ),
+            has_ms_presentation_signature=_matches(
+                self._class_has_ms_presentation_signature
+            ),
+            has_writer_signature=_matches(self._class_has_wps_writer_signature),
+        )
 
     def _toolbar_widget(self) -> Optional[QWidget]:
         return self._overlay_child_widget("toolbar")

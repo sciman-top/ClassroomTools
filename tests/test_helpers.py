@@ -362,3 +362,18 @@ def test_summarize_wps_process_hints_collects_flags() -> None:
     assert hints.has_wps_presentation_signature is True
     assert hints.has_ms_presentation_signature is True
     assert hints.has_writer_signature is True
+
+
+def test_summarize_wps_process_hints_ignores_predicate_errors() -> None:
+    class _FlakyHarness(_MixinHarness):
+        def _class_has_wps_presentation_signature(self, class_name: str) -> bool:
+            if "boom" in class_name:
+                raise RuntimeError("predicate failure")
+            return super()._class_has_wps_presentation_signature(class_name)
+
+    harness = _FlakyHarness()
+    normalized = harness._normalized_class_hints("BoomWindow", "kwpsframeclass")
+    hints = harness._summarize_wps_process_hints(normalized)
+    assert hints.classes == normalized
+    assert hints.has_wps_presentation_signature is False
+    assert hints.has_writer_signature is True
