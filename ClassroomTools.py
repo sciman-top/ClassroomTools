@@ -3882,15 +3882,18 @@ class _PresentationWindowMixin:
                 return bool(predicate(class_name))
             except Exception:
                 logger_ref = globals().get("logger")
-                if logger_ref is None:  # pragma: no cover - fallback for helper extraction
+                debug = getattr(logger_ref, "debug", None)
+                if not callable(debug):
                     logging_module = globals().get("logging")
-                    if logging_module is None:
+                    if logging_module is None:  # pragma: no cover - helper extraction fallback
                         import logging as logging_module  # type: ignore[import-not-found]
                     logger_ref = logging_module.getLogger(__name__)
-                logger_ref.debug(
-                    "WPS process hint predicate failed",  # pragma: no cover - debug logging
-                    exc_info=True,
-                )
+                    debug = getattr(logger_ref, "debug", None)
+                if callable(debug):
+                    debug(
+                        "WPS process hint predicate failed",  # pragma: no cover - debug logging
+                        exc_info=True,
+                    )
                 return False
 
         for class_name in classes:
@@ -4054,20 +4057,34 @@ class _PresentationWindowMixin:
         if not classes:
             return self._WPSProcessHints(classes, False, False, False, False)
 
-        def _matches(predicate: Callable[[str], bool]) -> bool:
-            return any(predicate(cls) for cls in classes)
+        slideshow_predicate = self._is_wps_slideshow_class
+        wps_presentation_predicate = self._class_has_wps_presentation_signature
+        ms_presentation_predicate = self._class_has_ms_presentation_signature
+        writer_predicate = self._class_has_wps_writer_signature
 
-        return self._WPSProcessHints(
-            classes=classes,
-            has_slideshow=_matches(self._is_wps_slideshow_class),
-            has_wps_presentation_signature=_matches(
-                self._class_has_wps_presentation_signature
-            ),
-            has_ms_presentation_signature=_matches(
-                self._class_has_ms_presentation_signature
-            ),
-            has_writer_signature=_matches(self._class_has_wps_writer_signature),
-        )
+        has_slideshow = False
+        has_wps_presentation_signature = False
+        has_ms_presentation_signature = False
+        has_writer_signature = False
+
+        def _safe_call(
+            predicate: Callable[[str], bool],
+            class_name: str,
+        ) -> bool:
+            try:
+                return bool(predicate(class_name))
+            except Exception:
+                logger_ref = globals().get("logger")
+                if logger_ref is None:  # pragma: no cover - fallback for helper extraction
+                    logging_module = globals().get("logging")
+                    if logging_module is None:
+                        import logging as logging_module  # type: ignore[import-not-found]
+                    logger_ref = logging_module.getLogger(__name__)
+                logger_ref.debug(
+                    "WPS process hint predicate failed",  # pragma: no cover - debug logging
+                    exc_info=True,
+                )
+                return False
 
     def _toolbar_widget(self) -> Optional[QWidget]:
         return self._overlay_child_widget("toolbar")
