@@ -25,6 +25,7 @@ import hashlib
 import hmac
 import functools
 from collections import OrderedDict, deque
+from functools import singledispatch
 from queue import Empty, Queue
 from dataclasses import dataclass
 from enum import Enum
@@ -103,20 +104,86 @@ def clamp(value: float, minimum: float, maximum: float) -> float:
     return max(minimum, min(maximum, value))
 
 
+_TRUE_STRINGS = frozenset({"1", "true", "yes", "on", "y", "t"})
+_FALSE_STRINGS = frozenset({"0", "false", "no", "off", "n", "f"})
+
+
+class _BooleanParseResult:
+    """Namespace for sentinel objects used during boolean coercion."""
+
+    UNRESOLVED = object()
+
+
+@singledispatch
+def _coerce_bool(value: Any) -> object:
+    """Return a parsed boolean or :data:`_BooleanParseResult.UNRESOLVED`."""
+
+    return _BooleanParseResult.UNRESOLVED
+
+
+@_coerce_bool.register(bool)
+def _coerce_bool_from_bool(value: bool) -> bool:
+    return value
+
+
+@_coerce_bool.register(int)
+def _coerce_bool_from_int(value: int) -> bool:
+    return bool(value)
+
+
+@_coerce_bool.register(float)
+def _coerce_bool_from_float(value: float) -> object:
+    if math.isnan(value):
+        return _BooleanParseResult.UNRESOLVED
+    return bool(value)
+
+
+@_coerce_bool.register(Enum)
+def _coerce_bool_from_enum(value: Enum) -> object:
+    return _coerce_bool(value.value)
+
+
+@_coerce_bool.register(bytes)
+def _coerce_bool_from_bytes(value: bytes) -> object:
+    try:
+        decoded = value.decode("utf-8")
+    except Exception:
+        return _BooleanParseResult.UNRESOLVED
+    return _coerce_bool(decoded)
+
+
+@_coerce_bool.register(str)
+def _coerce_bool_from_str(value: str) -> object:
+    normalized = value.strip()
+    if not normalized:
+        return _BooleanParseResult.UNRESOLVED
+    lowered = normalized.casefold()
+    if lowered in _TRUE_STRINGS:
+        return True
+    if lowered in _FALSE_STRINGS:
+        return False
+    signless = lowered[1:] if lowered[0] in "+-" and len(lowered) > 1 else lowered
+    if signless.isdigit():
+        try:
+            return bool(int(lowered, 10))
+        except Exception:
+            return _BooleanParseResult.UNRESOLVED
+    try:
+        number = float(lowered)
+    except ValueError:
+        return _BooleanParseResult.UNRESOLVED
+    if math.isnan(number):
+        return _BooleanParseResult.UNRESOLVED
+    return bool(number)
+
+
 def parse_bool(value: Any, default: bool = False) -> bool:
     """Attempt to coerce *value* into a boolean, returning *default* on failure."""
 
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"1", "true", "yes", "on", "y"}:
-            return True
-        if normalized in {"0", "false", "no", "off", "n"}:
-            return False
-    return default
+    result = _coerce_bool(value)
+    if result is _BooleanParseResult.UNRESOLVED:
+        return default
+    return bool(result)
 
 
 def _preferred_app_directory() -> str:
@@ -920,10 +987,10 @@ def ensure_widget_within_screen(widget: QWidget) -> None:
     widget.move(x, y)
 
 
-def str_to_bool(value: str, default: bool = False) -> bool:
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return default
+def str_to_bool(value: Any, default: bool = False) -> bool:
+    """Backward-compatible wrapper around :func:`parse_bool`."""
+
+    return parse_bool(value, default)
 
 
 def bool_to_str(value: bool) -> str:
