@@ -4174,15 +4174,11 @@ class _PresentationForwarder(_PresentationWindowMixin):
             self.clear_cached_target()
             return False
         if self._is_wps_slideshow_window(target):
-            success = self._send_key_message_sequence(target, vk_code)
-            if success:
-                self._last_target_hwnd = target
-            else:
+            success = self._send_wps_slideshow_key_sequence(target, vk_code)
+            if not success:
                 self._log_debug(
-                    "send_virtual_key: wps slideshow delivery failed vk=%s press=%s release=%s",
+                    "send_virtual_key: wps slideshow delivery failed vk=%s",
                     vk_code,
-                    False,
-                    False,
                 )
             return success
         if self._is_ms_slideshow_window(target) or self._is_word_window(target):
@@ -4518,6 +4514,24 @@ class _PresentationForwarder(_PresentationWindowMixin):
         press = self._deliver_key_message(hwnd, win32con.WM_KEYDOWN, vk_code, down_param)
         release = self._deliver_key_message(hwnd, win32con.WM_KEYUP, vk_code, up_param)
         return press and release
+
+    def _send_wps_slideshow_key_sequence(self, hwnd: int, vk_code: int) -> bool:
+        if win32con is None or hwnd == 0 or vk_code == 0:
+            return False
+        down_param = self._build_basic_key_lparam(vk_code, is_press=True)
+        up_param = self._build_basic_key_lparam(vk_code, is_press=False)
+        press = self._deliver_key_message(hwnd, win32con.WM_KEYDOWN, vk_code, down_param)
+        if not press:
+            return False
+        release = self._deliver_key_message(hwnd, win32con.WM_KEYUP, vk_code, up_param)
+        if not release:
+            self._log_debug(
+                "_send_wps_slideshow_key_sequence: release failed hwnd=%s vk=%s",
+                hwnd,
+                vk_code,
+            )
+        self._last_target_hwnd = hwnd
+        return True
 
     def _map_virtual_key(self, vk_code: int) -> int:
         map_vk = getattr(win32api, "MapVirtualKey", None) if win32api is not None else None
