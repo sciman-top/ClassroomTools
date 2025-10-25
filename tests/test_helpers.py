@@ -14,7 +14,7 @@ import tempfile
 import types
 from functools import singledispatch
 from pathlib import Path
-from typing import Iterable, List, Mapping, Optional, Set, Tuple
+from typing import Any, Callable, Iterable, List, Mapping, Optional, Set, Tuple, cast
 
 
 def _load_helper_module() -> types.ModuleType:
@@ -41,6 +41,9 @@ def _load_helper_module() -> types.ModuleType:
             "Set": Set,
             "Mapping": Mapping,
             "functools": functools,
+            "cast": cast,
+            "Callable": Callable,
+            "Any": Any,
             "dataclass": dataclasses.dataclass,
             "Enum": enum.Enum,
             "math": math,
@@ -502,3 +505,25 @@ def test_summarize_wps_process_hints_skips_specs_without_flag_names() -> None:
     assert hints.has_wps_presentation_signature is False
     assert hints.has_ms_presentation_signature is False
     assert hints.has_writer_signature is False
+
+
+def test_summarize_wps_process_hints_accepts_unbound_predicates() -> None:
+    harness = _MixinHarness()
+    specs = list(harness._wps_hint_predicate_specs())
+    spec_type = type(specs[0])
+
+    def _custom_specs(self):
+        base = specs[0]
+        return (
+            spec_type(
+                base.flag_name,
+                base.base_impl,
+                base.normalized_predicate,
+                base.base_impl,
+            ),
+        )
+
+    harness._wps_hint_predicate_specs = types.MethodType(_custom_specs, harness)
+    normalized = harness._normalized_class_hints("KwppShowFrameClass")
+    hints = harness._summarize_wps_process_hints(normalized)
+    assert hints.has_slideshow is True
