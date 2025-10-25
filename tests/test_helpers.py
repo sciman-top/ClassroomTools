@@ -12,7 +12,7 @@ import tempfile
 import types
 from functools import singledispatch
 from pathlib import Path
-from typing import Iterable, List, Optional, Set, Tuple
+from typing import Iterable, List, Mapping, Optional, Set, Tuple
 
 
 def _load_helper_module() -> types.ModuleType:
@@ -37,6 +37,7 @@ def _load_helper_module() -> types.ModuleType:
             "List": List,
             "Iterable": Iterable,
             "Set": Set,
+            "Mapping": Mapping,
             "Enum": enum.Enum,
             "math": math,
             "singledispatch": singledispatch,
@@ -55,6 +56,7 @@ def _load_helper_module() -> types.ModuleType:
         "_preferred_app_directory",
         "_choose_writable_target",
         "str_to_bool",
+        "_resolve_word_control_conflict",
     }
     def _should_include_function(node: ast.FunctionDef) -> bool:
         if node.name in targets:
@@ -161,3 +163,30 @@ def test_choose_writable_target_falls_back_when_parent_is_file(tmp_path: Path) -
     )
     assert Path(result).name == "students.xlsx"
     assert Path(result).parent != blocker
+
+
+def test_resolve_word_control_conflict_prefers_last_toggle() -> None:
+    resolve = helpers._resolve_word_control_conflict  # type: ignore[attr-defined]
+    assert resolve(True, True, source_flags={"_last_word_toggle": "ms_word"}) == (True, False)
+    assert resolve(True, True, source_flags={"_last_word_toggle": "wps_word"}) == (False, True)
+
+
+def test_resolve_word_control_conflict_uses_previous_when_no_last_toggle() -> None:
+    resolve = helpers._resolve_word_control_conflict  # type: ignore[attr-defined]
+    assert resolve(
+        True,
+        True,
+        previous_flags={"ms_word": True, "wps_word": False},
+    ) == (True, False)
+    assert resolve(
+        True,
+        True,
+        previous_flags={"ms_word": False, "wps_word": True},
+    ) == (False, True)
+
+
+def test_resolve_word_control_conflict_defaults_to_ms_word() -> None:
+    resolve = helpers._resolve_word_control_conflict  # type: ignore[attr-defined]
+    assert resolve(True, True) == (True, False)
+    assert resolve(True, False) == (True, False)
+    assert resolve(False, True) == (False, True)
