@@ -1029,26 +1029,39 @@ def _compute_presentation_category(
 ) -> str:
     """Classify a presentation window based on class and process hints."""
 
-    def _normalize(value: Any) -> str:
+    def _decode_bytes(raw: Union[bytes, bytearray, memoryview]) -> str:
+        try:
+            return bytes(raw).decode("utf-8", "ignore")
+        except Exception:
+            return ""
+
+    def _to_text(value: Any) -> str:
+        if value is None:
+            return ""
         if isinstance(value, str):
-            text = value
-        else:
+            return value
+        if isinstance(value, (bytes, bytearray, memoryview)):
+            return _decode_bytes(value)
+        if isinstance(value, os.PathLike):
             try:
-                text = str(value)
+                return os.fspath(value)
             except Exception:
                 return ""
+        try:
+            return str(value)
+        except Exception:
+            return ""
+
+    def _normalize(value: Any) -> str:
+        text = _to_text(value)
         stripped = text.strip()
         return stripped.lower()
 
     def _normalize_process(value: Any) -> Tuple[str, str]:
-        if isinstance(value, str):
-            stripped = value.strip()
-        else:
-            try:
-                stripped = str(value).strip()
-            except Exception:
-                stripped = ""
-        return stripped, stripped.lower()
+        text = _to_text(value)
+        stripped = text.strip()
+        lowered = stripped.lower()
+        return stripped, lowered
 
     primary = _normalize(class_name)
     secondary = _normalize(top_class)
@@ -1063,7 +1076,9 @@ def _compute_presentation_category(
     process_cache: Dict[int, bool] = {}
     _missing = object()
 
-    def _class_check(predicate: Callable[[str], bool]) -> bool:
+    def _class_check(predicate: Optional[Callable[[str], bool]]) -> bool:
+        if predicate is None:
+            return False
         key = id(predicate)
         cache = predicate_cache.setdefault(key, {})
         for candidate in classes:
@@ -1085,8 +1100,10 @@ def _compute_presentation_category(
                 return True
         return False
 
-    def _process_check(predicate: Callable[..., bool]) -> bool:
+    def _process_check(predicate: Optional[Callable[..., bool]]) -> bool:
         if not process:
+            return False
+        if predicate is None:
             return False
         key = id(predicate)
         cached = process_cache.get(key, _missing)
