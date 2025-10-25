@@ -6725,6 +6725,8 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             prefer_wheel = (
                 (via_toolbar or self.navigation_active or original_mode == "cursor" or is_word_category)
                 and not is_ms_ppt_target
+                and not wps_slideshow_target
+                and not self._is_wps_slideshow_class(target_class)
             )
             base_suppress_focus_restore = bool(wps_slideshow_target) or self._is_wps_slideshow_class(target_class)
             focus_restore_suppressed = base_suppress_focus_restore or override_focus_restore
