@@ -1466,6 +1466,41 @@ class SettingsManager:
 
         self._settings_cache = {section: values.copy() for section, values in snapshot.items()}
 
+    def get_launcher_settings(self) -> "LauncherSettings":
+        """Return the persisted launcher window configuration as a typed object."""
+
+        settings = self.load_settings()
+        launcher_defaults = self.defaults.get("Launcher", {})
+        launcher_section = settings.get("Launcher", {})
+        return LauncherSettings.from_mapping(launcher_section, launcher_defaults)
+
+    def get_startup_settings(self) -> "StartupSettings":
+        """Return startup configuration flags."""
+
+        settings = self.load_settings()
+        startup_defaults = self.defaults.get("Startup", {})
+        startup_section = settings.get("Startup", {})
+        return StartupSettings.from_mapping(startup_section, startup_defaults)
+
+    def update_launcher_settings(
+        self,
+        launcher_settings: "LauncherSettings",
+        startup_settings: Optional["StartupSettings"] = None,
+    ) -> None:
+        """Persist the launcher configuration alongside optional startup flags."""
+
+        settings = self.load_settings()
+        launcher_section = dict(settings.get("Launcher", {}))
+        launcher_section.update(launcher_settings.to_mapping())
+        settings["Launcher"] = launcher_section
+
+        if startup_settings is not None:
+            startup_section = dict(settings.get("Startup", {}))
+            startup_section.update(startup_settings.to_mapping())
+            settings["Startup"] = startup_section
+
+        self.save_settings(settings)
+
     def clear_roll_call_history(self) -> None:
         """清除点名历史信息，仅在用户主动重置时调用。"""
 
@@ -1479,6 +1514,72 @@ class SettingsManager:
         if removed:
             settings["RollCallTimer"] = section
             self.save_settings(settings)
+
+
+@dataclass(frozen=True)
+class LauncherSettings:
+    position: QPoint
+    bubble_position: QPoint
+    minimized: bool
+
+    @staticmethod
+    def from_mapping(
+        mapping: Mapping[str, str],
+        defaults: Mapping[str, str],
+    ) -> "LauncherSettings":
+        def _to_int(key: str, fallback: int) -> int:
+            raw_value = mapping.get(key, defaults.get(key, str(fallback)))
+            try:
+                return int(str(raw_value))
+            except (TypeError, ValueError):
+                return fallback
+
+        def _int_from_defaults(key: str, fallback: int) -> int:
+            raw_default = defaults.get(key)
+            if raw_default is None:
+                return fallback
+            try:
+                return int(str(raw_default))
+            except (TypeError, ValueError):
+                return fallback
+
+        default_x = _int_from_defaults("x", 120)
+        default_y = _int_from_defaults("y", 120)
+        x = _to_int("x", default_x)
+        y = _to_int("y", default_y)
+        bubble_default_x = _int_from_defaults("bubble_x", x)
+        bubble_default_y = _int_from_defaults("bubble_y", y)
+        bubble_x = _to_int("bubble_x", bubble_default_x)
+        bubble_y = _to_int("bubble_y", bubble_default_y)
+        minimized_raw = mapping.get("minimized", defaults.get("minimized", "False"))
+        minimized = str_to_bool(str(minimized_raw), False)
+        return LauncherSettings(QPoint(x, y), QPoint(bubble_x, bubble_y), minimized)
+
+    def to_mapping(self) -> Dict[str, str]:
+        return {
+            "x": str(self.position.x()),
+            "y": str(self.position.y()),
+            "bubble_x": str(self.bubble_position.x()),
+            "bubble_y": str(self.bubble_position.y()),
+            "minimized": bool_to_str(self.minimized),
+        }
+
+
+@dataclass(frozen=True)
+class StartupSettings:
+    autostart_enabled: bool
+
+    @staticmethod
+    def from_mapping(
+        mapping: Mapping[str, str],
+        defaults: Mapping[str, str],
+    ) -> "StartupSettings":
+        raw_value = mapping.get("autostart_enabled", defaults.get("autostart_enabled", "False"))
+        enabled = str_to_bool(str(raw_value), False)
+        return StartupSettings(enabled)
+
+    def to_mapping(self) -> Dict[str, str]:
+        return {"autostart_enabled": bool_to_str(self.autostart_enabled)}
 
 
 # ---------- 画笔风格 ----------
@@ -12009,9 +12110,21 @@ class LauncherBubble(QWidget):
 
 class LauncherWindow(QWidget):
     def __init__(self, settings_manager: SettingsManager, student_workbook: Optional[StudentWorkbook]) -> None:
-        super().__init__(None, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
+        super().__init__(
+            None,
+            Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint,
+        )
         self.settings_manager = settings_manager
-        self.student_workbook: Optional[StudentWorkbook] = student_workbook
+        self._init_state(student_workbook)
+        self._configure_window()
+        container = self._build_ui()
+        self._apply_button_metrics()
+        self._finalize_drag_regions(container)
+        self._apply_saved_state()
+        self._enforce_feature_availability()
+
+    def _init_state(self, student_workbook: Optional[StudentWorkbook]) -> None:
+        self.student_workbook = student_workbook
         self.student_data: Optional[PandasDataFrame] = None
         if PANDAS_READY and student_workbook is not None:
             try:
@@ -12020,13 +12133,15 @@ class LauncherWindow(QWidget):
                 self.student_data = pd.DataFrame(columns=["学号", "姓名", "分组", "成绩"])
         self.overlay: Optional[OverlayWindow] = None
         self.roll_call_window: Optional[RollCallTimerWindow] = None
-        self._dragging = False; self._drag_offset = QPoint()
+        self._dragging = False
+        self._drag_offset = QPoint()
         self.bubble: Optional[LauncherBubble] = None
         self._last_position = QPoint()
         self._bubble_position = QPoint()
         self._minimized = False
         self._minimized_on_start = False
 
+    def _configure_window(self) -> None:
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet(
             """
@@ -12065,88 +12180,148 @@ class LauncherWindow(QWidget):
             }
             """
         )
-        container = QWidget(self); container.setObjectName("launcherContainer")
-        layout = QVBoxLayout(self); layout.setContentsMargins(0, 0, 0, 0); layout.addWidget(container)
-        v = QVBoxLayout(container); v.setContentsMargins(8, 8, 8, 8); v.setSpacing(5)
 
-        # 通过三段可伸缩空白保证“画笔”“点名/计时”两侧及中间留白一致
-        row = QGridLayout(); row.setContentsMargins(0, 0, 0, 0); row.setHorizontalSpacing(0)
-        for col in (0, 2, 4):
-            row.setColumnMinimumWidth(col, 12)
-            row.setColumnStretch(col, 1)
+    def _build_ui(self) -> QWidget:
+        container = QWidget(self)
+        container.setObjectName("launcherContainer")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(container)
+
+        container_layout = QVBoxLayout(container)
+        container_layout.setContentsMargins(8, 8, 8, 8)
+        container_layout.setSpacing(5)
+
+        action_row = QGridLayout()
+        action_row.setContentsMargins(0, 0, 0, 0)
+        action_row.setHorizontalSpacing(0)
+        for column in (0, 2, 4):
+            action_row.setColumnMinimumWidth(column, 12)
+            action_row.setColumnStretch(column, 1)
+
         self.paint_button = QPushButton("画笔")
         self.paint_button.clicked.connect(self.toggle_paint)
-        row.addItem(QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum), 0, 0)
-        row.addWidget(self.paint_button, 0, 1)
-        row.addItem(QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum), 0, 2)
+        action_row.addItem(
+            QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum),
+            0,
+            0,
+        )
+        action_row.addWidget(self.paint_button, 0, 1)
+        action_row.addItem(
+            QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum),
+            0,
+            2,
+        )
+
         self.roll_call_button = QPushButton("点名/计时")
         self.roll_call_button.clicked.connect(self.toggle_roll_call)
-        row.addWidget(self.roll_call_button, 0, 3)
-        row.addItem(QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum), 0, 4)
+        action_row.addWidget(self.roll_call_button, 0, 3)
+        action_row.addItem(
+            QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum),
+            0,
+            4,
+        )
+
+        container_layout.addLayout(action_row)
+
+        bottom_row = QHBoxLayout()
+        bottom_row.setSpacing(3)
+
+        self.minimize_button = QPushButton("缩小")
+        self.minimize_button.clicked.connect(self.minimize_launcher)
+        bottom_row.addWidget(self.minimize_button)
+
+        self.autostart_check = QCheckBox("开机启动")
+        self.autostart_check.stateChanged.connect(self.toggle_autostart)
+        bottom_row.addWidget(self.autostart_check)
+
+        bottom_row.addStretch(1)
+
+        self.about_button = QPushButton("关于")
+        self.about_button.clicked.connect(self.show_about)
+        bottom_row.addWidget(self.about_button)
+
+        self.exit_button = QPushButton("退出")
+        self.exit_button.clicked.connect(self.request_exit)
+        bottom_row.addWidget(self.exit_button)
+
+        container_layout.addLayout(bottom_row)
+
+        return container
+
+    def _apply_button_metrics(self) -> None:
         unified_width = self._action_button_width()
         self.paint_button.setFixedWidth(unified_width)
         self.roll_call_button.setFixedWidth(unified_width)
-        v.addLayout(row)
 
-        bottom = QHBoxLayout(); bottom.setSpacing(3)
-        self.minimize_button = QPushButton("缩小"); self.minimize_button.clicked.connect(self.minimize_launcher)
-        bottom.addWidget(self.minimize_button)
+        auxiliary_width = max(self.minimize_button.sizeHint().width(), 52)
+        self.minimize_button.setFixedWidth(auxiliary_width)
 
-        self.autostart_check = QCheckBox("开机启动"); self.autostart_check.stateChanged.connect(self.toggle_autostart); bottom.addWidget(self.autostart_check)
-        bottom.addStretch(1)
-
-        self.about_button = QPushButton("关于"); self.about_button.clicked.connect(self.show_about); bottom.addWidget(self.about_button)
-        self.exit_button = QPushButton("退出")
-        self.exit_button.clicked.connect(self.request_exit)
-        bottom.addWidget(self.exit_button)
-        v.addLayout(bottom)
-
-        aux_width = max(self.minimize_button.sizeHint().width(), 52)
-        self.minimize_button.setFixedWidth(aux_width)
         about_width = max(self.about_button.sizeHint().width(), 52)
-        exit_width = max(self.exit_button.sizeHint().width(), 52)
         self.about_button.setFixedWidth(about_width)
+
+        exit_width = max(self.exit_button.sizeHint().width(), 52)
         self.exit_button.setFixedWidth(exit_width)
 
-        button_height = max(
+        button_heights = [
             self.paint_button.sizeHint().height(),
             self.roll_call_button.sizeHint().height(),
             self.minimize_button.sizeHint().height(),
             self.about_button.sizeHint().height(),
             self.exit_button.sizeHint().height(),
-        )
-        for btn in (self.paint_button, self.roll_call_button, self.minimize_button, self.about_button, self.exit_button):
-            btn.setFixedHeight(button_height)
+        ]
+        target_height = max(button_heights)
+        for button in (
+            self.paint_button,
+            self.roll_call_button,
+            self.minimize_button,
+            self.about_button,
+            self.exit_button,
+        ):
+            button.setFixedHeight(target_height)
 
-        s = self.settings_manager.load_settings().get("Launcher", {})
-        x = int(s.get("x", "120")); y = int(s.get("y", "120"))
-        self.move(x, y)
-        self._last_position = QPoint(x, y)
-        bubble_x = int(s.get("bubble_x", str(x)))
-        bubble_y = int(s.get("bubble_y", str(y)))
-        self._bubble_position = QPoint(bubble_x, bubble_y)
-        minimized = str_to_bool(s.get("minimized", "False"), False)
-        self._minimized = minimized
-        self._minimized_on_start = minimized
+    def _finalize_drag_regions(self, container: QWidget) -> None:
+        for widget in (
+            self,
+            container,
+            self.paint_button,
+            self.roll_call_button,
+            self.minimize_button,
+            self.autostart_check,
+        ):
+            widget.installEventFilter(self)
 
-        startup = self.settings_manager.load_settings().get("Startup", {})
-        autostart_enabled = str_to_bool(startup.get("autostart_enabled", "False"), False)
-        self.autostart_check.setChecked(autostart_enabled and WINREG_AVAILABLE)
-        self.autostart_check.setEnabled(WINREG_AVAILABLE)
-
-        if not (PANDAS_AVAILABLE and OPENPYXL_AVAILABLE):
-            self.roll_call_button.setEnabled(False)
-
-        for w in (self, container, self.paint_button, self.roll_call_button, self.minimize_button, self.autostart_check):
-            w.installEventFilter(self)
-
-        # 锁定启动器的推荐尺寸，避免误拖拽造成遮挡
         self.adjustSize()
         self.setFixedSize(self.sizeHint())
         self._base_minimum_width = self.minimumWidth()
         self._base_minimum_height = self.minimumHeight()
         self._ensure_min_width = self.width()
         self._ensure_min_height = self.height()
+
+    def _apply_saved_state(self) -> None:
+        launcher_settings = self.settings_manager.get_launcher_settings()
+        startup_settings = self.settings_manager.get_startup_settings()
+
+        position = QPoint(launcher_settings.position)
+        self.move(position)
+        self._last_position = QPoint(position)
+
+        bubble_position = QPoint(launcher_settings.bubble_position)
+        if bubble_position.isNull():
+            bubble_position = QPoint(position)
+        self._bubble_position = bubble_position
+
+        self._minimized = launcher_settings.minimized
+        self._minimized_on_start = launcher_settings.minimized
+
+        autostart_enabled = startup_settings.autostart_enabled and WINREG_AVAILABLE
+        self.autostart_check.setChecked(autostart_enabled)
+        self.autostart_check.setEnabled(WINREG_AVAILABLE)
+
+    def _enforce_feature_availability(self) -> None:
+        if not (PANDAS_AVAILABLE and OPENPYXL_AVAILABLE):
+            self.roll_call_button.setEnabled(False)
 
     def _action_button_width(self) -> int:
         """计算“画笔”与“点名/计时”按钮的统一宽度，保证观感一致。"""
@@ -12180,18 +12355,20 @@ class LauncherWindow(QWidget):
         return super().eventFilter(obj, e)
 
     def save_position(self) -> None:
-        settings = self.settings_manager.load_settings()
-        pos = self._last_position if (self._minimized and not self._last_position.isNull()) else self.pos()
-        launcher = settings.get("Launcher", {})
-        launcher["x"] = str(pos.x())
-        launcher["y"] = str(pos.y())
-        bubble_pos = self._bubble_position if not self._bubble_position.isNull() else pos
-        launcher["bubble_x"] = str(bubble_pos.x())
-        launcher["bubble_y"] = str(bubble_pos.y())
-        launcher["minimized"] = bool_to_str(self._minimized)
-        settings["Launcher"] = launcher
-        startup = settings.get("Startup", {}); startup["autostart_enabled"] = bool_to_str(self.autostart_check.isChecked()); settings["Startup"] = startup
-        self.settings_manager.save_settings(settings)
+        anchor_position = (
+            self._last_position if (self._minimized and not self._last_position.isNull()) else self.pos()
+        )
+        position = QPoint(anchor_position)
+        bubble_source = self._bubble_position if not self._bubble_position.isNull() else position
+        bubble_position = QPoint(bubble_source)
+
+        launcher_settings = LauncherSettings(
+            position=position,
+            bubble_position=bubble_position,
+            minimized=self._minimized,
+        )
+        startup_settings = StartupSettings(autostart_enabled=self.autostart_check.isChecked())
+        self.settings_manager.update_launcher_settings(launcher_settings, startup_settings)
 
     def toggle_paint(self) -> None:
         """打开或隐藏屏幕画笔覆盖层。"""
@@ -12402,6 +12579,25 @@ class LauncherWindow(QWidget):
         super().closeEvent(e)
 
 
+@dataclass
+class ApplicationContext:
+    settings_manager: SettingsManager
+    student_workbook: Optional[StudentWorkbook]
+
+    @classmethod
+    def create(cls) -> "ApplicationContext":
+        settings_manager = SettingsManager()
+        workbook: Optional[StudentWorkbook] = None
+        encrypted_path = getattr(RollCallTimerWindow, "ENCRYPTED_STUDENT_FILE", "")
+        encrypted_exists = bool(encrypted_path and os.path.exists(encrypted_path))
+        if PANDAS_AVAILABLE and not encrypted_exists:
+            workbook = load_student_data(None)
+        return cls(settings_manager=settings_manager, student_workbook=workbook)
+
+    def create_launcher_window(self) -> LauncherWindow:
+        return LauncherWindow(self.settings_manager, self.student_workbook)
+
+
 # ---------- 入口 ----------
 def main() -> None:
     """应用程序入口：初始化 DPI、加载设置并启动启动器窗口。"""
@@ -12410,12 +12606,8 @@ def main() -> None:
     app.setQuitOnLastWindowClosed(False)
     QToolTip.setFont(QFont("Microsoft YaHei UI", 9))
 
-    settings_manager = SettingsManager()
-    student_workbook = load_student_data(None) if PANDAS_AVAILABLE and not os.path.exists(
-        RollCallTimerWindow.ENCRYPTED_STUDENT_FILE
-    ) else None
-
-    window = LauncherWindow(settings_manager, student_workbook)
+    context = ApplicationContext.create()
+    window = context.create_launcher_window()
     app.aboutToQuit.connect(window.handle_about_to_quit)
     window.show()
     sys.exit(app.exec())
