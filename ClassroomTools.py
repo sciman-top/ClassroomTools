@@ -2640,8 +2640,6 @@ class PenSettingsDialog(QDialog):
                     control_defaults[key] = parse_bool(
                         initial_control_flags[key], control_defaults[key]
                     )
-        for key in ("ms_word", "wps_word"):
-            control_defaults[key] = False
         self._control_checkboxes: Dict[str, QCheckBox] = {}
 
         style_layout = QHBoxLayout()
@@ -2737,21 +2735,12 @@ class PenSettingsDialog(QDialog):
             ("wps_ppt", "控制WPS演示放映"),
             ("wps_word", "控制WPS文档滚动"),
         ]
-        hidden_control_keys = {"ms_word", "wps_word"}
-        visible_index = 0
-        for key, text in control_items:
+        for index, (key, text) in enumerate(control_items):
             checkbox = QCheckBox(text, self)
-            if key in hidden_control_keys:
-                checkbox.setChecked(False)
-                checkbox.setEnabled(False)
-                checkbox.setVisible(False)
-            else:
-                checkbox.setChecked(control_defaults.get(key, True))
-                checkbox.setToolTip("关闭后将不会向对应应用发送翻页或滚动指令。")
+            checkbox.setChecked(control_defaults.get(key, True))
+            checkbox.setToolTip("关闭后将不会向对应应用发送翻页或滚动指令。")
             self._control_checkboxes[key] = checkbox
-            if key not in hidden_control_keys:
-                control_grid.addWidget(checkbox, visible_index // 2, visible_index % 2)
-                visible_index += 1
+            control_grid.addWidget(checkbox, index // 2, index % 2)
         layout.addLayout(control_grid)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
