@@ -448,9 +448,8 @@ except ImportError:
 PANDAS_READY = PANDAS_AVAILABLE and pd is not None
 
 try:
-    import openpyxl  # noqa: F401
-    OPENPYXL_AVAILABLE = True
-except ImportError:
+    OPENPYXL_AVAILABLE = importlib.util.find_spec("openpyxl") is not None
+except Exception:
     OPENPYXL_AVAILABLE = False
 
 try:
@@ -3003,10 +3002,232 @@ class FloatingToolbar(QWidget):
 # ---------- 叠加层（画笔/白板） ----------
 
 
-class _PresentationForwarder:
+class _PresentationWindowMixin:
+    _KNOWN_PRESENTATION_CLASSES: Set[str] = {
+        "screenclass",
+        "pptframeclass",
+        "pptviewwndclass",
+        "powerpntframeclass",
+        "powerpointframeclass",
+        "opusapp",
+        "acrobatsdiwindow",
+        "kwppframeclass",
+        "kwppmainframe",
+        "kwpsframeclass",
+        "wpsframeclass",
+        "wpsmainframe",
+        "nuidocumentwindow",
+        "netuihwnd",
+        "mdiclient",
+        "documentwindow",
+        "_wwg",
+        "_wwb",
+        "worddocument",
+        "paneclassdc",
+    }
+    _KNOWN_PRESENTATION_PREFIXES: Tuple[str, ...] = (
+        ("kwpp", "kwps", "wpsframe", "wpsmain") if win32gui is not None else tuple()
+    )
+    _SLIDESHOW_PRIORITY_CLASSES: Set[str] = {"screenclass"}
+    _SLIDESHOW_SECONDARY_CLASSES: Set[str] = {
+        "pptviewwndclass",
+        "kwppshowframeclass",
+        "kwppshowframe",
+        "kwppshowwndclass",
+        "kwpsshowframe",
+    }
+    _WPS_SLIDESHOW_CLASSES: Set[str] = {
+        "kwppshowframeclass",
+        "kwppshowframe",
+        "kwppshowwndclass",
+        "kwpsshowframe",
+        "wpsshowframe",
+    }
+    _WORD_WINDOW_CLASSES: Set[str] = {
+        "opusapp",
+        "nuidocumentwindow",
+        "netuihwnd",
+        "documentwindow",
+        "mdiclient",
+        "paneclassdc",
+        "worddocument",
+        "_wwg",
+        "_wwb",
+        "kwpsframeclass",
+        "kwpsmainframe",
+        "wpsframeclass",
+        "wpsmainframe",
+    }
+    _WORD_CONTENT_CLASSES: Set[str] = {
+        "worddocument",
+        "paneclassdc",
+        "_wwg",
+        "_wwb",
+        "kwpsviewclass",
+        "wpsviewclass",
+        "kwpspageview",
+        "wpspageview",
+        "kwpsdocview",
+        "wpsdocview",
+    }
+    _WORD_HOST_CLASSES: Set[str] = {
+        "opusapp",
+        "nuidocumentwindow",
+        "netuihwnd",
+        "documentwindow",
+        "mdiclient",
+        "kwpsframeclass",
+        "kwpsmainframe",
+        "wpsframeclass",
+        "wpsmainframe",
+    }
+    _PRESENTATION_EDITOR_CLASSES: Set[str] = {
+        "pptframeclass",
+        "powerpntframeclass",
+        "powerpointframeclass",
+        "kwppframeclass",
+        "kwppmainframe",
+        "kwpsframeclass",
+        "wpsframeclass",
+        "wpsmainframe",
+    }
+    _WPS_WRITER_PREFIXES: Tuple[str, ...] = ("kwps", "wps")
+    _WPS_WRITER_KEYWORDS: Tuple[str, ...] = ("frame", "view", "doc", "page")
+    _WPS_WRITER_EXCLUDE_KEYWORDS: Tuple[str, ...] = ("show", "slideshow")
+
+    def _overlay_widget(self) -> Optional[QWidget]:
+        raise NotImplementedError
+
+    def _toolbar_widget(self) -> Optional[QWidget]:
+        overlay = self._overlay_widget()
+        return getattr(overlay, "toolbar", None) if overlay is not None else None
+
+    def _photo_overlay_widget(self) -> Optional[QWidget]:
+        overlay = self._overlay_widget()
+        return getattr(overlay, "_photo_overlay", None) if overlay is not None else None
+
+    def _overlay_hwnd(self) -> int:
+        widget = self._overlay_widget()
+        if widget is None:
+            return 0
+        try:
+            wid = widget.winId()
+        except Exception:
+            return 0
+        return int(wid) if wid else 0
+
+    def _toolbar_hwnd(self) -> int:
+        toolbar = self._toolbar_widget()
+        if toolbar is None:
+            return 0
+        try:
+            wid = toolbar.winId()
+        except Exception:
+            return 0
+        return int(wid) if wid else 0
+
+    def _photo_overlay_hwnd(self) -> int:
+        photo = self._photo_overlay_widget()
+        if photo is None:
+            return 0
+        try:
+            wid = photo.winId()
+        except Exception:
+            return 0
+        return int(wid) if wid else 0
+
+    def _overlay_rect_tuple(self) -> Optional[Tuple[int, int, int, int]]:
+        widget = self._overlay_widget()
+        if widget is None:
+            return None
+        rect = widget.geometry()
+        if rect.isNull():
+            return None
+        left = rect.left()
+        top = rect.top()
+        right = left + rect.width()
+        bottom = top + rect.height()
+        return left, top, right, bottom
+
+    def _overlay_center_point(self) -> Optional[Tuple[int, int]]:
+        rect = self._overlay_rect_tuple()
+        if rect is None:
+            return None
+        left, top, right, bottom = rect
+        return ((left + right) // 2, (top + bottom) // 2)
+
+    def _rect_intersects_overlay(self, rect: Tuple[int, int, int, int]) -> bool:
+        overlay_rect = self._overlay_rect_tuple()
+        if overlay_rect is None:
+            return False
+        left, top, right, bottom = rect
+        o_left, o_top, o_right, o_bottom = overlay_rect
+        return not (right <= o_left or left >= o_right or bottom <= o_top or top >= o_bottom)
+
+    def _window_process_id(self, hwnd: int) -> Optional[int]:
+        if _USER32 is None or hwnd == 0:
+            return None
+        pid = wintypes.DWORD()
+        try:
+            _USER32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(pid))
+        except Exception:
+            return None
+        value = int(pid.value)
+        return value or None
+
+    def _window_process_name(self, hwnd: int) -> str:
+        pid = self._window_process_id(hwnd)
+        if not pid:
+            return ""
+        path = _process_image_path(int(pid))
+        if not path:
+            return ""
+        return os.path.basename(path).strip().lower()
+
+    def _is_own_process_window(self, hwnd: int) -> bool:
+        try:
+            pid = self._window_process_id(hwnd)
+            return pid == os.getpid() if pid is not None else False
+        except Exception:
+            return False
+
+    def _should_ignore_window(self, hwnd: int) -> bool:
+        if hwnd == 0:
+            return True
+        overlay_hwnd = self._overlay_hwnd()
+        if hwnd == overlay_hwnd:
+            return True
+        toolbar_hwnd = self._toolbar_hwnd()
+        if toolbar_hwnd and hwnd == toolbar_hwnd:
+            return True
+        photo_hwnd = self._photo_overlay_hwnd()
+        if photo_hwnd and hwnd == photo_hwnd:
+            return True
+        return self._is_own_process_window(hwnd)
+
+    def _fallback_is_target_window_valid(self, hwnd: int) -> bool:
+        if _USER32 is None or hwnd == 0:
+            return False
+        overlay_hwnd = self._overlay_hwnd()
+        if hwnd == overlay_hwnd:
+            return False
+        if not _user32_is_window(hwnd):
+            return False
+        if not _user32_is_window_visible(hwnd) or _user32_is_window_iconic(hwnd):
+            return False
+        rect = _user32_window_rect(hwnd)
+        if not rect:
+            return False
+        return self._rect_intersects_overlay(rect)
+
+
+class _PresentationForwarder(_PresentationWindowMixin):
     """在绘图模式下将特定输入事件转发给下层演示窗口。"""
 
     __slots__ = ("overlay", "_last_target_hwnd", "_child_buffer")
+
+    def _overlay_widget(self) -> Optional[QWidget]:
+        return self.overlay
 
     _SMTO_ABORTIFHUNG = 0x0002
     _MAX_CHILD_FORWARDS = 32
@@ -3076,101 +3297,6 @@ class _PresentationForwarder:
         _InputUnion = None  # type: ignore[assignment]
         _Input = None  # type: ignore[assignment]
 
-    _KNOWN_PRESENTATION_CLASSES: Set[str] = {
-        "screenclass",
-        "pptframeclass",
-        "pptviewwndclass",
-        "powerpntframeclass",
-        "powerpointframeclass",
-        "opusapp",
-        "acrobatsdiwindow",
-        "kwppframeclass",
-        "kwppmainframe",
-        "kwpsframeclass",
-        "wpsframeclass",
-        "wpsmainframe",
-        "nuidocumentwindow",
-        "netuihwnd",
-        "mdiclient",
-        "documentwindow",
-        "_wwg",
-        "_wwb",
-        "worddocument",
-        "paneclassdc",
-    }
-    _KNOWN_PRESENTATION_PREFIXES: Tuple[str, ...] = (
-        ("kwpp", "kwps", "wpsframe", "wpsmain") if win32gui is not None else tuple()
-    )
-    _SLIDESHOW_PRIORITY_CLASSES: Set[str] = {"screenclass"}
-    _SLIDESHOW_SECONDARY_CLASSES: Set[str] = {
-        "pptviewwndclass",
-        "kwppshowframeclass",
-        "kwppshowframe",
-        "kwppshowwndclass",
-        "kwpsshowframe",
-    }
-    _WPS_SLIDESHOW_CLASSES: Set[str] = {
-        "kwppshowframeclass",
-        "kwppshowframe",
-        "kwppshowwndclass",
-        "kwpsshowframe",
-        "wpsshowframe",
-    }
-    _WORD_WINDOW_CLASSES: Set[str] = {
-        "opusapp",
-        "nuidocumentwindow",
-        "netuihwnd",
-        "documentwindow",
-        "mdiclient",
-        "paneclassdc",
-        "worddocument",
-        "_wwg",
-        "_wwb",
-        "kwpsframeclass",
-        "kwpsmainframe",
-        "wpsframeclass",
-        "wpsmainframe",
-        "kwpsviewclass",
-        "wpsviewclass",
-        "kwpspageview",
-        "wpspageview",
-    }
-    _WORD_CONTENT_CLASSES: Set[str] = {
-        "worddocument",
-        "paneclassdc",
-        "_wwg",
-        "_wwb",
-        "kwpsviewclass",
-        "wpsviewclass",
-        "kwpspageview",
-        "wpspageview",
-        "kwpsdocview",
-        "wpsdocview",
-    }
-    _WORD_HOST_CLASSES: Set[str] = {
-        "opusapp",
-        "nuidocumentwindow",
-        "netuihwnd",
-        "documentwindow",
-        "mdiclient",
-        "kwpsframeclass",
-        "kwpsmainframe",
-        "wpsframeclass",
-        "wpsmainframe",
-    }
-    _PRESENTATION_EDITOR_CLASSES: Set[str] = {
-        "pptframeclass",
-        "powerpntframeclass",
-        "powerpointframeclass",
-        "kwppframeclass",
-        "kwppmainframe",
-        "kwpsframeclass",
-        "wpsframeclass",
-        "wpsmainframe",
-    }
-    _WPS_WRITER_PREFIXES: Tuple[str, ...] = ("kwps", "wps")
-    _WPS_WRITER_KEYWORDS: Tuple[str, ...] = ("frame", "view", "doc", "page")
-    _WPS_WRITER_EXCLUDE_KEYWORDS: Tuple[str, ...] = ("show", "slideshow")
     _KEY_FORWARD_MAP: Dict[int, int] = (
         {
             int(Qt.Key.Key_PageUp): win32con.VK_PRIOR,
@@ -3222,15 +3348,6 @@ class _PresentationForwarder:
             except Exception:
                 return ""
         return _user32_window_class_name(hwnd)
-
-    def _window_process_name(self, hwnd: int) -> str:
-        pid = self._window_process_id(hwnd)
-        if not pid:
-            return ""
-        path = _process_image_path(int(pid))
-        if not path:
-            return ""
-        return os.path.basename(path).strip().lower()
 
     def _is_wps_slideshow_class(self, class_name: str) -> bool:
         if not class_name:
@@ -4227,101 +4344,6 @@ class _PresentationForwarder:
                 queue.append(child)
         return tuple(results)
 
-    def _overlay_rect_tuple(self) -> Optional[Tuple[int, int, int, int]]:
-        rect = self.overlay.geometry()
-        if rect.isNull():
-            return None
-        left = rect.left()
-        top = rect.top()
-        right = left + rect.width()
-        bottom = top + rect.height()
-        return left, top, right, bottom
-
-    def _overlay_center_point(self) -> Optional[Tuple[int, int]]:
-        rect = self._overlay_rect_tuple()
-        if rect is None:
-            return None
-        left, top, right, bottom = rect
-        return ((left + right) // 2, (top + bottom) // 2)
-
-    def _rect_intersects_overlay(self, rect: Tuple[int, int, int, int]) -> bool:
-        overlay_rect = self._overlay_rect_tuple()
-        if overlay_rect is None:
-            return False
-        left, top, right, bottom = rect
-        o_left, o_top, o_right, o_bottom = overlay_rect
-        return not (right <= o_left or left >= o_right or bottom <= o_top or top >= o_bottom)
-
-    def _fallback_is_target_window_valid(self, hwnd: int) -> bool:
-        if _USER32 is None or hwnd == 0:
-            return False
-        overlay_hwnd = int(self.overlay.winId()) if self.overlay.winId() else 0
-        if hwnd == overlay_hwnd:
-            return False
-        if not _user32_is_window(hwnd):
-            return False
-        if not _user32_is_window_visible(hwnd) or _user32_is_window_iconic(hwnd):
-            return False
-        rect = _user32_window_rect(hwnd)
-        if not rect:
-            return False
-        return self._rect_intersects_overlay(rect)
-
-    def _window_process_id(self, hwnd: int) -> Optional[int]:
-        if _USER32 is None or hwnd == 0:
-            return None
-        pid = wintypes.DWORD()
-        try:
-            _USER32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(pid))
-        except Exception:
-            return None
-        value = int(pid.value)
-        return value or None
-
-    def _is_own_process_window(self, hwnd: int) -> bool:
-        try:
-            pid = self._window_process_id(hwnd)
-            return pid == os.getpid() if pid is not None else False
-        except Exception:
-            return False
-
-    def _toolbar_hwnd(self) -> int:
-        toolbar = getattr(self.overlay, "toolbar", None)
-        if toolbar is None:
-            return 0
-        try:
-            wid = toolbar.winId()
-        except Exception:
-            return 0
-        return int(wid) if wid else 0
-
-    def _photo_overlay_hwnd(self) -> int:
-        photo = getattr(self.overlay, "_photo_overlay", None)
-        if photo is None:
-            return 0
-        try:
-            wid = photo.winId()
-        except Exception:
-            return 0
-        return int(wid) if wid else 0
-
-    def _should_ignore_window(self, hwnd: int) -> bool:
-        if hwnd == 0:
-            return True
-        try:
-            overlay_hwnd = int(self.overlay.winId()) if self.overlay.winId() else 0
-        except Exception:
-            overlay_hwnd = 0
-        if hwnd == overlay_hwnd:
-            return True
-        toolbar_hwnd = self._toolbar_hwnd()
-        if toolbar_hwnd and hwnd == toolbar_hwnd:
-            return True
-        photo_hwnd = self._photo_overlay_hwnd()
-        if photo_hwnd and hwnd == photo_hwnd:
-            return True
-        return self._is_own_process_window(hwnd)
-
     def _fallback_is_candidate_window(self, hwnd: int) -> bool:
         if _USER32 is None or hwnd == 0:
             return False
@@ -4713,23 +4735,12 @@ class _PresentationForwarder:
         return None
 
 
-class OverlayWindow(QWidget):
-    _KNOWN_PRESENTATION_CLASSES = _PresentationForwarder._KNOWN_PRESENTATION_CLASSES
-    _KNOWN_PRESENTATION_PREFIXES = _PresentationForwarder._KNOWN_PRESENTATION_PREFIXES
-    _SLIDESHOW_PRIORITY_CLASSES = _PresentationForwarder._SLIDESHOW_PRIORITY_CLASSES
-    _SLIDESHOW_SECONDARY_CLASSES = _PresentationForwarder._SLIDESHOW_SECONDARY_CLASSES
+class OverlayWindow(QWidget, _PresentationWindowMixin):
     _NAVIGATION_RESTORE_DELAY_MS = 600
     _NAVIGATION_HOLD_DURATION_MS = 2400
-    _PRESENTATION_EDITOR_CLASSES: Set[str] = _PresentationForwarder._PRESENTATION_EDITOR_CLASSES
-    _WORD_WINDOW_CLASSES: Set[str] = _PresentationForwarder._WORD_WINDOW_CLASSES
-    _WORD_CONTENT_CLASSES: Set[str] = _PresentationForwarder._WORD_CONTENT_CLASSES
-    _WORD_HOST_CLASSES: Set[str] = _PresentationForwarder._WORD_HOST_CLASSES
-    _WPS_WRITER_PREFIXES: Tuple[str, ...] = _PresentationForwarder._WPS_WRITER_PREFIXES
-    _WPS_WRITER_KEYWORDS: Tuple[str, ...] = _PresentationForwarder._WPS_WRITER_KEYWORDS
-    _WPS_WRITER_EXCLUDE_KEYWORDS: Tuple[str, ...] = (
-        _PresentationForwarder._WPS_WRITER_EXCLUDE_KEYWORDS
-    )
-    _WPS_SLIDESHOW_CLASSES: Set[str] = _PresentationForwarder._WPS_SLIDESHOW_CLASSES
+
+    def _overlay_widget(self) -> Optional[QWidget]:
+        return self
 
     def __init__(self, settings_manager: SettingsManager) -> None:
         super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
@@ -5345,15 +5356,6 @@ class OverlayWindow(QWidget):
             return True
         keywords = ("ppt", "powerpnt", "powerpoint", "screenclass")
         return any(keyword in class_name for keyword in keywords)
-
-    def _window_process_name(self, hwnd: int) -> str:
-        pid = self._window_process_id(hwnd)
-        if not pid:
-            return ""
-        path = _process_image_path(int(pid))
-        if not path:
-            return ""
-        return os.path.basename(path).strip().lower()
 
     def _presentation_target_category(self, hwnd: Optional[int]) -> str:
         if not hwnd:
@@ -6502,98 +6504,6 @@ class OverlayWindow(QWidget):
             if restore and had_keyboard_grab:
                 self._ensure_keyboard_capture()
 
-    def _overlay_rect_tuple(self) -> Optional[Tuple[int, int, int, int]]:
-        rect = self.geometry()
-        if rect.isNull():
-            return None
-        left = rect.left()
-        top = rect.top()
-        right = left + rect.width()
-        bottom = top + rect.height()
-        return left, top, right, bottom
-
-    def _overlay_center_point(self) -> Optional[Tuple[int, int]]:
-        rect = self._overlay_rect_tuple()
-        if rect is None:
-            return None
-        left, top, right, bottom = rect
-        return ((left + right) // 2, (top + bottom) // 2)
-
-    def _rect_intersects_overlay(self, rect: Tuple[int, int, int, int]) -> bool:
-        overlay = self._overlay_rect_tuple()
-        if overlay is None:
-            return False
-        left, top, right, bottom = rect
-        o_left, o_top, o_right, o_bottom = overlay
-        return not (right <= o_left or left >= o_right or bottom <= o_top or top >= o_bottom)
-
-    def _fallback_is_target_window_valid(self, hwnd: int) -> bool:
-        if _USER32 is None or hwnd == 0:
-            return False
-        overlay_hwnd = int(self.winId()) if self.winId() else 0
-        if hwnd == overlay_hwnd:
-            return False
-        if not _user32_is_window(hwnd):
-            return False
-        if not _user32_is_window_visible(hwnd) or _user32_is_window_iconic(hwnd):
-            return False
-        rect = _user32_window_rect(hwnd)
-        if not rect:
-            return False
-        return self._rect_intersects_overlay(rect)
-
-    def _window_process_id(self, hwnd: int) -> Optional[int]:
-        if _USER32 is None or hwnd == 0:
-            return None
-        pid = wintypes.DWORD()
-        try:
-            _USER32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(pid))
-        except Exception:
-            return None
-        value = int(pid.value)
-        return value or None
-
-    def _is_own_process_window(self, hwnd: int) -> bool:
-        try:
-            pid = self._window_process_id(hwnd)
-            return pid == os.getpid() if pid is not None else False
-        except Exception:
-            return False
-
-    def _toolbar_hwnd(self) -> int:
-        toolbar = getattr(self, "toolbar", None)
-        if toolbar is None:
-            return 0
-        try:
-            wid = toolbar.winId()
-        except Exception:
-            return 0
-        return int(wid) if wid else 0
-
-    def _photo_overlay_hwnd(self) -> int:
-        photo = getattr(self, "_photo_overlay", None)
-        if photo is None:
-            return 0
-        try:
-            wid = photo.winId()
-        except Exception:
-            return 0
-        return int(wid) if wid else 0
-
-    def _should_ignore_window(self, hwnd: int) -> bool:
-        if hwnd == 0:
-            return True
-        overlay_hwnd = int(self.winId()) if self.winId() else 0
-        if hwnd == overlay_hwnd:
-            return True
-        toolbar_hwnd = self._toolbar_hwnd()
-        if toolbar_hwnd and hwnd == toolbar_hwnd:
-            return True
-        photo_hwnd = self._photo_overlay_hwnd()
-        if photo_hwnd and hwnd == photo_hwnd:
-            return True
-        return self._is_own_process_window(hwnd)
-
     def _fallback_is_candidate_window(self, hwnd: int) -> bool:
         if _USER32 is None or hwnd == 0:
             return False
@@ -7097,7 +7007,6 @@ class OverlayWindow(QWidget):
         if not color.isValid():
             return
         self.pen_color = color
-        config = get_pen_style_config(self.pen_style)
         base_width = self._effective_brush_width()
         self._refresh_pen_alpha_state()
         self._update_brush_pen_appearance(base_width, self._active_fade_max)
@@ -8365,334 +8274,6 @@ class ScoreboardDialog(QDialog):
             "    color: #ffffff;"
             "}"
         )
-
-        screen = QApplication.primaryScreen()
-        self._available_geometry = screen.availableGeometry() if screen is not None else QRect(0, 0, 1920, 1080)
-
-        self._update_order_buttons()
-        self._populate_grid()
-
-        if screen is not None:
-            self.setGeometry(self._available_geometry)
-
-    def _update_order_buttons(self) -> None:
-        for key, button in self.order_buttons.items():
-            block = button.blockSignals(True)
-            button.setChecked(key == self._order)
-            button.blockSignals(block)
-
-    def _on_order_button_clicked(self, order: str) -> None:
-        if order not in {self.ORDER_RANK, self.ORDER_ID}:
-            self._update_order_buttons()
-            return
-        if order == self._order:
-            self._update_order_buttons()
-            return
-        self._order = order
-        if callable(self._order_changed_callback):
-            try:
-                self._order_changed_callback(order)
-            except Exception:
-                pass
-        self._update_order_buttons()
-        self._populate_grid()
-
-    def _clear_grid(self) -> None:
-        while self.grid_layout.count():
-            item = self.grid_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-        for row in range(self._grid_row_count):
-            self.grid_layout.setRowStretch(row, 0)
-            self.grid_layout.setRowMinimumHeight(row, 0)
-        for column in range(self._grid_column_count):
-            self.grid_layout.setColumnStretch(column, 0)
-            self.grid_layout.setColumnMinimumWidth(column, 0)
-        self._grid_row_count = 0
-        self._grid_column_count = 0
-
-    def _collect_display_candidates(self) -> tuple[List[tuple[int, str, str]], List[str], List[str]]:
-        sorted_students = self._sort_students()
-        alternate_order = (
-            self.ORDER_ID if self._order == self.ORDER_RANK else self.ORDER_RANK
-        )
-        alternate_students = self._sort_students(alternate_order)
-
-        display_entries: List[tuple[int, str, str]] = []
-        display_candidates: List[str] = []
-        score_candidates: List[str] = []
-
-        for idx, (sid, name, score) in enumerate(sorted_students):
-            display_text = self._format_display_text(idx, sid, name)
-            score_text = self._format_score_text(score)
-            display_entries.append((idx, display_text, score_text))
-            display_candidates.append(display_text)
-            score_candidates.append(score_text)
-
-        for idx, (sid, name, score) in enumerate(alternate_students):
-            display_candidates.append(
-                self._format_display_text_for_order(
-                    alternate_order, idx, sid, name
-                )
-            )
-            score_candidates.append(self._format_score_text(score))
-
-        return display_entries, display_candidates, score_candidates
-
-    def _compute_card_metrics(self) -> Optional[_CardMetrics]:
-        count = len(self.students)
-        if count == 0:
-            return None
-
-        available = self._available_geometry
-        key = (count, available.width(), available.height())
-        if self._card_metrics is not None and self._card_metrics_key == key:
-            return self._card_metrics
-
-        columns = 10
-        rows = max(1, math.ceil(count / columns))
-
-        usable_width = max(available.width() - 160, 640)
-        usable_height = max(available.height() - 240, 520)
-
-        margins = self.grid_layout.contentsMargins()
-        horizontal_spacing = max(14, int(usable_width * 0.01))
-        vertical_spacing = max(18, int(usable_height * 0.035 / rows))
-
-        spacing_total_x = horizontal_spacing * max(0, columns - 1)
-        spacing_total_y = vertical_spacing * max(0, rows - 1)
-
-        available_width_for_cards = (
-            usable_width - margins.left() - margins.right() - spacing_total_x
-        )
-        available_height_for_cards = (
-            usable_height - margins.top() - margins.bottom() - spacing_total_y
-        )
-
-        per_card_width = max(1.0, available_width_for_cards / columns)
-        per_card_height = max(1.0, available_height_for_cards / rows)
-
-        card_width = int(math.floor(per_card_width))
-        card_height = int(math.floor(per_card_height))
-
-        if per_card_width >= 120:
-            card_width = max(card_width, 120)
-        if per_card_height >= 180:
-            card_height = max(card_height, 180)
-
-        padding_h = max(12, int(card_width * 0.08))
-        padding_v = max(14, int(card_height * 0.1))
-        inner_spacing = max(6, int(card_height * 0.045))
-
-        display_entries, display_candidates, score_candidates = self._collect_display_candidates()
-
-        if not display_candidates:
-            return None
-
-        calligraphy_font = self._calligraphy_font or QApplication.font().family()
-        if not calligraphy_font:
-            calligraphy_font = QFont().family()
-
-        try:
-            probe_font = QFont(calligraphy_font, 64, QFont.Weight.Bold)
-            metrics = QFontMetrics(probe_font)
-        except Exception:
-            probe_font = QFont()
-            metrics = QFontMetrics(probe_font)
-
-        widest_display = max(
-            display_candidates,
-            key=lambda text: metrics.tightBoundingRect(text).width(),
-        )
-        widest_score = max(
-            score_candidates,
-            key=lambda text: metrics.tightBoundingRect(text).width(),
-        )
-
-        usable_name_width = max(60, card_width - 2 * padding_h)
-        content_height = max(80, card_height - 2 * padding_v - inner_spacing)
-        name_height = int(content_height * 0.58)
-        score_height = max(32, content_height - name_height)
-
-        font_upper_bound = int(min(card_width * 0.28, card_height * 0.36))
-        font_upper_bound = max(20, font_upper_bound)
-        fit_minimum = 14
-
-        name_fit = self._fit_font_size(
-            widest_display,
-            calligraphy_font,
-            QFont.Weight.Bold,
-            usable_name_width,
-            name_height,
-            fit_minimum,
-            font_upper_bound,
-        )
-        score_fit = self._fit_font_size(
-            widest_score,
-            calligraphy_font,
-            QFont.Weight.Bold,
-            usable_name_width,
-            score_height,
-            fit_minimum,
-            font_upper_bound,
-        )
-
-        final_font_size = max(fit_minimum, min(name_fit, score_fit, font_upper_bound))
-
-        self._card_metrics = ScoreboardDialog._CardMetrics(
-            count=count,
-            columns=columns,
-            rows=rows,
-            card_width=card_width,
-            card_height=card_height,
-            padding_h=padding_h,
-            padding_v=padding_v,
-            inner_spacing=inner_spacing,
-            font_size=final_font_size,
-            horizontal_spacing=horizontal_spacing,
-            vertical_spacing=vertical_spacing,
-        )
-        self._card_metrics_key = key
-        return self._card_metrics
-
-    def _ensure_metrics(self) -> Optional[_CardMetrics]:
-        metrics = self._compute_card_metrics()
-        if metrics is not None:
-            return metrics
-        self._card_metrics = None
-        self._card_metrics_key = None
-        return None
-
-    def _sort_students(self, order: Optional[str] = None) -> List[tuple[str, str, int]]:
-        data = list(self.students)
-        current_order = self._order if order is None else order
-        if current_order == self.ORDER_ID:
-            def _id_key(item: tuple[str, str, int]) -> tuple[int, str, str]:
-                sid_text = str(item[0]).strip()
-                try:
-                    sid_value = int(sid_text)
-                except (TypeError, ValueError):
-                    sid_value = sys.maxsize
-                return (sid_value, sid_text, item[1])
-
-            data.sort(key=_id_key)
-        else:
-            def _rank_key(item: tuple[str, str, int]) -> tuple[int, int, str]:
-                sid_text = str(item[0]).strip()
-                try:
-                    sid_value = int(sid_text)
-                except (TypeError, ValueError):
-                    sid_value = sys.maxsize
-                return (-item[2], sid_value, item[1])
-
-            data.sort(key=_rank_key)
-        return data
-
-    def _create_card(
-        self,
-        display_text: str,
-        score_text: str,
-        card_width: int,
-        card_height: int,
-        font_size: int,
-        padding_h: int,
-        padding_v: int,
-        inner_spacing: int,
-    ) -> QWidget:
-        calligraphy_font = self._calligraphy_font
-        wrapper = QWidget()
-        wrapper.setProperty("class", "scoreboardWrapper")
-        wrapper.setFixedSize(card_width, card_height)
-        wrapper.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-
-        layout = QVBoxLayout(wrapper)
-        layout.setContentsMargins(padding_h, padding_v, padding_h, padding_v)
-        layout.setSpacing(inner_spacing)
-
-        name_label = QLabel(display_text or "未命名")
-        name_label.setProperty("class", "scoreboardName")
-        name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        name_label.setWordWrap(False)
-        name_label.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
-        )
-        name_label.setFont(QFont(calligraphy_font, font_size, QFont.Weight.Bold))
-        name_label.setStyleSheet("margin: 0px; padding: 0px;")
-        layout.addWidget(name_label)
-
-        score_label = QLabel(score_text)
-        score_label.setProperty("class", "scoreboardScore")
-        score_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        score_label.setWordWrap(False)
-        score_label.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
-        )
-        score_label.setFont(QFont(calligraphy_font, font_size, QFont.Weight.Bold))
-        score_label.setStyleSheet(f"margin-top: {max(6, inner_spacing // 2)}px;")
-        layout.addWidget(score_label)
-
-        layout.addStretch(1)
-        return wrapper
-
-    def _format_display_text(self, index: int, sid: str, name: str) -> str:
-        return self._format_display_text_for_order(self._order, index, sid, name)
-
-    def _format_display_text_for_order(
-        self, order: str, index: int, sid: str, name: str
-    ) -> str:
-        clean_name = (name or "").strip() or "未命名"
-        if order == self.ORDER_ID:
-            sid_display = str(sid).strip() or "—"
-            return f"{sid_display}.{clean_name}"
-        return f"{index + 1}.{clean_name}"
-
-    @staticmethod
-    def _format_score_text(score: int | float | str) -> str:
-        text = "—"
-        try:
-            value = float(score)
-        except (TypeError, ValueError):
-            score_str = str(score).strip()
-            if score_str and score_str.lower() != "none":
-                text = score_str
-        else:
-            if math.isfinite(value):
-                if abs(value - int(value)) < 1e-6:
-                    text = str(int(round(value)))
-                else:
-                    text = f"{value:.2f}".rstrip("0").rstrip(".")
-        return f"{text} 分"
-
-    @staticmethod
-    def _fit_font_size(
-        text: str,
-        family: str,
-        weight: QFont.Weight,
-        max_width: int,
-        max_height: int,
-        minimum: int,
-        maximum: int,
-    ) -> int:
-        if not text:
-            return max(6, min(minimum, maximum))
-        if max_width <= 0 or max_height <= 0:
-            return max(6, min(minimum, maximum))
-        lower = max(6, min(minimum, maximum))
-        upper = max(6, max(minimum, maximum))
-        for size in range(upper, lower - 1, -1):
-            font = QFont(family, size, weight)
-            metrics = QFontMetrics(font)
-            rect = metrics.tightBoundingRect(text)
-            if rect.width() <= max_width and rect.height() <= max_height:
-                return size
-        return lower
-
-    def _populate_grid(self) -> None:
-        self._clear_grid()
-        count = len(self.students)
-        layout = self.grid_layout
-        calligraphy_font = self._calligraphy_font
 
         screen = QApplication.primaryScreen()
         self._available_geometry = screen.availableGeometry() if screen is not None else QRect(0, 0, 1920, 1080)
