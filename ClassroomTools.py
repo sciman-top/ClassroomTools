@@ -6690,13 +6690,19 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             release = forwarder._deliver_key_message(hwnd, win32con.WM_KEYUP, vk_code, up_param)
         except Exception:
             return False
-        if press and release:
-            try:
-                forwarder._last_target_hwnd = hwnd
-            except Exception:
-                pass
-            return True
-        return False
+        if not press:
+            return False
+        try:
+            forwarder._last_target_hwnd = hwnd
+        except Exception:
+            pass
+        if not release:
+            self._log_navigation_debug(
+                "wps_keyup_failed",
+                target=hex(hwnd),
+                vk_code=vk_code,
+            )
+        return True
 
     def _send_ms_slideshow_virtual_key(self, hwnd: int, vk_code: int) -> bool:
         if not hwnd or vk_code == 0:
