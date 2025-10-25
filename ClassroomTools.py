@@ -6353,6 +6353,21 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             else "other"
         )
         allow_wps_override = base_category not in {"ms_word", "wps_word"}
+        if not allow_wps_override and _USER32 is not None:
+            try:
+                foreground = _user32_get_foreground_window()
+            except Exception:
+                foreground = 0
+            if foreground:
+                candidates = (
+                    self._normalize_presentation_target(foreground),
+                    foreground,
+                    _user32_top_level_hwnd(foreground),
+                )
+                for candidate in candidates:
+                    if candidate and self._is_wps_slideshow_target(candidate):
+                        allow_wps_override = True
+                        break
         wps_override = self._find_wps_slideshow_target() if allow_wps_override else None
         ms_override: Optional[int] = None
         if not wps_override:
@@ -7302,6 +7317,24 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             return False
         if not self._presentation_control_allowed(hwnd, log=False):
             return False
+        resolved_category = self._presentation_target_category(hwnd)
+        if preferred_category and resolved_category != preferred_category:
+            alternate = self._fallback_detect_presentation_window_user32(
+                preferred_category=preferred_category
+            )
+            if (
+                alternate
+                and alternate != hwnd
+                and self._fallback_is_target_window_valid(alternate)
+                and self._presentation_control_allowed(alternate, log=False)
+            ):
+                alt_category = self._presentation_target_category(alternate)
+                if alt_category == preferred_category:
+                    hwnd = alternate
+                else:
+                    return False
+            else:
+                return False
         class_name = self._presentation_window_class(hwnd)
         top_level = _user32_top_level_hwnd(hwnd)
         attach_pair = self._attach_to_target_thread(top_level or hwnd)
