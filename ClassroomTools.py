@@ -1029,36 +1029,97 @@ def _compute_presentation_category(
 ) -> str:
     """Classify a presentation window based on class and process hints."""
 
-    def _normalize(name: str) -> str:
-        return name.strip().lower() if name else ""
+    def _normalize(value: Any) -> str:
+        if isinstance(value, str):
+            text = value
+        else:
+            try:
+                text = str(value)
+            except Exception:
+                return ""
+        stripped = text.strip()
+        return stripped.lower()
+
+    def _normalize_process(value: Any) -> Tuple[str, str]:
+        if isinstance(value, str):
+            stripped = value.strip()
+        else:
+            try:
+                stripped = str(value).strip()
+            except Exception:
+                stripped = ""
+        return stripped, stripped.lower()
 
     primary = _normalize(class_name)
     secondary = _normalize(top_class)
     classes = tuple(dict.fromkeys(filter(None, (primary, secondary))))
 
-    process = process_name.strip()
-    process_lower = process.lower()
+    process, process_lower = _normalize_process(process_name)
 
-    for candidate in classes:
-        if has_wps_presentation_signature(candidate):
-            return "wps_ppt"
+    if not classes and not process_lower:
+        return "other"
 
-    for candidate in classes:
-        if is_wps_slideshow_class(candidate):
-            return "wps_ppt"
+    predicate_cache: Dict[int, Dict[str, bool]] = {}
+    process_cache: Dict[int, bool] = {}
+    _missing = object()
 
-    if process and is_wps_presentation_process(process, *classes):
+    def _class_check(predicate: Callable[[str], bool]) -> bool:
+        key = id(predicate)
+        cache = predicate_cache.setdefault(key, {})
+        for candidate in classes:
+            cached = cache.get(candidate, _missing)
+            if cached is _missing:
+                try:
+                    cached = bool(predicate(candidate))
+                except Exception:
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug(
+                            "presentation: predicate %s failed for %s",  # pragma: no cover - log only
+                            getattr(predicate, "__name__", repr(predicate)),
+                            candidate,
+                            exc_info=True,
+                        )
+                    cached = False
+                cache[candidate] = bool(cached)
+            if cached:
+                return True
+        return False
+
+    def _process_check(predicate: Callable[..., bool]) -> bool:
+        if not process:
+            return False
+        key = id(predicate)
+        cached = process_cache.get(key, _missing)
+        if cached is _missing:
+            try:
+                cached = bool(predicate(process, *classes))
+            except Exception:
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "presentation: process predicate %s failed",  # pragma: no cover - log only
+                        getattr(predicate, "__name__", repr(predicate)),
+                        exc_info=True,
+                    )
+                cached = False
+            process_cache[key] = bool(cached)
+        return bool(cached)
+
+    if _class_check(has_wps_presentation_signature):
         return "wps_ppt"
 
-    for candidate in classes:
-        if has_wps_writer_signature(candidate):
-            return "wps_word"
+    if _class_check(is_wps_slideshow_class):
+        return "wps_ppt"
 
-    for candidate in classes:
-        if is_word_like_class(candidate):
-            return "ms_word"
+    if _process_check(is_wps_presentation_process):
+        return "wps_ppt"
 
-    if process and is_wps_writer_process(process, *classes):
+    if _class_check(has_wps_writer_signature):
+        return "wps_word"
+
+    if _class_check(is_word_like_class):
+        return "ms_word"
+
+    if _process_check(is_wps_writer_process):
         return "wps_word"
 
     if process_lower:
@@ -1071,9 +1132,8 @@ def _compute_presentation_category(
         if "winword" in process_lower:
             return "ms_word"
 
-    for candidate in classes:
-        if has_ms_presentation_signature(candidate):
-            return "ms_ppt"
+    if _class_check(has_ms_presentation_signature):
+        return "ms_ppt"
 
     return "other"
 
