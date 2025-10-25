@@ -920,21 +920,10 @@ def ensure_widget_within_screen(widget: QWidget) -> None:
     widget.move(x, y)
 
 
-def str_to_bool(value: str, default: bool = False) -> bool:
-    """Coerce configuration strings into booleans with sensible fallbacks."""
+def str_to_bool(value: Any, default: bool = False) -> bool:
+    """Backward-compatible wrapper around :func:`parse_bool`."""
 
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"1", "true", "yes", "on", "y"}:
-            return True
-        if normalized in {"0", "false", "no", "off", "n"}:
-            return False
-        return default
-    if isinstance(value, (int, float)):
-        return bool(value)
-    return default
+    return parse_bool(value, default)
 
 
 def bool_to_str(value: bool) -> str:

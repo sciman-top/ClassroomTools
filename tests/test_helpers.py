@@ -39,6 +39,7 @@ def _load_helper_module() -> types.ModuleType:
     sys.modules[module.__name__] = module
 
     targets = {
+        "parse_bool",
         "_ensure_directory",
         "_ensure_writable_directory",
         "_preferred_app_directory",
