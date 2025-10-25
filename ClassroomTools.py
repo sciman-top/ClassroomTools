@@ -103,19 +103,48 @@ def clamp(value: float, minimum: float, maximum: float) -> float:
     return max(minimum, min(maximum, value))
 
 
+_TRUE_STRINGS = frozenset({"1", "true", "yes", "on", "y", "t"})
+_FALSE_STRINGS = frozenset({"0", "false", "no", "off", "n", "f"})
+
+
 def parse_bool(value: Any, default: bool = False) -> bool:
     """Attempt to coerce *value* into a boolean, returning *default* on failure."""
 
     if isinstance(value, bool):
         return value
     if isinstance(value, (int, float)):
+        if isinstance(value, float) and math.isnan(value):
+            return default
         return bool(value)
+    if isinstance(value, Enum):
+        return parse_bool(value.value, default)
+    if isinstance(value, bytes):
+        try:
+            value = value.decode("utf-8")
+        except Exception:
+            return default
     if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"1", "true", "yes", "on", "y"}:
+        normalized = value.strip()
+        if not normalized:
+            return default
+        lowered = normalized.casefold()
+        if lowered in _TRUE_STRINGS:
             return True
-        if normalized in {"0", "false", "no", "off", "n"}:
+        if lowered in _FALSE_STRINGS:
             return False
+        signless = lowered[1:] if lowered[0] in "+-" and len(lowered) > 1 else lowered
+        if signless.isdigit():
+            try:
+                return bool(int(lowered, 10))
+            except Exception:
+                return default
+        try:
+            number = float(lowered)
+        except ValueError:
+            return default
+        if math.isnan(number):
+            return default
+        return bool(number)
     return default
 
 
@@ -920,10 +949,10 @@ def ensure_widget_within_screen(widget: QWidget) -> None:
     widget.move(x, y)
 
 
-def str_to_bool(value: str, default: bool = False) -> bool:
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return default
+def str_to_bool(value: Any, default: bool = False) -> bool:
+    """Backward-compatible wrapper around :func:`parse_bool`."""
+
+    return parse_bool(value, default)
 
 
 def bool_to_str(value: bool) -> str:
