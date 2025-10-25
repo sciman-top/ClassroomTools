@@ -3975,8 +3975,9 @@ class _PresentationWindowMixin:
             return None
         return candidates
 
-    def _overlay_widget(self) -> Optional[QWidget]:
-        raise NotImplementedError
+    @classmethod
+    def _normalize_class_hint(cls, value: Any) -> str:
+        return cls._PrefixKeywordClassifier._normalize(value)
 
     def _overlay_child_widget(self, attribute: str) -> Optional[QWidget]:
         overlay = self._overlay_widget()
@@ -3986,10 +3987,29 @@ class _PresentationWindowMixin:
         if widget is None:
             return 0
         try:
-            wid = widget.winId()
+            if isinstance(value, bytes):
+                value = value.decode("utf-8", "ignore")
+            else:
+                value = str(value)
         except Exception:
-            return 0
-        return int(wid) if wid else 0
+            return ""
+        return value.strip().casefold()
+
+    def _normalized_process_context(
+        self, process_name: Any, classes: Iterable[Any]
+    ) -> Tuple[str, Tuple[str, ...]]:
+        normalized_name = self._normalize_process_name(process_name)
+        normalized_classes = self._normalized_class_hints(*classes)
+        return normalized_name, normalized_classes
+
+    def _classify_wps_process(
+        self, process_name: Any, *classes: Any
+    ) -> Literal["presentation", "writer", "other"]:
+        name, normalized_classes = self._normalized_process_context(process_name, classes)
+        if not name:
+            return "other"
+        if name.startswith(("wpp", "wppt")) or "wpspresentation" in name:
+            return "presentation"
 
     def _toolbar_widget(self) -> Optional[QWidget]:
         return self._overlay_child_widget("toolbar")
