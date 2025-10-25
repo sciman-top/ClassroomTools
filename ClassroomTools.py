@@ -3682,6 +3682,22 @@ class _PresentationWindowMixin:
     _WPS_WRITER_KEYWORDS: Tuple[str, ...] = ("frame", "view", "doc", "page")
     _WPS_WRITER_EXCLUDE_KEYWORDS: Tuple[str, ...] = ("show", "slideshow")
 
+    def _wps_writer_prefix_state(self, class_name: str) -> Tuple[bool, bool]:
+        if not class_name:
+            return False, False
+        has_prefix = any(
+            class_name.startswith(prefix) for prefix in self._WPS_WRITER_PREFIXES
+        )
+        if not has_prefix:
+            return False, False
+        has_exclusion = any(
+            excluded in class_name for excluded in self._WPS_WRITER_EXCLUDE_KEYWORDS
+        )
+        return True, has_exclusion
+
+    def _wps_writer_keyword_match(self, class_name: str) -> bool:
+        return any(keyword in class_name for keyword in self._WPS_WRITER_KEYWORDS)
+
     def _is_wps_slideshow_class(self, class_name: str) -> bool:
         if not class_name:
             return False
@@ -3702,20 +3718,22 @@ class _PresentationWindowMixin:
             return True
         if "word" in class_name:
             return True
-        if any(class_name.startswith(prefix) for prefix in self._WPS_WRITER_PREFIXES):
-            if any(excluded in class_name for excluded in self._WPS_WRITER_EXCLUDE_KEYWORDS):
+        has_prefix, has_exclusion = self._wps_writer_prefix_state(class_name)
+        if has_prefix:
+            if has_exclusion:
                 return False
-            if any(keyword in class_name for keyword in self._WPS_WRITER_KEYWORDS):
+            if self._wps_writer_keyword_match(class_name):
                 return True
         return False
 
     def _class_has_wps_writer_signature(self, class_name: str) -> bool:
         if not class_name:
             return False
-        if any(class_name.startswith(prefix) for prefix in self._WPS_WRITER_PREFIXES):
-            if any(excluded in class_name for excluded in self._WPS_WRITER_EXCLUDE_KEYWORDS):
+        has_prefix, has_exclusion = self._wps_writer_prefix_state(class_name)
+        if has_prefix:
+            if has_exclusion:
                 return False
-            if any(keyword in class_name for keyword in self._WPS_WRITER_KEYWORDS):
+            if self._wps_writer_keyword_match(class_name):
                 return True
         if class_name in {
             "kwpsdocview",
@@ -3872,16 +3890,11 @@ class _PresentationWindowMixin:
     def _overlay_widget(self) -> Optional[QWidget]:
         raise NotImplementedError
 
-    def _toolbar_widget(self) -> Optional[QWidget]:
+    def _overlay_child_widget(self, attribute: str) -> Optional[QWidget]:
         overlay = self._overlay_widget()
-        return getattr(overlay, "toolbar", None) if overlay is not None else None
+        return getattr(overlay, attribute, None) if overlay is not None else None
 
-    def _photo_overlay_widget(self) -> Optional[QWidget]:
-        overlay = self._overlay_widget()
-        return getattr(overlay, "_photo_overlay", None) if overlay is not None else None
-
-    def _overlay_hwnd(self) -> int:
-        widget = self._overlay_widget()
+    def _widget_hwnd(self, widget: Optional[QWidget]) -> int:
         if widget is None:
             return 0
         try:
@@ -3890,25 +3903,20 @@ class _PresentationWindowMixin:
             return 0
         return int(wid) if wid else 0
 
+    def _toolbar_widget(self) -> Optional[QWidget]:
+        return self._overlay_child_widget("toolbar")
+
+    def _photo_overlay_widget(self) -> Optional[QWidget]:
+        return self._overlay_child_widget("_photo_overlay")
+
+    def _overlay_hwnd(self) -> int:
+        return self._widget_hwnd(self._overlay_widget())
+
     def _toolbar_hwnd(self) -> int:
-        toolbar = self._toolbar_widget()
-        if toolbar is None:
-            return 0
-        try:
-            wid = toolbar.winId()
-        except Exception:
-            return 0
-        return int(wid) if wid else 0
+        return self._widget_hwnd(self._toolbar_widget())
 
     def _photo_overlay_hwnd(self) -> int:
-        photo = self._photo_overlay_widget()
-        if photo is None:
-            return 0
-        try:
-            wid = photo.winId()
-        except Exception:
-            return 0
-        return int(wid) if wid else 0
+        return self._widget_hwnd(self._photo_overlay_widget())
 
     def _overlay_rect_tuple(self) -> Optional[Tuple[int, int, int, int]]:
         widget = self._overlay_widget()
