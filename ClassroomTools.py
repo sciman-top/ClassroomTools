@@ -6707,6 +6707,23 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             )
         return True
 
+    def _attempt_wps_keyup_recovery(
+        self,
+        forwarder: Optional["_PresentationForwarder"],
+        hwnd: Optional[int],
+        vk_code: int,
+    ) -> bool:
+        if forwarder is None or not hwnd or vk_code == 0 or win32con is None:
+            return False
+        try:
+            up_param = forwarder._build_basic_key_lparam(vk_code, is_press=False)
+        except Exception:
+            return False
+        try:
+            return forwarder._deliver_key_message(hwnd, win32con.WM_KEYUP, vk_code, up_param)
+        except Exception:
+            return False
+
     def _send_ms_slideshow_virtual_key(self, hwnd: int, vk_code: int) -> bool:
         if not hwnd or vk_code == 0:
             return False
@@ -6844,15 +6861,38 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                     is_press=True,
                     allow_cursor=True,
                 )
-                release_ok = (
-                    self._forwarder.forward_key(
+                release_ok = False
+                if press_ok:
+                    release_ok = self._forwarder.forward_key(
                         release_event,
                         is_press=False,
                         allow_cursor=True,
                     )
-                    if press_ok
-                    else False
-                )
+                    if not release_ok:
+                        target_for_release: Optional[int] = None
+                        try:
+                            target_for_release = self._forwarder.get_presentation_target()
+                        except Exception:
+                            target_for_release = None
+                        if not target_for_release:
+                            target_for_release = (
+                                self._current_navigation_target()
+                                or effective_target
+                                or target_hwnd
+                            )
+                        if target_for_release and self._is_wps_slideshow_target(target_for_release):
+                            recovered = self._attempt_wps_keyup_recovery(
+                                self._forwarder,
+                                target_for_release,
+                                vk_code,
+                            )
+                            if not recovered:
+                                self._log_navigation_debug(
+                                    "wps_keyup_missing",
+                                    target=hex(target_for_release),
+                                    vk_code=vk_code,
+                                )
+                            release_ok = True
                 if press_ok and release_ok:
                     success = True
                     current_target = self._forwarder.get_presentation_target()
