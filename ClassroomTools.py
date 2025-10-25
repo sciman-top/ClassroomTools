@@ -3917,6 +3917,7 @@ class _PresentationForwarder(_PresentationWindowMixin):
         self.overlay = overlay
         self._last_target_hwnd: Optional[int] = None
         self._child_buffer: List[int] = []
+        self._wps_pending_keyups: Set[int] = set()
 
     def _log_debug(self, message: str, *args: Any) -> None:
         if logger.isEnabledFor(logging.DEBUG):
@@ -3924,6 +3925,7 @@ class _PresentationForwarder(_PresentationWindowMixin):
 
     def clear_cached_target(self) -> None:
         self._last_target_hwnd = None
+        self._wps_pending_keyups.clear()
 
     def _window_class_name(self, hwnd: int) -> str:
         if hwnd == 0:
@@ -4074,6 +4076,23 @@ class _PresentationForwarder(_PresentationWindowMixin):
             self.clear_cached_target()
             return False
         is_wps_target = self._is_wps_slideshow_window(target)
+        gate_acquired = False
+        gate_reset: Optional[Callable[[], None]] = None
+        if is_wps_target:
+            claim_gate = getattr(self.overlay, "_claim_wps_animation_gate", None)
+            if callable(claim_gate):
+                try:
+                    allowed = bool(claim_gate())
+                except Exception:
+                    allowed = True
+                if not allowed:
+                    self._log_debug(
+                        "forward_wheel: throttled duplicate target=%s",
+                        hex(target) if target else "0x0",
+                    )
+                    return True
+                gate_acquired = True
+                gate_reset = getattr(self.overlay, "_reset_wps_animation_gate", None)
         keys = self._translate_mouse_modifiers(event)
         delta_word = ctypes.c_short(delta).value & 0xFFFF
         w_param = (ctypes.c_ushort(keys).value & 0xFFFF) | (delta_word << 16)
@@ -4087,6 +4106,7 @@ class _PresentationForwarder(_PresentationWindowMixin):
             if is_wps_target
             else self._keyboard_capture_guard()
         )
+        focus_ok = False
         with guard:
             if is_wps_target:
                 focus_ok = True
@@ -4102,6 +4122,11 @@ class _PresentationForwarder(_PresentationWindowMixin):
                     break
             if not delivered and focus_ok:
                 delivered = self._deliver_mouse_wheel(target, w_param, l_param)
+        if is_wps_target and not delivered and gate_acquired and callable(gate_reset):
+            try:
+                gate_reset()
+            except Exception:
+                pass
         if not delivered:
             self.clear_cached_target()
         if logger.isEnabledFor(logging.DEBUG):
@@ -4126,6 +4151,9 @@ class _PresentationForwarder(_PresentationWindowMixin):
         vk_code = self._resolve_vk_code(event)
         if vk_code is None:
             return False
+        if not is_press and vk_code in self._wps_pending_keyups:
+            self._wps_pending_keyups.discard(vk_code)
+            return True
         target = self._resolve_presentation_target()
         if not target:
             target = self._detect_presentation_window()
@@ -4141,6 +4169,10 @@ class _PresentationForwarder(_PresentationWindowMixin):
             )
             self.clear_cached_target()
             return False
+        if self._is_wps_slideshow_window(target) and is_press:
+            if self._forward_wps_navigation_key(target, vk_code):
+                self._wps_pending_keyups.add(vk_code)
+                return True
         for hwnd, update_cache in self._iter_key_targets(target):
             if self._send_key_to_window(
                 hwnd, vk_code, event, is_press=is_press, update_cache=update_cache
@@ -4174,13 +4206,61 @@ class _PresentationForwarder(_PresentationWindowMixin):
             self.clear_cached_target()
             return False
         if self._is_wps_slideshow_window(target):
-            success = self._send_wps_slideshow_key_sequence(target, vk_code)
-            if not success:
-                self._log_debug(
-                    "send_virtual_key: wps slideshow delivery failed vk=%s",
-                    vk_code,
-                )
-            return success
+            claim_gate = getattr(self.overlay, "_claim_wps_animation_gate", None)
+            reset_gate = getattr(self.overlay, "_reset_wps_animation_gate", None)
+            gate_acquired = False
+            if callable(claim_gate):
+                try:
+                    allowed = bool(claim_gate())
+                except Exception:
+                    allowed = True
+                if not allowed:
+                    self._log_debug(
+                        "send_virtual_key: throttled duplicate target=%s vk=%s",
+                        hex(target) if target else "0x0",
+                        vk_code,
+                    )
+                    return True
+                gate_acquired = True
+            candidates = [target]
+            try:
+                extra = self._collect_wps_slideshow_targets(target)
+            except Exception:
+                extra = []
+            for candidate in extra:
+                if candidate not in candidates:
+                    candidates.append(candidate)
+            delivered = False
+            pending_release = False
+            pending_target: Optional[int] = None
+            for candidate in candidates:
+                press_ok, release_ok = self._send_wps_slideshow_key_sequence(candidate, vk_code)
+                if not press_ok:
+                    continue
+                if candidate != target:
+                    self._last_target_hwnd = candidate
+                delivered = True
+                pending_release = not release_ok
+                pending_target = candidate
+                break
+            if not delivered and gate_acquired and callable(reset_gate):
+                try:
+                    reset_gate()
+                except Exception:
+                    pass
+            if delivered:
+                if pending_release:
+                    self._log_debug(
+                        "send_virtual_key: pending keyup hwnd=%s vk=%s",
+                        pending_target,
+                        vk_code,
+                    )
+                return True
+            self._log_debug(
+                "send_virtual_key: wps slideshow delivery failed vk=%s",
+                vk_code,
+            )
+            return False
         if self._is_ms_slideshow_window(target) or self._is_word_window(target):
             success = False
             for hwnd, update_cache in self._iter_key_targets(target):
@@ -4515,23 +4595,117 @@ class _PresentationForwarder(_PresentationWindowMixin):
         release = self._deliver_key_message(hwnd, win32con.WM_KEYUP, vk_code, up_param)
         return press and release
 
-    def _send_wps_slideshow_key_sequence(self, hwnd: int, vk_code: int) -> bool:
+    def _send_wps_slideshow_key_sequence(self, hwnd: int, vk_code: int) -> Tuple[bool, bool]:
         if win32con is None or hwnd == 0 or vk_code == 0:
-            return False
+            return False, False
         down_param = self._build_basic_key_lparam(vk_code, is_press=True)
         up_param = self._build_basic_key_lparam(vk_code, is_press=False)
         press = self._deliver_key_message(hwnd, win32con.WM_KEYDOWN, vk_code, down_param)
         if not press:
-            return False
+            return False, False
         release = self._deliver_key_message(hwnd, win32con.WM_KEYUP, vk_code, up_param)
-        if not release:
+        if release:
+            self._last_target_hwnd = hwnd
+            return True, True
+        self._log_debug(
+            "_send_wps_slideshow_key_sequence: release failed hwnd=%s vk=%s",
+            hwnd,
+            vk_code,
+        )
+        retry_release = self._deliver_key_message(hwnd, win32con.WM_KEYUP, vk_code, up_param)
+        if retry_release:
+            self._last_target_hwnd = hwnd
+            return True, True
+        self._log_debug(
+            "_send_wps_slideshow_key_sequence: second release failed hwnd=%s vk=%s",
+            hwnd,
+            vk_code,
+        )
+        self._last_target_hwnd = hwnd
+        return True, False
+
+    def _forward_wps_navigation_key(self, hwnd: int, vk_code: int) -> bool:
+        if hwnd == 0 or vk_code == 0:
+            return False
+        claim_gate = getattr(self.overlay, "_claim_wps_animation_gate", None)
+        reset_gate = getattr(self.overlay, "_reset_wps_animation_gate", None)
+        gate_acquired = False
+        if callable(claim_gate):
+            try:
+                allowed = bool(claim_gate())
+            except Exception:
+                allowed = True
+            if not allowed:
+                self._log_debug(
+                    "_forward_wps_navigation_key: throttled duplicate target=%s vk=%s",
+                    hex(hwnd) if hwnd else "0x0",
+                    vk_code,
+                )
+                return True
+            gate_acquired = True
+        candidates = [hwnd]
+        try:
+            extra = self._collect_wps_slideshow_targets(hwnd)
+        except Exception:
+            extra = []
+        for candidate in extra:
+            if candidate not in candidates:
+                candidates.append(candidate)
+        delivered = False
+        pending_release = False
+        pending_target: Optional[int] = None
+        for candidate in candidates:
+            if not candidate:
+                continue
+            if not self._is_wps_slideshow_window(candidate) and candidate != hwnd:
+                continue
+            press_ok, release_ok = self._send_wps_slideshow_key_sequence(candidate, vk_code)
+            if not press_ok:
+                continue
+            if candidate != hwnd:
+                self._last_target_hwnd = candidate
+            delivered = True
+            pending_release = not release_ok
+            pending_target = candidate
+            break
+        if not delivered and gate_acquired and callable(reset_gate):
+            try:
+                reset_gate()
+            except Exception:
+                pass
+        if not delivered:
+            return False
+        if pending_release:
             self._log_debug(
-                "_send_wps_slideshow_key_sequence: release failed hwnd=%s vk=%s",
-                hwnd,
+                "_forward_wps_navigation_key: pending keyup hwnd=%s vk=%s",
+                pending_target,
                 vk_code,
             )
-        self._last_target_hwnd = hwnd
+            recover = getattr(self.overlay, "_attempt_wps_keyup_recovery", None)
+            if callable(recover) and pending_target:
+                try:
+                    recover(self, pending_target, vk_code)
+                except Exception:
+                    pass
         return True
+
+    def _collect_wps_slideshow_targets(self, hwnd: int) -> List[int]:
+        handles: List[int] = []
+        if hwnd:
+            handles.append(hwnd)
+        try:
+            candidates = list(self._iter_key_targets(hwnd))
+        except Exception:
+            candidates = []
+        for candidate, _update_cache in candidates:
+            if candidate in handles:
+                continue
+            if self._is_wps_slideshow_window(candidate):
+                handles.append(candidate)
+        if hwnd and hwnd in handles:
+            # Ensure the provided target remains first
+            handles = [hwnd] + [h for h in handles if h != hwnd]
+        return handles
 
     def _map_virtual_key(self, vk_code: int) -> int:
         map_vk = getattr(win32api, "MapVirtualKey", None) if win32api is not None else None
@@ -5338,6 +5512,7 @@ class _PresentationForwarder(_PresentationWindowMixin):
 class OverlayWindow(QWidget, _PresentationWindowMixin):
     _NAVIGATION_RESTORE_DELAY_MS = 600
     _NAVIGATION_HOLD_DURATION_MS = 2400
+    _WPS_ANIMATION_GATE_INTERVAL_MS = 180
 
     def _overlay_widget(self) -> Optional[QWidget]:
         return self
@@ -5464,6 +5639,10 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         self._pending_wps_cursor_pulse = False
         self._pending_wps_cursor_reset = False
         self._wps_cursor_reset_timer: Optional[QTimer] = None
+        self._wps_animation_gate_active = False
+        self._wps_animation_gate_timer = QTimer(self)
+        self._wps_animation_gate_timer.setSingleShot(True)
+        self._wps_animation_gate_timer.timeout.connect(self._on_wps_animation_gate_timeout)
         base_width = self._effective_brush_width()
         self._brush_pen = QPen(
             self.pen_color,
@@ -6211,6 +6390,32 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
 
         QTimer.singleShot(50, _apply_pulse)
 
+    def _on_wps_animation_gate_timeout(self) -> None:
+        self._wps_animation_gate_active = False
+
+    def _reset_wps_animation_gate(self) -> None:
+        self._wps_animation_gate_active = False
+        timer = getattr(self, "_wps_animation_gate_timer", None)
+        if timer is not None and timer.isActive():
+            try:
+                timer.stop()
+            except Exception:
+                pass
+
+    def _claim_wps_animation_gate(self) -> bool:
+        if not getattr(self, "control_wps_ppt", True):
+            return True
+        if getattr(self, "_wps_animation_gate_active", False):
+            return False
+        self._wps_animation_gate_active = True
+        timer = getattr(self, "_wps_animation_gate_timer", None)
+        if timer is not None:
+            try:
+                timer.start(self._WPS_ANIMATION_GATE_INTERVAL_MS)
+            except Exception:
+                pass
+        return True
+
     def _reset_wps_presentation_state(self, *, trigger_cursor: bool = True) -> None:
         forwarder = getattr(self, "_forwarder", None)
         if forwarder is not None:
@@ -6223,6 +6428,7 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         except Exception:
             pass
         self._pending_wps_cursor_pulse = False
+        self._reset_wps_animation_gate()
         if not trigger_cursor:
             return
         mode = getattr(self, "mode", None)
@@ -6519,6 +6725,8 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             prefer_wheel = (
                 (via_toolbar or self.navigation_active or original_mode == "cursor" or is_word_category)
                 and not is_ms_ppt_target
+                and not wps_slideshow_target
+                and not self._is_wps_slideshow_class(target_class)
             )
             base_suppress_focus_restore = bool(wps_slideshow_target) or self._is_wps_slideshow_class(target_class)
             focus_restore_suppressed = base_suppress_focus_restore or override_focus_restore
@@ -6715,28 +6923,62 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         forwarder = getattr(self, "_forwarder", None)
         if forwarder is None or win32con is None:
             return False
-        try:
-            down_param = forwarder._build_basic_key_lparam(vk_code, is_press=True)
-            up_param = forwarder._build_basic_key_lparam(vk_code, is_press=False)
-        except Exception:
-            return False
-        try:
-            press = forwarder._deliver_key_message(hwnd, win32con.WM_KEYDOWN, vk_code, down_param)
-            release = forwarder._deliver_key_message(hwnd, win32con.WM_KEYUP, vk_code, up_param)
-        except Exception:
-            return False
-        if not press:
-            return False
-        try:
-            forwarder._last_target_hwnd = hwnd
-        except Exception:
-            pass
-        if not release:
+        gate_acquired = False
+        if not self._claim_wps_animation_gate():
             self._log_navigation_debug(
-                "wps_keyup_failed",
-                target=hex(hwnd),
+                "wps_navigation_throttled",
+                target=hex(hwnd) if hwnd else "0x0",
                 vk_code=vk_code,
             )
+            return True
+        gate_acquired = True
+        try:
+            candidates = forwarder._collect_wps_slideshow_targets(hwnd)
+        except Exception:
+            candidates = [hwnd]
+        if not candidates:
+            candidates = [hwnd]
+        delivered = False
+        delivered_target: Optional[int] = None
+        pending_release = False
+        for candidate in candidates:
+            if not candidate:
+                continue
+            if not forwarder._is_wps_slideshow_window(candidate):
+                # Allow the explicit hwnd as a fallback candidate
+                if candidate != hwnd:
+                    continue
+            try:
+                press_ok, release_ok = forwarder._send_wps_slideshow_key_sequence(candidate, vk_code)
+            except Exception:
+                press_ok, release_ok = False, False
+            if not press_ok:
+                continue
+            delivered = True
+            delivered_target = candidate
+            pending_release = not release_ok
+            break
+        if not delivered:
+            if gate_acquired:
+                self._reset_wps_animation_gate()
+            return False
+        if delivered_target is not None:
+            try:
+                self._last_target_hwnd = delivered_target
+            except Exception:
+                pass
+            try:
+                forwarder._last_target_hwnd = delivered_target
+            except Exception:
+                pass
+        if pending_release and delivered_target is not None:
+            recovered = self._attempt_wps_keyup_recovery(forwarder, delivered_target, vk_code)
+            if not recovered:
+                self._log_navigation_debug(
+                    "wps_keyup_missing",
+                    target=hex(delivered_target),
+                    vk_code=vk_code,
+                )
         return True
 
     def _attempt_wps_keyup_recovery(
@@ -7735,6 +7977,7 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                 self._last_target_hwnd = None
         if not resolved.get("wps_ppt"):
             self._cancel_wps_slideshow_binding_retry()
+            self._reset_wps_animation_gate()
         if resolved.get("wps_ppt") and not parse_bool(previous_flags.get("wps_ppt"), True):
             try:
                 self._refresh_wps_slideshow_binding()
