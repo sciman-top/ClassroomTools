@@ -3595,6 +3595,14 @@ class FloatingToolbar(_EnsureOnScreenMixin, QWidget):
 
 
 class _PresentationWindowMixin:
+    @dataclass(frozen=True)
+    class _WPSProcessHints:
+        classes: Tuple[str, ...]
+        has_slideshow: bool
+        has_wps_presentation_signature: bool
+        has_ms_presentation_signature: bool
+        has_writer_signature: bool
+
     class _PrefixKeywordClassifier:
         __slots__ = ("prefixes", "keywords", "excludes", "canonical")
 
@@ -3849,6 +3857,28 @@ class _PresentationWindowMixin:
         normalized_classes = self._normalized_class_hints(*classes)
         return normalized_name, normalized_classes
 
+    def _summarize_wps_process_hints(
+        self, normalized_classes: Iterable[str]
+    ) -> "_PresentationWindowMixin._WPSProcessHints":
+        classes = tuple(normalized_classes)
+        if not classes:
+            return self._WPSProcessHints(classes, False, False, False, False)
+
+        def _matches(predicate: Callable[[str], bool]) -> bool:
+            return any(predicate(cls) for cls in classes)
+
+        return self._WPSProcessHints(
+            classes=classes,
+            has_slideshow=_matches(self._is_wps_slideshow_class),
+            has_wps_presentation_signature=_matches(
+                self._class_has_wps_presentation_signature
+            ),
+            has_ms_presentation_signature=_matches(
+                self._class_has_ms_presentation_signature
+            ),
+            has_writer_signature=_matches(self._class_has_wps_writer_signature),
+        )
+
     def _classify_wps_process(
         self, process_name: Any, *classes: Any
     ) -> Literal["presentation", "writer", "other"]:
@@ -3858,31 +3888,20 @@ class _PresentationWindowMixin:
         if name.startswith(("wpp", "wppt")) or "wpspresentation" in name:
             return "presentation"
 
-        has_writer_signature = any(
-            self._class_has_wps_writer_signature(cls) for cls in normalized_classes
-        )
+        hints = self._summarize_wps_process_hints(normalized_classes)
 
         if name.startswith("wps"):
-            has_slideshow = any(
-                self._is_wps_slideshow_class(cls) for cls in normalized_classes
-            )
-            if has_slideshow:
+            if hints.has_slideshow:
                 return "presentation"
-            if any(
-                self._class_has_wps_presentation_signature(cls)
-                for cls in normalized_classes
-            ):
+            if hints.has_wps_presentation_signature:
                 return "presentation"
-            if any(
-                self._class_has_ms_presentation_signature(cls)
-                for cls in normalized_classes
-            ):
+            if hints.has_ms_presentation_signature:
                 return "presentation"
-            if "wpswriter" in name or has_writer_signature:
+            if "wpswriter" in name or hints.has_writer_signature:
                 return "writer"
             return "other"
 
-        if has_writer_signature:
+        if hints.has_writer_signature:
             return "writer"
         return "other"
 
@@ -3967,12 +3986,30 @@ class _PresentationWindowMixin:
     def _widget_hwnd(self, widget: Optional[QWidget]) -> int:
         if widget is None:
             return 0
-        pid = wintypes.DWORD()
         try:
-            thread_id = int(_USER32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(pid)))
+            if isinstance(value, bytes):
+                value = value.decode("utf-8", "ignore")
+            else:
+                value = str(value)
         except Exception:
-            thread_id = 0
-        return thread_id
+            return ""
+        return value.strip().casefold()
+
+    def _normalized_process_context(
+        self, process_name: Any, classes: Iterable[Any]
+    ) -> Tuple[str, Tuple[str, ...]]:
+        normalized_name = self._normalize_process_name(process_name)
+        normalized_classes = self._normalized_class_hints(*classes)
+        return normalized_name, normalized_classes
+
+    def _classify_wps_process(
+        self, process_name: Any, *classes: Any
+    ) -> Literal["presentation", "writer", "other"]:
+        name, normalized_classes = self._normalized_process_context(process_name, classes)
+        if not name:
+            return "other"
+        if name.startswith(("wpp", "wppt")) or "wpspresentation" in name:
+            return "presentation"
 
     def _toolbar_widget(self) -> Optional[QWidget]:
         return self._overlay_child_widget("toolbar")

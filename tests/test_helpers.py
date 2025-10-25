@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import dataclasses
 import enum
 import math
 import contextlib
@@ -38,6 +39,7 @@ def _load_helper_module() -> types.ModuleType:
             "Iterable": Iterable,
             "Set": Set,
             "Mapping": Mapping,
+            "dataclass": dataclasses.dataclass,
             "Enum": enum.Enum,
             "math": math,
             "singledispatch": singledispatch,
@@ -347,3 +349,16 @@ def test_is_wps_writer_process_requires_writer_hints() -> None:
 def test_is_wps_presentation_process_detects_ms_screenclass() -> None:
     harness = _MixinHarness()
     assert harness._is_wps_presentation_process("wps.exe", "screenclass") is True
+
+
+def test_summarize_wps_process_hints_collects_flags() -> None:
+    harness = _MixinHarness()
+    normalized = harness._normalized_class_hints(
+        "KwppShowFrameClass", "kwpsframeclass", "pptviewwndclass"
+    )
+    hints = harness._summarize_wps_process_hints(normalized)
+    assert hints.classes == normalized
+    assert hints.has_slideshow is True
+    assert hints.has_wps_presentation_signature is True
+    assert hints.has_ms_presentation_signature is True
+    assert hints.has_writer_signature is True
