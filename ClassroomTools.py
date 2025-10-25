@@ -186,44 +186,6 @@ def parse_bool(value: Any, default: bool = False) -> bool:
     return bool(result)
 
 
-def _compute_presentation_category(
-    class_name: str,
-    top_class: str,
-    process_name: str,
-    *,
-    has_wps_presentation_signature: Callable[[str], bool],
-    is_wps_slideshow_class: Callable[[str], bool],
-    has_wps_writer_signature: Callable[[str], bool],
-    is_word_like_class: Callable[[str], bool],
-    has_ms_presentation_signature: Callable[[str], bool],
-    is_wps_presentation_process: Callable[[str, str, str], bool],
-    is_wps_writer_process: Callable[[str, str, str], bool],
-) -> str:
-    lowered_process = process_name.strip().lower() if process_name else ""
-    if lowered_process:
-        if is_wps_presentation_process(process_name, class_name, top_class):
-            return "wps_ppt"
-        if is_wps_writer_process(process_name, class_name, top_class):
-            return "wps_word"
-        if "powerpnt" in lowered_process:
-            return "ms_ppt"
-        if "winword" in lowered_process:
-            return "ms_word"
-    if has_wps_presentation_signature(class_name) or has_wps_presentation_signature(top_class):
-        return "wps_ppt"
-    if is_wps_slideshow_class(class_name) or is_wps_slideshow_class(top_class):
-        return "wps_ppt"
-    if has_wps_writer_signature(class_name) or has_wps_writer_signature(top_class):
-        return "wps_word"
-    if is_word_like_class(class_name) or is_word_like_class(top_class):
-        return "ms_word"
-    if has_ms_presentation_signature(class_name) or has_ms_presentation_signature(top_class):
-        return "ms_ppt"
-    if lowered_process and ("ppt" in lowered_process or "powerpoint" in lowered_process):
-        return "ms_ppt"
-    return "other"
-
-
 def _preferred_app_directory() -> str:
     """Return the user-specific data directory without creating it."""
 
@@ -939,60 +901,24 @@ def geometry_to_text(widget: QWidget) -> str:
     return f"{width}x{height}+{frame.x()}+{frame.y()}"
 
 
-@dataclass(frozen=True)
-class _ParsedGeometry:
-    width: int
-    height: int
-    x: int
-    y: int
-
-
-_GEOMETRY_TEXT_PATTERN = re.compile(
-    r"^\s*(?P<width>\d+)\s*x\s*(?P<height>\d+)\s*\+\s*(?P<x>-?\d+)\s*\+\s*(?P<y>-?\d+)\s*$"
-)
-
-
-def _parse_geometry_text(value: str) -> Optional[_ParsedGeometry]:
-    if not value:
-        return None
-    match = _GEOMETRY_TEXT_PATTERN.match(value)
-    if not match:
-        return None
+def apply_geometry_from_text(widget: QWidget, geometry: str) -> None:
+    if not geometry:
+        return
+    parts = geometry.split("+")
+    if len(parts) != 3:
+        return
+    size_part, x_str, y_str = parts
+    if "x" not in size_part:
+        return
+    width_str, height_str = size_part.split("x", 1)
     try:
-        width = int(match.group("width"))
-        height = int(match.group("height"))
-        x = int(match.group("x"))
-        y = int(match.group("y"))
-    except (TypeError, ValueError):
-        return None
-    if width <= 0 or height <= 0:
-        return None
-    return _ParsedGeometry(width=width, height=height, x=x, y=y)
+        width = int(width_str)
+        height = int(height_str)
+        x = int(x_str)
+        y = int(y_str)
+    except ValueError:
+        return
 
-
-def _resolve_widget_screen(
-    widget: QWidget, *, fallback_point: Optional[QPoint] = None
-) -> Optional[QScreen]:
-    """Return the best-effort screen for *widget*.
-
-    ``QApplication.screenAt`` may raise on some platforms (notably Wayland), so we
-    guard all calls.  The helper keeps the scattered fallback logic in a single
-    place so other geometry helpers can reuse it safely.
-    """
-
-    screen: Optional[QScreen] = None
-    if fallback_point is not None:
-        with contextlib.suppress(Exception):
-            screen = QApplication.screenAt(fallback_point)
-    if screen is None:
-        with contextlib.suppress(Exception):
-            screen = widget.screen()
-    if screen is None:
-        screen = QApplication.primaryScreen()
-    return screen
-
-
-def _widget_minimum_size(widget: QWidget) -> tuple[int, int]:
     base_min_width = getattr(widget, "_base_minimum_width", widget.minimumWidth())
     base_min_height = getattr(widget, "_base_minimum_height", widget.minimumHeight())
 
@@ -1001,158 +927,64 @@ def _widget_minimum_size(widget: QWidget) -> tuple[int, int]:
 
     min_width = max(base_min_width, custom_min_width)
     min_height = max(base_min_height, custom_min_height)
-    return min_width, min_height
 
-
-def _measure_widget_geometry(widget: QWidget) -> tuple[int, int, int, int]:
-    geom = widget.frameGeometry()
-    width = widget.width()
-    height = widget.height()
-    x = geom.x() if geom.width() else widget.x()
-    y = geom.y() if geom.height() else widget.y()
-
-    if width <= 0 or height <= 0:
-        frame_width = geom.width()
-        frame_height = geom.height()
-        inner = widget.geometry()
-        if width <= 0:
-            width = frame_width or inner.width() or width
-        if height <= 0:
-            height = frame_height or inner.height() or height
-
-    if width <= 0 or height <= 0:
-        size_hint = None
+    screen = QApplication.screenAt(QPoint(x, y))
+    if screen is None:
         try:
-            size_hint = widget.sizeHint()
+            screen = widget.screen() or QApplication.primaryScreen()
         except Exception:
-            size_hint = None
-        if size_hint is not None:
-            if width <= 0:
-                width = size_hint.width()
-            if height <= 0:
-                height = size_hint.height()
+            screen = QApplication.primaryScreen()
+    if screen is not None:
+        available = screen.availableGeometry()
+        max_width = max(min_width, 320, int(available.width() * 0.9))
+        max_height = max(min_height, 240, int(available.height() * 0.9))
+        width = max(min_width, min(width, max_width))
+        height = max(min_height, min(height, max_height))
+        x = max(available.left(), min(x, available.right() - width))
+        y = max(available.top(), min(y, available.bottom() - height))
+    target_width = max(min_width, width)
+    target_height = max(min_height, height)
+    widget.resize(target_width, target_height)
+    widget.move(x, y)
 
-    return max(width, 1), max(height, 1), x, y
 
+def ensure_widget_within_screen(widget: QWidget) -> None:
+    screen = None
+    try:
+        screen = widget.screen()
+    except Exception:
+        screen = None
+    if screen is None:
+        screen = QApplication.primaryScreen()
+    if screen is None:
+        return
+    base_min_width = getattr(widget, "_base_minimum_width", widget.minimumWidth())
+    base_min_height = getattr(widget, "_base_minimum_height", widget.minimumHeight())
 
-def _constrain_geometry_to_available(
-    width: int,
-    height: int,
-    x: int,
-    y: int,
-    *,
-    min_width: int,
-    min_height: int,
-    available: QRect,
-    extra_width_floor: int,
-    extra_height_floor: int,
-) -> tuple[int, int, int, int]:
-    max_width = max(min_width, extra_width_floor)
-    max_height = max(min_height, extra_height_floor)
+    custom_min_width = getattr(widget, "_ensure_min_width", 160)
+    custom_min_height = getattr(widget, "_ensure_min_height", 120)
+
+    min_width = max(base_min_width, custom_min_width)
+    min_height = max(base_min_height, custom_min_height)
+
+    available = screen.availableGeometry()
+    geom = widget.frameGeometry()
+    width = widget.width() or geom.width() or widget.sizeHint().width()
+    height = widget.height() or geom.height() or widget.sizeHint().height()
+    max_width = min(available.width(), max(min_width, int(available.width() * 0.9)))
+    max_height = min(available.height(), max(min_height, int(available.height() * 0.9)))
     width = max(min_width, min(width, max_width))
     height = max(min_height, min(height, max_height))
     left_limit = available.x()
     top_limit = available.y()
     right_limit = max(left_limit, available.x() + available.width() - width)
     bottom_limit = max(top_limit, available.y() + available.height() - height)
+    x = geom.x() if geom.width() else widget.x()
+    y = geom.y() if geom.height() else widget.y()
     x = max(left_limit, min(x, right_limit))
     y = max(top_limit, min(y, bottom_limit))
-    return width, height, x, y
-
-
-def _extra_floor_expand(available: QRect) -> tuple[int, int]:
-    return (
-        max(320, int(available.width() * 0.9)),
-        max(240, int(available.height() * 0.9)),
-    )
-
-
-def _extra_floor_restrict(available: QRect) -> tuple[int, int]:
-    return (
-        min(available.width(), int(available.width() * 0.9)),
-        min(available.height(), int(available.height() * 0.9)),
-    )
-
-
-def _constrain_within_screen(
-    width: int,
-    height: int,
-    x: int,
-    y: int,
-    *,
-    min_width: int,
-    min_height: int,
-    screen: Optional[QScreen],
-    extra_floor_factory: Callable[[QRect], tuple[int, int]],
-) -> tuple[int, int, int, int]:
-    width = max(min_width, width)
-    height = max(min_height, height)
-    if screen is None:
-        return width, height, x, y
-    available = screen.availableGeometry()
-    extra_width_floor, extra_height_floor = extra_floor_factory(available)
-    return _constrain_geometry_to_available(
-        width,
-        height,
-        x,
-        y,
-        min_width=min_width,
-        min_height=min_height,
-        available=available,
-        extra_width_floor=extra_width_floor,
-        extra_height_floor=extra_height_floor,
-    )
-
-
-def _apply_widget_geometry(widget: QWidget, width: int, height: int, x: int, y: int) -> None:
-    if widget.width() != width or widget.height() != height:
-        widget.resize(width, height)
-    if widget.x() != x or widget.y() != y:
-        widget.move(x, y)
-
-
-def apply_geometry_from_text(widget: QWidget, geometry: str) -> None:
-    parsed = _parse_geometry_text(geometry)
-    if parsed is None:
-        return
-
-    min_width, min_height = _widget_minimum_size(widget)
-
-    screen = _resolve_widget_screen(widget, fallback_point=QPoint(parsed.x, parsed.y))
-    width, height, x, y = _constrain_within_screen(
-        parsed.width,
-        parsed.height,
-        parsed.x,
-        parsed.y,
-        min_width=min_width,
-        min_height=min_height,
-        screen=screen,
-        extra_floor_factory=_extra_floor_expand,
-    )
-
-    _apply_widget_geometry(widget, width, height, x, y)
-
-
-def ensure_widget_within_screen(widget: QWidget) -> None:
-    screen = _resolve_widget_screen(widget)
-    if screen is None:
-        return
-
-    min_width, min_height = _widget_minimum_size(widget)
-
-    width, height, x, y = _measure_widget_geometry(widget)
-    width, height, x, y = _constrain_within_screen(
-        width,
-        height,
-        x,
-        y,
-        min_width=min_width,
-        min_height=min_height,
-        screen=screen,
-        extra_floor_factory=_extra_floor_restrict,
-    )
-
-    _apply_widget_geometry(widget, width, height, x, y)
+    widget.resize(width, height)
+    widget.move(x, y)
 
 
 def str_to_bool(value: Any, default: bool = False) -> bool:
@@ -2796,6 +2628,7 @@ class PenSettingsDialog(QDialog):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
 
+        disabled_control_keys = {"ms_word", "wps_word"}
         control_defaults = {
             "ms_ppt": True,
             "ms_word": False,
@@ -2808,9 +2641,9 @@ class PenSettingsDialog(QDialog):
                     control_defaults[key] = parse_bool(
                         initial_control_flags[key], control_defaults[key]
                     )
+        for key in disabled_control_keys:
+            control_defaults[key] = False
         self._control_checkboxes: Dict[str, QCheckBox] = {}
-        self._control_toggle_guard = False
-        self._last_word_toggle: Optional[str] = None
 
         style_layout = QHBoxLayout()
         style_layout.setContentsMargins(0, 0, 0, 0)
@@ -2907,15 +2740,12 @@ class PenSettingsDialog(QDialog):
         ]
         for index, (key, text) in enumerate(control_items):
             checkbox = QCheckBox(text, self)
-            prev_block = checkbox.blockSignals(True)
             checkbox.setChecked(control_defaults.get(key, True))
-            checkbox.blockSignals(prev_block)
+            if key in disabled_control_keys:
+                checkbox.setChecked(False)
+                checkbox.setEnabled(False)
             checkbox.setToolTip("关闭后将不会向对应应用发送翻页或滚动指令。")
             self._control_checkboxes[key] = checkbox
-            if key in {"ms_word", "wps_word"}:
-                checkbox.stateChanged.connect(
-                    lambda state, key=key: self._on_word_control_toggled(key, state)
-                )
             control_grid.addWidget(checkbox, index // 2, index % 2)
         layout.addLayout(control_grid)
 
@@ -3123,38 +2953,10 @@ class PenSettingsDialog(QDialog):
         self._update_preview()
 
     def _collect_control_flags(self) -> Dict[str, bool]:
-        flags = {
+        return {
             key: bool(checkbox.isChecked())
             for key, checkbox in self._control_checkboxes.items()
         }
-        if self._last_word_toggle in {"ms_word", "wps_word"}:
-            flags["_last_word_toggle"] = self._last_word_toggle
-        return flags
-
-    def _on_word_control_toggled(
-        self, key: str, state: Qt.CheckState | int
-    ) -> None:
-        if self._control_toggle_guard:
-            return
-        check_state = state
-        if not isinstance(check_state, Qt.CheckState):
-            check_state = Qt.CheckState(check_state)
-        if check_state != Qt.CheckState.Checked:
-            if self._last_word_toggle == key and not self._control_checkboxes[key].isChecked():
-                self._last_word_toggle = None
-            return
-        other_key = "wps_word" if key == "ms_word" else "ms_word"
-        other = self._control_checkboxes.get(other_key)
-        if other is None:
-            self._last_word_toggle = key
-            return
-        if other.isChecked():
-            self._control_toggle_guard = True
-            try:
-                other.setChecked(False)
-            finally:
-                self._control_toggle_guard = False
-        self._last_word_toggle = key
 
     def get_settings(
         self,
@@ -3749,71 +3551,6 @@ class _PresentationWindowMixin:
     _WPS_WRITER_KEYWORDS: Tuple[str, ...] = ("frame", "view", "doc", "page")
     _WPS_WRITER_EXCLUDE_KEYWORDS: Tuple[str, ...] = ("show", "slideshow")
 
-    def _class_indicates_slideshow(self, class_name: str) -> bool:
-        if not class_name:
-            return False
-        if class_name in self._WPS_SLIDESHOW_CLASSES:
-            return True
-        if class_name in self._SLIDESHOW_PRIORITY_CLASSES:
-            return True
-        if class_name in self._SLIDESHOW_SECONDARY_CLASSES:
-            return True
-        keywords = ("show", "slideshow", "slide")
-        return any(keyword in class_name for keyword in keywords)
-
-    def _is_wps_presentation_process(self, process_name: str, *classes: str) -> bool:
-        if not process_name:
-            return False
-        normalized = process_name.strip().lower()
-        if not normalized:
-            return False
-        if normalized.startswith(("wpp", "wppt", "wpspresentation")):
-            return True
-        if "wpp" in normalized or "wpspresentation" in normalized:
-            return True
-        if normalized.startswith("wps"):
-            if any(self._class_indicates_slideshow(cls) for cls in classes if cls):
-                return True
-        return False
-
-    def _is_wps_writer_process(self, process_name: str, *classes: str) -> bool:
-        if not process_name:
-            return False
-        normalized = process_name.strip().lower()
-        if not normalized:
-            return False
-        if self._is_wps_presentation_process(normalized, *classes):
-            return False
-        if "wpswriter" in normalized:
-            return True
-        if any(self._class_has_wps_writer_signature(cls) for cls in classes if cls):
-            return True
-        if not normalized.startswith("wps"):
-            return False
-        if any(self._class_indicates_slideshow(cls) for cls in classes if cls):
-            return False
-        return False
-
-    def _class_has_wps_writer_signature(self, class_name: str) -> bool:
-        if not class_name:
-            return False
-        if any(class_name.startswith(prefix) for prefix in self._WPS_WRITER_PREFIXES):
-            if any(excluded in class_name for excluded in self._WPS_WRITER_EXCLUDE_KEYWORDS):
-                return False
-            if any(keyword in class_name for keyword in self._WPS_WRITER_KEYWORDS):
-                return True
-        writer_classes = {
-            "kwpsdocview",
-            "wpsdocview",
-            "kwpsframeclass",
-            "kwpsmainframe",
-            "wpsframeclass",
-            "wpsmainframe",
-        }
-        if class_name in writer_classes:
-            return True
-        return False
-
     def _overlay_widget(self) -> Optional[QWidget]:
         raise NotImplementedError
 
@@ -4050,7 +3787,6 @@ class _PresentationForwarder(_PresentationWindowMixin):
         self.overlay = overlay
         self._last_target_hwnd: Optional[int] = None
         self._child_buffer: List[int] = []
-        self._wps_pending_keyups: Set[int] = set()
 
     def _log_debug(self, message: str, *args: Any) -> None:
         if logger.isEnabledFor(logging.DEBUG):
@@ -4058,7 +3794,6 @@ class _PresentationForwarder(_PresentationWindowMixin):
 
     def clear_cached_target(self) -> None:
         self._last_target_hwnd = None
-        self._wps_pending_keyups.clear()
 
     def _window_class_name(self, hwnd: int) -> str:
         if hwnd == 0:
@@ -4082,10 +3817,8 @@ class _PresentationForwarder(_PresentationWindowMixin):
         if self._is_wps_slideshow_class(class_name):
             return True
         if class_name in self._SLIDESHOW_PRIORITY_CLASSES or class_name in self._SLIDESHOW_SECONDARY_CLASSES:
-            top_hwnd = self._top_level_hwnd(hwnd)
-            top_class = self._window_class_name(top_hwnd) if top_hwnd else ""
-            process_name = self._window_process_name(top_hwnd)
-            if self._is_wps_presentation_process(process_name, class_name, top_class):
+            process_name = self._window_process_name(self._top_level_hwnd(hwnd))
+            if process_name.startswith("wpp"):
                 return True
         return False
 
@@ -4112,16 +3845,10 @@ class _PresentationForwarder(_PresentationWindowMixin):
             return True
         if class_name and class_name.startswith("_ww"):
             return True
-        top_hwnd = _user32_top_level_hwnd(hwnd)
-        process_name = self._window_process_name(top_hwnd)
-        top_class = self._presentation_window_class(top_hwnd) if top_hwnd else ""
+        process_name = self._window_process_name(self._top_level_hwnd(hwnd))
         if not process_name:
             return False
-        if self._is_wps_presentation_process(process_name, class_name, top_class):
-            return False
-        if "winword" in process_name:
-            return True
-        return self._is_wps_writer_process(process_name, class_name, top_class)
+        return "winword" in process_name or process_name.startswith("wps")
 
     def _is_slideshow_class(self, class_name: str) -> bool:
         if not class_name:
@@ -4217,23 +3944,6 @@ class _PresentationForwarder(_PresentationWindowMixin):
             self.clear_cached_target()
             return False
         is_wps_target = self._is_wps_slideshow_window(target)
-        gate_acquired = False
-        gate_reset: Optional[Callable[[], None]] = None
-        if is_wps_target:
-            claim_gate = getattr(self.overlay, "_claim_wps_animation_gate", None)
-            if callable(claim_gate):
-                try:
-                    allowed = bool(claim_gate())
-                except Exception:
-                    allowed = True
-                if not allowed:
-                    self._log_debug(
-                        "forward_wheel: throttled duplicate target=%s",
-                        hex(target) if target else "0x0",
-                    )
-                    return True
-                gate_acquired = True
-                gate_reset = getattr(self.overlay, "_reset_wps_animation_gate", None)
         keys = self._translate_mouse_modifiers(event)
         delta_word = ctypes.c_short(delta).value & 0xFFFF
         w_param = (ctypes.c_ushort(keys).value & 0xFFFF) | (delta_word << 16)
@@ -4247,7 +3957,6 @@ class _PresentationForwarder(_PresentationWindowMixin):
             if is_wps_target
             else self._keyboard_capture_guard()
         )
-        focus_ok = False
         with guard:
             if is_wps_target:
                 focus_ok = True
@@ -4263,11 +3972,6 @@ class _PresentationForwarder(_PresentationWindowMixin):
                     break
             if not delivered and focus_ok:
                 delivered = self._deliver_mouse_wheel(target, w_param, l_param)
-        if is_wps_target and not delivered and gate_acquired and callable(gate_reset):
-            try:
-                gate_reset()
-            except Exception:
-                pass
         if not delivered:
             self.clear_cached_target()
         if logger.isEnabledFor(logging.DEBUG):
@@ -4292,9 +3996,6 @@ class _PresentationForwarder(_PresentationWindowMixin):
         vk_code = self._resolve_vk_code(event)
         if vk_code is None:
             return False
-        if not is_press and vk_code in self._wps_pending_keyups:
-            self._wps_pending_keyups.discard(vk_code)
-            return True
         target = self._resolve_presentation_target()
         if not target:
             target = self._detect_presentation_window()
@@ -4310,10 +4011,6 @@ class _PresentationForwarder(_PresentationWindowMixin):
             )
             self.clear_cached_target()
             return False
-        if self._is_wps_slideshow_window(target) and is_press:
-            if self._forward_wps_navigation_key(target, vk_code):
-                self._wps_pending_keyups.add(vk_code)
-                return True
         for hwnd, update_cache in self._iter_key_targets(target):
             if self._send_key_to_window(
                 hwnd, vk_code, event, is_press=is_press, update_cache=update_cache
@@ -4347,61 +4044,17 @@ class _PresentationForwarder(_PresentationWindowMixin):
             self.clear_cached_target()
             return False
         if self._is_wps_slideshow_window(target):
-            claim_gate = getattr(self.overlay, "_claim_wps_animation_gate", None)
-            reset_gate = getattr(self.overlay, "_reset_wps_animation_gate", None)
-            gate_acquired = False
-            if callable(claim_gate):
-                try:
-                    allowed = bool(claim_gate())
-                except Exception:
-                    allowed = True
-                if not allowed:
-                    self._log_debug(
-                        "send_virtual_key: throttled duplicate target=%s vk=%s",
-                        hex(target) if target else "0x0",
-                        vk_code,
-                    )
-                    return True
-                gate_acquired = True
-            candidates = [target]
-            try:
-                extra = self._collect_wps_slideshow_targets(target)
-            except Exception:
-                extra = []
-            for candidate in extra:
-                if candidate not in candidates:
-                    candidates.append(candidate)
-            delivered = False
-            pending_release = False
-            pending_target: Optional[int] = None
-            for candidate in candidates:
-                press_ok, release_ok = self._send_wps_slideshow_key_sequence(candidate, vk_code)
-                if not press_ok:
-                    continue
-                if candidate != target:
-                    self._last_target_hwnd = candidate
-                delivered = True
-                pending_release = not release_ok
-                pending_target = candidate
-                break
-            if not delivered and gate_acquired and callable(reset_gate):
-                try:
-                    reset_gate()
-                except Exception:
-                    pass
-            if delivered:
-                if pending_release:
-                    self._log_debug(
-                        "send_virtual_key: pending keyup hwnd=%s vk=%s",
-                        pending_target,
-                        vk_code,
-                    )
-                return True
-            self._log_debug(
-                "send_virtual_key: wps slideshow delivery failed vk=%s",
-                vk_code,
-            )
-            return False
+            success = self._send_key_message_sequence(target, vk_code)
+            if success:
+                self._last_target_hwnd = target
+            else:
+                self._log_debug(
+                    "send_virtual_key: wps slideshow delivery failed vk=%s press=%s release=%s",
+                    vk_code,
+                    False,
+                    False,
+                )
+            return success
         if self._is_ms_slideshow_window(target) or self._is_word_window(target):
             success = False
             for hwnd, update_cache in self._iter_key_targets(target):
@@ -4735,118 +4388,6 @@ class _PresentationForwarder(_PresentationWindowMixin):
         press = self._deliver_key_message(hwnd, win32con.WM_KEYDOWN, vk_code, down_param)
         release = self._deliver_key_message(hwnd, win32con.WM_KEYUP, vk_code, up_param)
         return press and release
-
-    def _send_wps_slideshow_key_sequence(self, hwnd: int, vk_code: int) -> Tuple[bool, bool]:
-        if win32con is None or hwnd == 0 or vk_code == 0:
-            return False, False
-        down_param = self._build_basic_key_lparam(vk_code, is_press=True)
-        up_param = self._build_basic_key_lparam(vk_code, is_press=False)
-        press = self._deliver_key_message(hwnd, win32con.WM_KEYDOWN, vk_code, down_param)
-        if not press:
-            return False, False
-        release = self._deliver_key_message(hwnd, win32con.WM_KEYUP, vk_code, up_param)
-        if release:
-            self._last_target_hwnd = hwnd
-            return True, True
-        self._log_debug(
-            "_send_wps_slideshow_key_sequence: release failed hwnd=%s vk=%s",
-            hwnd,
-            vk_code,
-        )
-        retry_release = self._deliver_key_message(hwnd, win32con.WM_KEYUP, vk_code, up_param)
-        if retry_release:
-            self._last_target_hwnd = hwnd
-            return True, True
-        self._log_debug(
-            "_send_wps_slideshow_key_sequence: second release failed hwnd=%s vk=%s",
-            hwnd,
-            vk_code,
-        )
-        self._last_target_hwnd = hwnd
-        return True, False
-
-    def _forward_wps_navigation_key(self, hwnd: int, vk_code: int) -> bool:
-        if hwnd == 0 or vk_code == 0:
-            return False
-        claim_gate = getattr(self.overlay, "_claim_wps_animation_gate", None)
-        reset_gate = getattr(self.overlay, "_reset_wps_animation_gate", None)
-        gate_acquired = False
-        if callable(claim_gate):
-            try:
-                allowed = bool(claim_gate())
-            except Exception:
-                allowed = True
-            if not allowed:
-                self._log_debug(
-                    "_forward_wps_navigation_key: throttled duplicate target=%s vk=%s",
-                    hex(hwnd) if hwnd else "0x0",
-                    vk_code,
-                )
-                return True
-            gate_acquired = True
-        candidates = [hwnd]
-        try:
-            extra = self._collect_wps_slideshow_targets(hwnd)
-        except Exception:
-            extra = []
-        for candidate in extra:
-            if candidate not in candidates:
-                candidates.append(candidate)
-        delivered = False
-        pending_release = False
-        pending_target: Optional[int] = None
-        for candidate in candidates:
-            if not candidate:
-                continue
-            if not self._is_wps_slideshow_window(candidate) and candidate != hwnd:
-                continue
-            press_ok, release_ok = self._send_wps_slideshow_key_sequence(candidate, vk_code)
-            if not press_ok:
-                continue
-            if candidate != hwnd:
-                self._last_target_hwnd = candidate
-            delivered = True
-            pending_release = not release_ok
-            pending_target = candidate
-            break
-        if not delivered and gate_acquired and callable(reset_gate):
-            try:
-                reset_gate()
-            except Exception:
-                pass
-        if not delivered:
-            return False
-        if pending_release:
-            self._log_debug(
-                "_forward_wps_navigation_key: pending keyup hwnd=%s vk=%s",
-                pending_target,
-                vk_code,
-            )
-            recover = getattr(self.overlay, "_attempt_wps_keyup_recovery", None)
-            if callable(recover) and pending_target:
-                try:
-                    recover(self, pending_target, vk_code)
-                except Exception:
-                    pass
-        return True
-
-    def _collect_wps_slideshow_targets(self, hwnd: int) -> List[int]:
-        handles: List[int] = []
-        if hwnd:
-            handles.append(hwnd)
-        try:
-            candidates = list(self._iter_key_targets(hwnd))
-        except Exception:
-            candidates = []
-        for candidate, _update_cache in candidates:
-            if candidate in handles:
-                continue
-            if self._is_wps_slideshow_window(candidate):
-                handles.append(candidate)
-        if hwnd and hwnd in handles:
-            # Ensure the provided target remains first
-            handles = [hwnd] + [h for h in handles if h != hwnd]
-        return handles
 
     def _map_virtual_key(self, vk_code: int) -> int:
         map_vk = getattr(win32api, "MapVirtualKey", None) if win32api is not None else None
@@ -5653,7 +5194,6 @@ class _PresentationForwarder(_PresentationWindowMixin):
 class OverlayWindow(QWidget, _PresentationWindowMixin):
     _NAVIGATION_RESTORE_DELAY_MS = 600
     _NAVIGATION_HOLD_DURATION_MS = 2400
-    _WPS_ANIMATION_GATE_INTERVAL_MS = 180
 
     def _overlay_widget(self) -> Optional[QWidget]:
         return self
@@ -5780,10 +5320,6 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         self._pending_wps_cursor_pulse = False
         self._pending_wps_cursor_reset = False
         self._wps_cursor_reset_timer: Optional[QTimer] = None
-        self._wps_animation_gate_active = False
-        self._wps_animation_gate_timer = QTimer(self)
-        self._wps_animation_gate_timer.setSingleShot(True)
-        self._wps_animation_gate_timer.timeout.connect(self._on_wps_animation_gate_timeout)
         base_width = self._effective_brush_width()
         self._brush_pen = QPen(
             self.pen_color,
@@ -6227,6 +5763,25 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             return 120
         return 0
 
+    def _class_has_wps_writer_signature(self, class_name: str) -> bool:
+        if not class_name:
+            return False
+        if any(class_name.startswith(prefix) for prefix in self._WPS_WRITER_PREFIXES):
+            if any(excluded in class_name for excluded in self._WPS_WRITER_EXCLUDE_KEYWORDS):
+                return False
+            if any(keyword in class_name for keyword in self._WPS_WRITER_KEYWORDS):
+                return True
+        if class_name in {
+            "kwpsdocview",
+            "wpsdocview",
+            "kwpsframeclass",
+            "kwpsmainframe",
+            "wpsframeclass",
+            "wpsmainframe",
+        }:
+            return True
+        return False
+
     def _class_has_wps_presentation_signature(self, class_name: str) -> bool:
         if not class_name:
             return False
@@ -6264,19 +5819,27 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         class_name = self._presentation_window_class(hwnd)
         top_hwnd = _user32_top_level_hwnd(hwnd)
         top_class = self._presentation_window_class(top_hwnd) if top_hwnd else ""
+        if self._class_has_wps_presentation_signature(class_name) or self._class_has_wps_presentation_signature(top_class):
+            return "wps_ppt"
+        if self._class_has_wps_writer_signature(class_name) or self._class_has_wps_writer_signature(top_class):
+            return "wps_word"
+        if self._is_wps_slideshow_class(class_name) or self._is_wps_slideshow_class(top_class):
+            return "wps_ppt"
+        if self._is_word_like_class(class_name) or self._is_word_like_class(top_class):
+            return "ms_word"
         process_name = self._window_process_name(top_hwnd or hwnd)
-        return _compute_presentation_category(
-            class_name or "",
-            top_class or "",
-            process_name or "",
-            has_wps_presentation_signature=self._class_has_wps_presentation_signature,
-            is_wps_slideshow_class=self._is_wps_slideshow_class,
-            has_wps_writer_signature=self._class_has_wps_writer_signature,
-            is_word_like_class=self._is_word_like_class,
-            has_ms_presentation_signature=self._class_has_ms_presentation_signature,
-            is_wps_presentation_process=self._is_wps_presentation_process,
-            is_wps_writer_process=self._is_wps_writer_process,
-        )
+        if process_name:
+            if process_name.startswith("wpp"):
+                return "wps_ppt"
+            if process_name.startswith("wps"):
+                return "wps_word"
+            if "powerpnt" in process_name:
+                return "ms_ppt"
+            if "winword" in process_name:
+                return "ms_word"
+        if self._class_has_ms_presentation_signature(class_name) or self._class_has_ms_presentation_signature(top_class):
+            return "ms_ppt"
+        return "other"
 
     def _is_presentation_category_allowed(self, category: str) -> bool:
         if not category or category == "other":
@@ -6298,19 +5861,17 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
     def _process_control_disallowed(self, hwnd: Optional[int]) -> bool:
         if not hwnd:
             return False
-        top_hwnd = _user32_top_level_hwnd(hwnd)
-        process_name = self._window_process_name(top_hwnd or hwnd)
+        process_name = self._window_process_name(_user32_top_level_hwnd(hwnd) or hwnd)
         if not process_name:
             return False
-        class_name = self._presentation_window_class(hwnd)
-        top_class = self._presentation_window_class(top_hwnd) if top_hwnd else ""
-        if self._is_wps_presentation_process(process_name, class_name, top_class):
+        name = process_name.lower()
+        if name.startswith("wpp"):
             return not getattr(self, "control_wps_ppt", True)
-        if self._is_wps_writer_process(process_name, class_name, top_class):
+        if name.startswith("wps"):
             return not getattr(self, "control_wps_word", True)
-        if "powerpnt" in process_name:
+        if "powerpnt" in name:
             return not getattr(self, "control_ms_ppt", True)
-        if "winword" in process_name:
+        if "winword" in name:
             return not getattr(self, "control_ms_word", True)
         return False
 
@@ -6506,32 +6067,6 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
 
         QTimer.singleShot(50, _apply_pulse)
 
-    def _on_wps_animation_gate_timeout(self) -> None:
-        self._wps_animation_gate_active = False
-
-    def _reset_wps_animation_gate(self) -> None:
-        self._wps_animation_gate_active = False
-        timer = getattr(self, "_wps_animation_gate_timer", None)
-        if timer is not None and timer.isActive():
-            try:
-                timer.stop()
-            except Exception:
-                pass
-
-    def _claim_wps_animation_gate(self) -> bool:
-        if not getattr(self, "control_wps_ppt", True):
-            return True
-        if getattr(self, "_wps_animation_gate_active", False):
-            return False
-        self._wps_animation_gate_active = True
-        timer = getattr(self, "_wps_animation_gate_timer", None)
-        if timer is not None:
-            try:
-                timer.start(self._WPS_ANIMATION_GATE_INTERVAL_MS)
-            except Exception:
-                pass
-        return True
-
     def _reset_wps_presentation_state(self, *, trigger_cursor: bool = True) -> None:
         forwarder = getattr(self, "_forwarder", None)
         if forwarder is not None:
@@ -6544,7 +6079,6 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         except Exception:
             pass
         self._pending_wps_cursor_pulse = False
-        self._reset_wps_animation_gate()
         if not trigger_cursor:
             return
         mode = getattr(self, "mode", None)
@@ -6645,13 +6179,9 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             return True
         if class_name in self._SLIDESHOW_PRIORITY_CLASSES or class_name in self._SLIDESHOW_SECONDARY_CLASSES:
             top_hwnd = _user32_top_level_hwnd(hwnd)
-            top_class = self._presentation_window_class(top_hwnd) if top_hwnd else ""
             process_name = self._window_process_name(top_hwnd or hwnd)
-            if self._is_wps_presentation_process(process_name, class_name, top_class):
+            if process_name.startswith("wpp"):
                 return True
-        category = self._presentation_target_category(hwnd)
-        if category == "wps_ppt":
-            return True
         return False
 
     def _is_ms_slideshow_target(self, hwnd: Optional[int] = None) -> bool:
@@ -6724,21 +6254,9 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         effective_target = target_hwnd or self._resolve_control_target()
         if not target_hwnd and effective_target:
             target_hwnd = effective_target
-        target_category = (
-            self._presentation_target_category(target_hwnd)
-            if target_hwnd
-            else ""
-        )
-        allow_wps_override = (
-            not target_hwnd
-            or target_category in {"", "other", "wps_ppt"}
-            or self._is_wps_slideshow_target(target_hwnd)
-        )
-        wps_override: Optional[int] = None
-        if allow_wps_override:
-            wps_override = self._find_wps_slideshow_target()
+        wps_override = self._find_wps_slideshow_target()
         ms_override: Optional[int] = None
-        if not wps_override and (not target_hwnd or target_category in {"", "other", "ms_ppt"}):
+        if not wps_override:
             try:
                 ms_override = self._find_ms_slideshow_target()
             except Exception:
@@ -6746,11 +6264,9 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         if wps_override:
             target_hwnd = wps_override
             effective_target = wps_override
-            target_category = "wps_ppt"
         elif ms_override:
             target_hwnd = ms_override
             effective_target = ms_override
-            target_category = "ms_ppt"
         target_class = self._presentation_window_class(target_hwnd) if target_hwnd else ""
         if effective_target and not self._presentation_control_allowed(effective_target):
             if originating_key is not None:
@@ -6778,13 +6294,9 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             return
         is_word_target = self._is_word_like_class(target_class)
         category = (
-            target_category
-            if target_category
-            else (
-                self._presentation_target_category(effective_target)
-                if effective_target
-                else "other"
-            )
+            self._presentation_target_category(effective_target)
+            if effective_target
+            else "other"
         )
         top_for_process = _user32_top_level_hwnd(effective_target) if effective_target else 0
         process_name = ""
@@ -6860,8 +6372,6 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             prefer_wheel = (
                 (via_toolbar or self.navigation_active or original_mode == "cursor" or is_word_category)
                 and not is_ms_ppt_target
-                and not wps_slideshow_target
-                and not self._is_wps_slideshow_class(target_class)
             )
             base_suppress_focus_restore = bool(wps_slideshow_target) or self._is_wps_slideshow_class(target_class)
             focus_restore_suppressed = base_suppress_focus_restore or override_focus_restore
@@ -7005,11 +6515,6 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                 )
                 return False
             if self._forwarder is not None:
-                target_for_wheel: Optional[int] = None
-                try:
-                    target_for_wheel = self._forwarder.get_presentation_target()
-                except Exception:
-                    target_for_wheel = None
                 try:
                     global_pos = QCursor.pos()
                     local_pos = self.mapFromGlobal(global_pos)
@@ -7029,19 +6534,6 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                     )
                 except Exception:
                     handled = False
-                if not handled:
-                    if not target_for_wheel:
-                        target_for_wheel = self._current_navigation_target() or self._resolve_control_target()
-                    if target_for_wheel and self._is_wps_slideshow_target(target_for_wheel):
-                        handled = True
-                        try:
-                            self._last_target_hwnd = target_for_wheel
-                        except Exception:
-                            pass
-                        try:
-                            self._forwarder._last_target_hwnd = target_for_wheel  # type: ignore[attr-defined]
-                        except Exception:
-                            pass
             if handled:
                 return True
             focused = self._focus_presentation_window_fallback()
@@ -7058,80 +6550,23 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         forwarder = getattr(self, "_forwarder", None)
         if forwarder is None or win32con is None:
             return False
-        gate_acquired = False
-        if not self._claim_wps_animation_gate():
-            self._log_navigation_debug(
-                "wps_navigation_throttled",
-                target=hex(hwnd) if hwnd else "0x0",
-                vk_code=vk_code,
-            )
-            return True
-        gate_acquired = True
         try:
-            candidates = forwarder._collect_wps_slideshow_targets(hwnd)
-        except Exception:
-            candidates = [hwnd]
-        if not candidates:
-            candidates = [hwnd]
-        delivered = False
-        delivered_target: Optional[int] = None
-        pending_release = False
-        for candidate in candidates:
-            if not candidate:
-                continue
-            if not forwarder._is_wps_slideshow_window(candidate):
-                # Allow the explicit hwnd as a fallback candidate
-                if candidate != hwnd:
-                    continue
-            try:
-                press_ok, release_ok = forwarder._send_wps_slideshow_key_sequence(candidate, vk_code)
-            except Exception:
-                press_ok, release_ok = False, False
-            if not press_ok:
-                continue
-            delivered = True
-            delivered_target = candidate
-            pending_release = not release_ok
-            break
-        if not delivered:
-            if gate_acquired:
-                self._reset_wps_animation_gate()
-            return False
-        if delivered_target is not None:
-            try:
-                self._last_target_hwnd = delivered_target
-            except Exception:
-                pass
-            try:
-                forwarder._last_target_hwnd = delivered_target
-            except Exception:
-                pass
-        if pending_release and delivered_target is not None:
-            recovered = self._attempt_wps_keyup_recovery(forwarder, delivered_target, vk_code)
-            if not recovered:
-                self._log_navigation_debug(
-                    "wps_keyup_missing",
-                    target=hex(delivered_target),
-                    vk_code=vk_code,
-                )
-        return True
-
-    def _attempt_wps_keyup_recovery(
-        self,
-        forwarder: Optional["_PresentationForwarder"],
-        hwnd: Optional[int],
-        vk_code: int,
-    ) -> bool:
-        if forwarder is None or not hwnd or vk_code == 0 or win32con is None:
-            return False
-        try:
+            down_param = forwarder._build_basic_key_lparam(vk_code, is_press=True)
             up_param = forwarder._build_basic_key_lparam(vk_code, is_press=False)
         except Exception:
             return False
         try:
-            return forwarder._deliver_key_message(hwnd, win32con.WM_KEYUP, vk_code, up_param)
+            press = forwarder._deliver_key_message(hwnd, win32con.WM_KEYDOWN, vk_code, down_param)
+            release = forwarder._deliver_key_message(hwnd, win32con.WM_KEYUP, vk_code, up_param)
         except Exception:
             return False
+        if press and release:
+            try:
+                forwarder._last_target_hwnd = hwnd
+            except Exception:
+                pass
+            return True
+        return False
 
     def _send_ms_slideshow_virtual_key(self, hwnd: int, vk_code: int) -> bool:
         if not hwnd or vk_code == 0:
@@ -7270,38 +6705,15 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                     is_press=True,
                     allow_cursor=True,
                 )
-                release_ok = False
-                if press_ok:
-                    release_ok = self._forwarder.forward_key(
+                release_ok = (
+                    self._forwarder.forward_key(
                         release_event,
                         is_press=False,
                         allow_cursor=True,
                     )
-                    if not release_ok:
-                        target_for_release: Optional[int] = None
-                        try:
-                            target_for_release = self._forwarder.get_presentation_target()
-                        except Exception:
-                            target_for_release = None
-                        if not target_for_release:
-                            target_for_release = (
-                                self._current_navigation_target()
-                                or effective_target
-                                or target_hwnd
-                            )
-                        if target_for_release and self._is_wps_slideshow_target(target_for_release):
-                            recovered = self._attempt_wps_keyup_recovery(
-                                self._forwarder,
-                                target_for_release,
-                                vk_code,
-                            )
-                            if not recovered:
-                                self._log_navigation_debug(
-                                    "wps_keyup_missing",
-                                    target=hex(target_for_release),
-                                    vk_code=vk_code,
-                                )
-                            release_ok = True
+                    if press_ok
+                    else False
+                )
                 if press_ok and release_ok:
                     success = True
                     current_target = self._forwarder.get_presentation_target()
@@ -8084,18 +7496,19 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         }
         resolved: Dict[str, bool] = {}
         source = flags or {}
-        source_mapping: Mapping[str, Any] = source if isinstance(source, Mapping) else {}
         for key, default in defaults.items():
             raw = None
-            raw = source_mapping.get(key)
-            if raw is None:
-                raw = source_mapping.get(f"control_{key}")
+            if isinstance(source, Mapping):
+                raw = source.get(key)
+                if raw is None:
+                    raw = source.get(f"control_{key}")
             resolved[key] = parse_bool(raw, default)
+        for key in ("ms_word", "wps_word"):
+            resolved[key] = False
         previous = getattr(self, "_presentation_control_flags", None)
         previous_flags: Mapping[str, Any] = previous or {}
-        previous_mapping = dict(previous_flags)
-        changed = previous_mapping != resolved
-        self._presentation_control_flags = dict(resolved)
+        changed = previous != resolved
+        self._presentation_control_flags = resolved
         self.control_ms_ppt = resolved["ms_ppt"]
         self.control_ms_word = resolved["ms_word"]
         self.control_wps_ppt = resolved["wps_ppt"]
@@ -8111,7 +7524,6 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                 self._last_target_hwnd = None
         if not resolved.get("wps_ppt"):
             self._cancel_wps_slideshow_binding_retry()
-            self._reset_wps_animation_gate()
         if resolved.get("wps_ppt") and not parse_bool(previous_flags.get("wps_ppt"), True):
             try:
                 self._refresh_wps_slideshow_binding()
