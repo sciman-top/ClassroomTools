@@ -1534,6 +1534,15 @@ class PenStyleConfig:
     width_accel: float = 0.18
     width_velocity_limit: float = 0.22
     width_velocity_damping: float = 0.7
+    width_gamma: float = 1.0
+    entry_taper_distance: float = 0.0
+    entry_taper_strength: float = 0.0
+    entry_taper_curve: float = 1.0
+    exit_taper_speed: float = 0.0
+    exit_taper_strength: float = 0.0
+    exit_taper_curve: float = 1.0
+    tail_alpha_fade: float = 0.0
+    jitter_strength: float = 0.0
 
 
 _DEFAULT_PEN_STYLE = PenStyle.FOUNTAIN
@@ -1543,22 +1552,22 @@ PEN_STYLE_CONFIGS: Dict[PenStyle, PenStyleConfig] = {
     PenStyle.CHALK: PenStyleConfig(
         key="chalk",
         display_name="粉笔",
-        description="粉笔质感，色彩饱满并带有柔和粉雾的边缘与轻微阴影。",
+        description="粉笔质感，色彩柔和并带有细腻粉雾与轻微擦痕。",
         slider_range=(8, 34),
         default_base=16,
         width_multiplier=1.1,
-        smoothing=0.88,
+        smoothing=0.92,
         speed_base_multiplier=30.0,
         speed_base_offset=46.0,
         target_min_factor=0.9,
-        target_speed_factor=0.1,
-        target_curve_factor=0.08,
-        target_blend=0.25,
+        target_speed_factor=0.12,
+        target_curve_factor=0.1,
+        target_blend=0.28,
         curve_sensitivity=0.42,
-        pressure_factor=0.12,
-        width_memory=0.95,
-        pressure_time_weight=2.5,
-        travel_weight=0.16,
+        pressure_factor=0.16,
+        width_memory=0.93,
+        pressure_time_weight=2.6,
+        travel_weight=0.18,
         fade_min_alpha=210,
         fade_max_alpha=255,
         fade_speed_weight=88.0,
@@ -1574,31 +1583,40 @@ PEN_STYLE_CONFIGS: Dict[PenStyle, PenStyleConfig] = {
         width_change_limit=0.028,
         noise_strength=0.0,
         fill_alpha_boost=12,
-        feather_strength=0.14,
-        edge_highlight_alpha=46,
+        feather_strength=0.18,
+        edge_highlight_alpha=52,
         solid_fill=True,
-        target_responsiveness=0.32,
-        width_accel=0.16,
+        target_responsiveness=0.34,
+        width_accel=0.18,
         width_velocity_limit=0.18,
-        width_velocity_damping=0.68,
+        width_velocity_damping=0.7,
+        width_gamma=0.9,
+        entry_taper_distance=26.0,
+        entry_taper_strength=0.42,
+        entry_taper_curve=1.38,
+        exit_taper_speed=320.0,
+        exit_taper_strength=0.5,
+        exit_taper_curve=1.32,
+        tail_alpha_fade=0.26,
+        jitter_strength=0.2,
     ),
     PenStyle.HIGHLIGHTER: PenStyleConfig(
         key="highlighter",
         display_name="荧光笔",
-        description="半透明覆盖，色彩均匀顺滑，突出重点又不遮挡底稿。",
+        description="半透明荧光覆盖，线宽稳定，突出重点且不遮挡底稿。",
         slider_range=(12, 30),
         default_base=18,
         width_multiplier=1.9,
         smoothing=0.9,
         speed_base_multiplier=34.0,
         speed_base_offset=52.0,
-        target_min_factor=0.94,
-        target_speed_factor=0.06,
-        target_curve_factor=0.04,
-        target_blend=0.22,
+        target_min_factor=0.96,
+        target_speed_factor=0.04,
+        target_curve_factor=0.03,
+        target_blend=0.2,
         curve_sensitivity=0.3,
-        pressure_factor=0.05,
-        width_memory=0.96,
+        pressure_factor=0.03,
+        width_memory=0.97,
         pressure_time_weight=2.2,
         travel_weight=0.09,
         fade_min_alpha=60,
@@ -1621,15 +1639,24 @@ PEN_STYLE_CONFIGS: Dict[PenStyle, PenStyleConfig] = {
         solid_fill=True,
         opacity_range=(96, 232),
         default_opacity=180,
-        target_responsiveness=0.28,
-        width_accel=0.12,
-        width_velocity_limit=0.16,
-        width_velocity_damping=0.76,
+        target_responsiveness=0.24,
+        width_accel=0.1,
+        width_velocity_limit=0.14,
+        width_velocity_damping=0.78,
+        width_gamma=1.0,
+        entry_taper_distance=14.0,
+        entry_taper_strength=0.1,
+        entry_taper_curve=1.05,
+        exit_taper_speed=440.0,
+        exit_taper_strength=0.12,
+        exit_taper_curve=1.03,
+        tail_alpha_fade=0.0,
+        jitter_strength=0.0,
     ),
     PenStyle.FOUNTAIN: PenStyleConfig(
         key="fountain",
         display_name="钢笔",
-        description="细腻流畅，线宽随速度自然过渡，适合精致书写。",
+        description="顺滑钢笔笔触，粗细随速度与转折自然呼应，细节清晰。",
         slider_range=(5, 24),
         default_base=10,
         width_multiplier=1.04,
@@ -1637,18 +1664,18 @@ PEN_STYLE_CONFIGS: Dict[PenStyle, PenStyleConfig] = {
         speed_base_multiplier=24.0,
         speed_base_offset=38.0,
         target_min_factor=0.62,
-        target_speed_factor=0.16,
-        target_curve_factor=0.2,
-        target_blend=0.28,
+        target_speed_factor=0.18,
+        target_curve_factor=0.24,
+        target_blend=0.3,
         curve_sensitivity=0.56,
-        pressure_factor=0.2,
-        width_memory=0.92,
-        pressure_time_weight=2.8,
-        travel_weight=0.2,
-        fade_min_alpha=140,
-        fade_max_alpha=240,
-        fade_speed_weight=102.0,
-        fade_curve_weight=64.0,
+        pressure_factor=0.24,
+        width_memory=0.9,
+        pressure_time_weight=2.9,
+        travel_weight=0.22,
+        fade_min_alpha=150,
+        fade_max_alpha=242,
+        fade_speed_weight=110.0,
+        fade_curve_weight=70.0,
         base_alpha=255,
         shadow_alpha=70,
         shadow_alpha_scale=0.34,
@@ -1659,34 +1686,43 @@ PEN_STYLE_CONFIGS: Dict[PenStyle, PenStyleConfig] = {
         target_max_factor=1.14,
         width_change_limit=0.03,
         noise_strength=0.0,
-        fill_alpha_boost=10,
-        feather_strength=0.1,
-        edge_highlight_alpha=40,
+        fill_alpha_boost=12,
+        feather_strength=0.12,
+        edge_highlight_alpha=48,
         solid_fill=True,
-        target_responsiveness=0.38,
-        width_accel=0.2,
-        width_velocity_limit=0.2,
-        width_velocity_damping=0.7,
+        target_responsiveness=0.4,
+        width_accel=0.22,
+        width_velocity_limit=0.22,
+        width_velocity_damping=0.72,
+        width_gamma=0.78,
+        entry_taper_distance=32.0,
+        entry_taper_strength=0.56,
+        entry_taper_curve=1.7,
+        exit_taper_speed=320.0,
+        exit_taper_strength=0.56,
+        exit_taper_curve=1.6,
+        tail_alpha_fade=0.24,
+        jitter_strength=0.0,
     ),
     PenStyle.BRUSH: PenStyleConfig(
         key="brush",
         display_name="毛笔",
-        description="富有笔锋层次，墨迹厚实顺滑，起收笔都更具力度。",
+        description="毛笔墨韵饱满，起收笔灵动，线条富有弹性层次。",
         slider_range=(6, 20),
         default_base=12,
         width_multiplier=1.46,
-        smoothing=0.84,
+        smoothing=0.86,
         speed_base_multiplier=22.0,
         speed_base_offset=34.0,
         target_min_factor=0.7,
-        target_speed_factor=0.22,
-        target_curve_factor=0.24,
-        target_blend=0.3,
-        curve_sensitivity=0.6,
-        pressure_factor=0.26,
-        width_memory=0.9,
-        pressure_time_weight=3.0,
-        travel_weight=0.24,
+        target_speed_factor=0.26,
+        target_curve_factor=0.3,
+        target_blend=0.32,
+        curve_sensitivity=0.68,
+        pressure_factor=0.34,
+        width_memory=0.88,
+        pressure_time_weight=3.1,
+        travel_weight=0.26,
         fade_min_alpha=150,
         fade_max_alpha=255,
         fade_speed_weight=120.0,
@@ -1701,14 +1737,23 @@ PEN_STYLE_CONFIGS: Dict[PenStyle, PenStyleConfig] = {
         target_max_factor=1.28,
         width_change_limit=0.034,
         noise_strength=0.0,
-        fill_alpha_boost=32,
-        feather_strength=0.18,
-        edge_highlight_alpha=70,
+        fill_alpha_boost=36,
+        feather_strength=0.22,
+        edge_highlight_alpha=80,
         solid_fill=True,
-        target_responsiveness=0.34,
-        width_accel=0.24,
-        width_velocity_limit=0.24,
-        width_velocity_damping=0.66,
+        target_responsiveness=0.36,
+        width_accel=0.26,
+        width_velocity_limit=0.26,
+        width_velocity_damping=0.64,
+        width_gamma=0.82,
+        entry_taper_distance=30.0,
+        entry_taper_strength=0.5,
+        entry_taper_curve=1.46,
+        exit_taper_speed=360.0,
+        exit_taper_strength=0.6,
+        exit_taper_curve=1.42,
+        tail_alpha_fade=0.24,
+        jitter_strength=0.0,
     ),
 }
 
@@ -1752,7 +1797,10 @@ def configure_pen_for_style(
     target_alpha = int(clamp(target_alpha, 0, 255))
     if target_alpha < 255:
         base_color.setAlpha(target_alpha)
-    pen.setColor(base_color)
+    pen_color = QColor(base_color)
+    if style == PenStyle.HIGHLIGHTER:
+        pen_color.setAlpha(0)
+    pen.setColor(pen_color)
     pen.setWidthF(effective_width)
     pen.setStyle(Qt.PenStyle.SolidLine)
     pen.setCapStyle(Qt.PenCapStyle.RoundCap)
@@ -1776,11 +1824,16 @@ def configure_pen_for_style(
             )
         )
         shadow_color.setAlpha(composite_alpha)
+    if style == PenStyle.HIGHLIGHTER:
+        shadow_color.setAlpha(0)
     shadow_pen.setColor(shadow_color)
     shadow_pen.setWidthF(effective_width * config.shadow_width_scale)
     shadow_pen.setStyle(Qt.PenStyle.SolidLine)
     shadow_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
     shadow_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    if style == PenStyle.HIGHLIGHTER:
+        shadow_pen.setCapStyle(Qt.PenCapStyle.SquareCap)
+        shadow_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
     if config.texture is not None:
         shadow_pen.setBrush(QBrush(shadow_color, config.texture))
     else:
@@ -1924,105 +1977,49 @@ class _PenStyleEffects:
             return stroke_coverage
 
         if style_key == "highlighter":
-            stroke_area = cls._stroke_path(path, width * 1.04)
+            stroke_area = cls._stroke_path(path, width * 1.02)
             body_color = QColor(color)
             body_color.setAlpha(fill_alpha)
-            fill_area = QPainterPath(stroke_area)
-            coverage = stroke_coverage
-            if coverage is not None and not coverage.isEmpty():
-                fill_area = fill_area.subtracted(coverage)
-            if not fill_area.isEmpty():
-                _fill(fill_area, body_color)
-            if coverage is not None and not coverage.isEmpty():
-                updated_coverage = coverage.united(stroke_area)
+            if isinstance(stroke_coverage, QPainterPath) and not stroke_coverage.isEmpty():
+                updated = stroke_coverage.united(stroke_area)
             else:
-                updated_coverage = QPainterPath(stroke_area)
-
+                updated = QPainterPath(stroke_area)
+            painter.save()
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(body_color)
+            painter.drawPath(updated)
+            painter.restore()
             if config.feather_strength > 0:
-                glow_color = QColor(body_color)
-                glow_color.setAlpha(int(fill_alpha * 0.32))
-                glow_pen = QPen(
-                    glow_color,
-                    max(0.8, width * (1.0 + config.feather_strength)),
+                halo_color = QColor(body_color)
+                halo_color.setAlpha(int(fill_alpha * clamp(config.feather_strength, 0.0, 0.6) * 0.4))
+                halo_pen = QPen(
+                    halo_color,
+                    max(0.6, width * (1.0 + config.feather_strength * 0.5)),
                     Qt.PenStyle.SolidLine,
                     Qt.PenCapStyle.RoundCap,
                     Qt.PenJoinStyle.RoundJoin,
                 )
                 painter.save()
-                painter.setPen(glow_pen)
+                painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+                painter.setPen(halo_pen)
                 painter.drawPath(path)
                 painter.restore()
-            return updated_coverage
+            return updated
 
         if style_key == "brush":
-            stroke_area = cls._stroke_path(path, width * 1.08)
+            stroke_area = cls._stroke_path(path, width * 1.05)
             body_color = QColor(color)
             body_color.setAlpha(fill_alpha)
-            _fill(stroke_area, body_color)
-
-            depth_color = QColor(body_color)
-            depth_color = depth_color.darker(118)
-            depth_color.setAlpha(int(fill_alpha * 0.6))
-            depth_pen = QPen(
-                depth_color,
-                max(0.8, width * 0.68),
-                Qt.PenStyle.SolidLine,
-                Qt.PenCapStyle.RoundCap,
-                Qt.PenJoinStyle.RoundJoin,
-            )
-            painter.save()
-            painter.setPen(depth_pen)
-            painter.drawPath(path)
-            painter.restore()
-
-            if config.edge_highlight_alpha > 0:
-                highlight_pen = QPen(
-                    QColor(255, 255, 255, config.edge_highlight_alpha),
-                    max(0.7, width * 0.16),
-                    Qt.PenStyle.SolidLine,
-                    Qt.PenCapStyle.RoundCap,
-                    Qt.PenJoinStyle.RoundJoin,
-                )
-                painter.save()
-                painter.setPen(highlight_pen)
-                painter.drawPath(path)
-                painter.restore()
+            _fill(stroke_area, body_color, composition=QPainter.CompositionMode.CompositionMode_SourceOver)
             return stroke_coverage
 
         # fountain & fallback styles
-        stroke_area = cls._stroke_path(path, width * 1.04)
+        stroke_area = cls._stroke_path(path, width * 1.03)
         if config.solid_fill:
             body_color = QColor(color)
             body_color.setAlpha(fill_alpha)
-            _fill(stroke_area, body_color)
-
-        depth_color = QColor(color)
-        depth_color = depth_color.darker(120)
-        depth_color.setAlpha(int(fill_alpha * 0.4))
-        depth_pen = QPen(
-            depth_color,
-            max(0.6, width * 0.55),
-            Qt.PenStyle.SolidLine,
-            Qt.PenCapStyle.RoundCap,
-            Qt.PenJoinStyle.RoundJoin,
-        )
-        painter.save()
-        painter.setPen(depth_pen)
-        painter.drawPath(path)
-        painter.restore()
-
-        if config.edge_highlight_alpha > 0:
-            highlight_pen = QPen(
-                QColor(255, 255, 255, config.edge_highlight_alpha),
-                max(0.6, width * 0.12),
-                Qt.PenStyle.SolidLine,
-                Qt.PenCapStyle.RoundCap,
-                Qt.PenJoinStyle.RoundJoin,
-            )
-            painter.save()
-            painter.setPen(highlight_pen)
-            painter.drawPath(path)
-            painter.restore()
+            _fill(stroke_area, body_color, composition=QPainter.CompositionMode.CompositionMode_SourceOver)
         return stroke_coverage
 def render_pen_preview_pixmap(
     color: QColor,
@@ -3252,6 +3249,34 @@ class _PresentationForwarder:
                 return True
         return False
 
+    def _is_ms_slideshow_window(self, hwnd: int) -> bool:
+        if hwnd == 0:
+            return False
+        if self._is_wps_slideshow_window(hwnd):
+            return False
+        class_name = self._window_class_name(hwnd)
+        if class_name not in self._SLIDESHOW_PRIORITY_CLASSES and class_name not in self._SLIDESHOW_SECONDARY_CLASSES:
+            return False
+        process_name = self._window_process_name(self._top_level_hwnd(hwnd))
+        if not process_name:
+            return False
+        return "powerpnt" in process_name
+
+    def _is_word_window(self, hwnd: int) -> bool:
+        if hwnd == 0:
+            return False
+        class_name = self._window_class_name(hwnd)
+        if class_name in self._WORD_CONTENT_CLASSES:
+            return True
+        if class_name in self._WORD_WINDOW_CLASSES or class_name in self._WORD_HOST_CLASSES:
+            return True
+        if class_name and class_name.startswith("_ww"):
+            return True
+        process_name = self._window_process_name(self._top_level_hwnd(hwnd))
+        if not process_name:
+            return False
+        return "winword" in process_name or process_name.startswith("wps")
+
     def _is_slideshow_class(self, class_name: str) -> bool:
         if not class_name:
             return False
@@ -3446,22 +3471,36 @@ class _PresentationForwarder:
             self.clear_cached_target()
             return False
         if self._is_wps_slideshow_window(target):
-            if win32con is None:
-                return False
-            down_param = self._build_basic_key_lparam(vk_code, is_press=True)
-            up_param = self._build_basic_key_lparam(vk_code, is_press=False)
-            press = self._deliver_key_message(target, win32con.WM_KEYDOWN, vk_code, down_param)
-            release = self._deliver_key_message(target, win32con.WM_KEYUP, vk_code, up_param)
-            success = press and release
+            success = self._send_key_message_sequence(target, vk_code)
             if success:
                 self._last_target_hwnd = target
             else:
                 self._log_debug(
                     "send_virtual_key: wps slideshow delivery failed vk=%s press=%s release=%s",
                     vk_code,
-                    press,
-                    release,
+                    False,
+                    False,
                 )
+            return success
+        if self._is_ms_slideshow_window(target) or self._is_word_window(target):
+            success = False
+            for hwnd, update_cache in self._iter_key_targets(target):
+                if self._send_key_message_sequence(hwnd, vk_code):
+                    success = True
+                    if update_cache:
+                        self._last_target_hwnd = target
+                    break
+            if not success:
+                success = self._send_key_message_sequence(target, vk_code)
+                if success:
+                    self._last_target_hwnd = target
+            if not success:
+                self._log_debug(
+                    "send_virtual_key: message delivery failed vk=%s target=%s",
+                    vk_code,
+                    hex(target),
+                )
+                self.clear_cached_target()
             return success
         press = release = False
         with self._keyboard_capture_guard():
@@ -3582,6 +3621,10 @@ class _PresentationForwarder:
         ):
             return False
         if self._is_wps_slideshow_window(hwnd):
+            return False
+        if self._is_ms_slideshow_window(hwnd):
+            return False
+        if self._is_word_window(hwnd):
             return False
         success = False
         with self._keyboard_capture_guard():
@@ -3763,6 +3806,15 @@ class _PresentationForwarder:
         except Exception:
             sent = 0
         return bool(sent)
+
+    def _send_key_message_sequence(self, hwnd: int, vk_code: int) -> bool:
+        if win32con is None or hwnd == 0 or vk_code == 0:
+            return False
+        down_param = self._build_basic_key_lparam(vk_code, is_press=True)
+        up_param = self._build_basic_key_lparam(vk_code, is_press=False)
+        press = self._deliver_key_message(hwnd, win32con.WM_KEYDOWN, vk_code, down_param)
+        release = self._deliver_key_message(hwnd, win32con.WM_KEYUP, vk_code, up_param)
+        return press and release
 
     def _map_virtual_key(self, vk_code: int) -> int:
         map_vk = getattr(win32api, "MapVirtualKey", None) if win32api is not None else None
@@ -4769,6 +4821,10 @@ class OverlayWindow(QWidget):
         self._stroke_width_velocity: float = 0.0
         self._stroke_smoothed_target: float = max(1.0, self.pen_size)
         self._stroke_fill_coverage = QPainterPath()
+        self._stroke_total_length: float = 0.0
+        self._stroke_tail_state: float = 0.0
+        self._stroke_jitter_offset = QPointF()
+        self._stroke_rng = random.Random()
         self.navigation_active = False
         self._navigation_reasons: Dict[str, int] = {}
         self._active_navigation_keys: Set[int] = set()
@@ -4838,6 +4894,7 @@ class OverlayWindow(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)
         self._keyboard_grabbed = False
+        self._dispatch_suppress_override = False
 
         self._build_scene()
         self.history: List[QPixmap] = []
@@ -5421,6 +5478,54 @@ class OverlayWindow(QWidget):
                         return candidate
         return None
 
+    def _find_ms_slideshow_target(self, *, require_allowed: bool = True) -> Optional[int]:
+        if require_allowed and not getattr(self, "control_ms_ppt", True):
+            return None
+        candidates: List[int] = []
+        sources: List[Callable[[], Optional[int]]] = []
+        forwarder = getattr(self, "_forwarder", None)
+        if forwarder is not None:
+            sources.append(forwarder.get_presentation_target)
+            detector = getattr(forwarder, "_detect_presentation_window", None)
+            if callable(detector):
+                sources.append(detector)  # type: ignore[arg-type]
+        sources.append(self._resolve_presentation_target)
+        sources.append(self._fallback_detect_presentation_window_user32)
+        if _USER32 is not None:
+            sources.append(lambda: _user32_get_foreground_window())
+        for getter in sources:
+            if not callable(getter):
+                continue
+            try:
+                hwnd = getter()
+            except Exception:
+                hwnd = None
+            if not hwnd:
+                continue
+            normalized = self._normalize_presentation_target(hwnd)
+            for candidate in (normalized, hwnd):
+                if not candidate or candidate in candidates:
+                    continue
+                candidates.append(candidate)
+                allowed = self._presentation_control_allowed(candidate, log=False)
+                if not allowed and require_allowed:
+                    continue
+                if self._is_ms_slideshow_target(candidate):
+                    if allowed:
+                        if forwarder is not None:
+                            try:
+                                forwarder._last_target_hwnd = candidate  # type: ignore[attr-defined]
+                            except Exception:
+                                pass
+                        try:
+                            self._last_target_hwnd = candidate
+                        except Exception:
+                            pass
+                        return candidate
+                    if not require_allowed:
+                        return candidate
+        return None
+
     def _cancel_wps_slideshow_binding_retry(self) -> None:
         self._wps_binding_retry_attempts = 0
         timer = getattr(self, "_wps_binding_retry_timer", None)
@@ -5621,6 +5726,31 @@ class OverlayWindow(QWidget):
                 return True
         return False
 
+    def _is_ms_slideshow_target(self, hwnd: Optional[int] = None) -> bool:
+        if hwnd is None:
+            hwnd = self._current_navigation_target()
+        if not hwnd:
+            return False
+        forwarder = getattr(self, "_forwarder", None)
+        if forwarder is not None:
+            checker = getattr(forwarder, "_is_ms_slideshow_window", None)
+            if callable(checker):
+                try:
+                    if checker(hwnd):
+                        return True
+                except Exception:
+                    pass
+        class_name = self._presentation_window_class(hwnd)
+        if self._class_has_wps_presentation_signature(class_name):
+            return False
+        if self._class_has_ms_presentation_signature(class_name):
+            return True
+        top_hwnd = _user32_top_level_hwnd(hwnd)
+        process_name = self._window_process_name(top_hwnd or hwnd)
+        if process_name and "powerpnt" in process_name:
+            return True
+        return False
+
     def _word_navigation_vk(self, vk_code: int, target_hwnd: Optional[int]) -> int:
         if win32con is None or not target_hwnd:
             return 0
@@ -5667,9 +5797,18 @@ class OverlayWindow(QWidget):
         if not target_hwnd and effective_target:
             target_hwnd = effective_target
         wps_override = self._find_wps_slideshow_target()
+        ms_override: Optional[int] = None
+        if not wps_override:
+            try:
+                ms_override = self._find_ms_slideshow_target()
+            except Exception:
+                ms_override = None
         if wps_override:
             target_hwnd = wps_override
             effective_target = wps_override
+        elif ms_override:
+            target_hwnd = ms_override
+            effective_target = ms_override
         target_class = self._presentation_window_class(target_hwnd) if target_hwnd else ""
         if effective_target and not self._presentation_control_allowed(effective_target):
             if originating_key is not None:
@@ -5681,6 +5820,15 @@ class OverlayWindow(QWidget):
             effective_target if effective_target and self._is_wps_slideshow_target(effective_target) else None
         )
         if wps_slideshow_target and self._send_wps_slideshow_virtual_key(wps_slideshow_target, vk_code):
+            if originating_key is not None:
+                self._release_keyboard_navigation_state(originating_key)
+            if via_toolbar:
+                self._cancel_navigation_cursor_hold()
+            return
+        ms_slideshow_target = (
+            effective_target if effective_target and self._is_ms_slideshow_target(effective_target) else None
+        )
+        if ms_slideshow_target and self._send_ms_slideshow_virtual_key(ms_slideshow_target, vk_code):
             if originating_key is not None:
                 self._release_keyboard_navigation_state(originating_key)
             if via_toolbar:
@@ -5752,108 +5900,124 @@ class OverlayWindow(QWidget):
                         forwarder._last_target_hwnd = effective_target  # type: ignore[attr-defined]
                     except Exception:
                         pass
-        prefer_wheel = (
-            (via_toolbar or self.navigation_active or original_mode == "cursor" or is_word_category)
-            and not is_ms_ppt_target
+        override_focus_restore = (
+            is_ms_ppt_target
+            and not self.whiteboard_active
+            and original_mode not in {None, "cursor"}
         )
-        suppress_focus_restore = bool(wps_slideshow_target) or self._is_wps_slideshow_class(target_class)
-        success = False
-        wheel_used = False
-        if wheel_delta and (prefer_wheel or is_word_target):
-            success = self._send_navigation_wheel(wheel_delta)
-            wheel_used = success
-            self._log_navigation_debug(
-                "wheel_forward",
-                vk=vk_code,
-                delta=wheel_delta,
-                target=hex(target_hwnd) if target_hwnd else "0x0",
-                cls=target_class or "",
-                word=is_word_target,
-                category=category,
-                ppt=is_ms_ppt_target,
-                success=success,
+        previous_dispatch_override = getattr(self, "_dispatch_suppress_override", False)
+        if override_focus_restore:
+            self._dispatch_suppress_override = True
+        else:
+            self._dispatch_suppress_override = previous_dispatch_override
+        try:
+            prefer_wheel = (
+                (via_toolbar or self.navigation_active or original_mode == "cursor" or is_word_category)
+                and not is_ms_ppt_target
             )
-        prev_mode = original_mode
-        if prev_mode in {"brush", "shape"}:
-            self._update_last_tool_snapshot()
-        had_keyboard_grab = False
-        if not success:
-            candidates = self._navigation_vk_candidates(vk_code)
-            with self._temporarily_release_keyboard(
-                release=not suppress_focus_restore,
-                restore=not suppress_focus_restore,
-            ) as had_keyboard_grab:
-                for candidate in candidates:
+            base_suppress_focus_restore = bool(wps_slideshow_target) or self._is_wps_slideshow_class(target_class)
+            focus_restore_suppressed = base_suppress_focus_restore or override_focus_restore
+            release_keyboard = not base_suppress_focus_restore
+            success = False
+            wheel_used = False
+            if wheel_delta and (prefer_wheel or is_word_target):
+                success = self._send_navigation_wheel(wheel_delta)
+                wheel_used = success
+                self._log_navigation_debug(
+                    "wheel_forward",
+                    vk=vk_code,
+                    delta=wheel_delta,
+                    target=hex(target_hwnd) if target_hwnd else "0x0",
+                    cls=target_class or "",
+                    word=is_word_target,
+                    category=category,
+                    ppt=is_ms_ppt_target,
+                    success=success,
+                )
+            prev_mode = original_mode
+            if prev_mode in {"brush", "shape"}:
+                self._update_last_tool_snapshot()
+            had_keyboard_grab = False
+            if not success:
+                candidates = self._navigation_vk_candidates(vk_code)
+                with self._temporarily_release_keyboard(
+                    release=release_keyboard,
+                    restore=not focus_restore_suppressed,
+                ) as had_keyboard_grab:
+                    for candidate in candidates:
+                        if not candidate:
+                            continue
+                        success = self._dispatch_virtual_key(candidate)
+                        if success:
+                            current_target = self._current_navigation_target()
+                            current_class = (
+                                self._presentation_window_class(current_target)
+                                if current_target
+                                else ""
+                            )
+                            if self._is_wps_slideshow_class(current_class):
+                                base_suppress_focus_restore = True
+                                focus_restore_suppressed = True
+                            self._log_navigation_debug(
+                                "virtual_key_forward",
+                                vk=candidate,
+                                target=hex(current_target) if current_target else "0x0",
+                                cls=current_class or "",
+                                word=self._is_word_like_class(current_class),
+                            )
+                            break
+            if not success and is_word_category and win32con is not None:
+                doc_candidates: List[int] = []
+                if vk_code in (VK_DOWN, VK_RIGHT):
+                    doc_candidates.extend(
+                        [
+                            getattr(win32con, "VK_NEXT", 0),
+                            VK_DOWN,
+                            getattr(win32con, "VK_SPACE", 0),
+                        ]
+                    )
+                elif vk_code in (VK_UP, VK_LEFT):
+                    doc_candidates.extend(
+                        [
+                            getattr(win32con, "VK_PRIOR", 0),
+                            VK_UP,
+                            getattr(win32con, "VK_BACK", 0),
+                        ]
+                    )
+                for candidate in doc_candidates:
                     if not candidate:
                         continue
-                    success = self._dispatch_virtual_key(candidate)
-                    if success:
-                        current_target = self._current_navigation_target()
-                        current_class = (
-                            self._presentation_window_class(current_target)
-                            if current_target
-                            else ""
-                        )
-                        if self._is_wps_slideshow_class(current_class):
-                            suppress_focus_restore = True
-                        self._log_navigation_debug(
-                            "virtual_key_forward",
-                            vk=candidate,
-                            target=hex(current_target) if current_target else "0x0",
-                            cls=current_class or "",
-                            word=self._is_word_like_class(current_class),
-                        )
+                    if self._dispatch_virtual_key(candidate):
+                        success = True
                         break
-        if not success and is_word_category and win32con is not None:
-            doc_candidates: List[int] = []
-            if vk_code in (VK_DOWN, VK_RIGHT):
-                doc_candidates.extend(
-                    [
-                        getattr(win32con, "VK_NEXT", 0),
-                        VK_DOWN,
-                        getattr(win32con, "VK_SPACE", 0),
-                    ]
+            self._pending_tool_restore = None
+            if not success:
+                if originating_key is not None:
+                    self._release_keyboard_navigation_state(originating_key)
+                self._log_navigation_debug(
+                    "virtual_key_failed",
+                    vk=vk_code,
+                    target=hex(target_hwnd) if target_hwnd else "0x0",
+                    cls=target_class or "",
+                    word=is_word_target,
                 )
-            elif vk_code in (VK_UP, VK_LEFT):
-                doc_candidates.extend(
-                    [
-                        getattr(win32con, "VK_PRIOR", 0),
-                        VK_UP,
-                        getattr(win32con, "VK_BACK", 0),
-                    ]
-                )
-            for candidate in doc_candidates:
-                if not candidate:
-                    continue
-                if self._dispatch_virtual_key(candidate):
-                    success = True
-                    break
-        self._pending_tool_restore = None
-        if not success:
+                if via_toolbar:
+                    self._cancel_navigation_cursor_hold()
+                return
             if originating_key is not None:
                 self._release_keyboard_navigation_state(originating_key)
-            self._log_navigation_debug(
-                "virtual_key_failed",
-                vk=vk_code,
-                target=hex(target_hwnd) if target_hwnd else "0x0",
-                cls=target_class or "",
-                word=is_word_target,
-            )
-            if via_toolbar:
-                self._cancel_navigation_cursor_hold()
-            return
-        if originating_key is not None:
-            self._release_keyboard_navigation_state(originating_key)
-        if suppress_focus_restore:
-            return
-        if (
-            not wheel_used
-            and not had_keyboard_grab
-            and original_mode != "cursor"
-            and not (is_ms_ppt_target or is_word_category)
-        ):
-            self._ensure_keyboard_capture()
-        self.raise_toolbar()
+            if focus_restore_suppressed:
+                return
+            if (
+                not wheel_used
+                and not had_keyboard_grab
+                and original_mode != "cursor"
+                and not (is_ms_ppt_target or is_word_category)
+            ):
+                self._ensure_keyboard_capture()
+            self.raise_toolbar()
+        finally:
+            self._dispatch_suppress_override = previous_dispatch_override
 
     def _send_navigation_wheel(self, delta: int) -> bool:
         if delta == 0 or self.whiteboard_active:
@@ -5946,6 +6110,36 @@ class OverlayWindow(QWidget):
             return True
         return False
 
+    def _send_ms_slideshow_virtual_key(self, hwnd: int, vk_code: int) -> bool:
+        if not hwnd or vk_code == 0:
+            return False
+        forwarder = getattr(self, "_forwarder", None)
+        if forwarder is None or win32con is None:
+            return False
+        self._focus_presentation_window_fallback()
+        try:
+            down_param = forwarder._build_basic_key_lparam(vk_code, is_press=True)
+            up_param = forwarder._build_basic_key_lparam(vk_code, is_press=False)
+        except Exception:
+            return False
+        try:
+            press = forwarder._deliver_key_message(hwnd, win32con.WM_KEYDOWN, vk_code, down_param)
+            release = forwarder._deliver_key_message(hwnd, win32con.WM_KEYUP, vk_code, up_param)
+        except Exception:
+            return False
+        if press and release:
+            try:
+                self._last_target_hwnd = hwnd
+            except Exception:
+                pass
+            if forwarder is not None:
+                try:
+                    forwarder._last_target_hwnd = hwnd  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+            return True
+        return False
+
     def _fallback_send_wheel(self, delta: int) -> bool:
         if delta == 0 or _USER32 is None:
             return False
@@ -6027,6 +6221,7 @@ class OverlayWindow(QWidget):
             return False
         success = False
         suppress_focus_restore = False
+        override_dispatch_suppress = bool(getattr(self, "_dispatch_suppress_override", False))
         wps_override = self._find_wps_slideshow_target()
         if wps_override:
             suppress_focus_restore = True
@@ -6105,6 +6300,8 @@ class OverlayWindow(QWidget):
                         forwarder._last_target_hwnd = resolved_target  # type: ignore[attr-defined]
                     except Exception:
                         pass
+        if override_dispatch_suppress:
+            suppress_focus_restore = True
         if success and self.mode != "cursor" and not suppress_focus_restore:
             QTimer.singleShot(100, self._ensure_keyboard_capture)
         return success
@@ -6582,20 +6779,69 @@ class OverlayWindow(QWidget):
             return False
         class_name = self._presentation_window_class(hwnd)
         top_level = _user32_top_level_hwnd(hwnd)
-        if (
-            self._is_wps_slideshow_class(class_name)
-            or self._is_wps_slideshow_class(self._presentation_window_class(top_level))
-        ):
-            self._last_target_hwnd = hwnd
-            return True
-        focused = _user32_focus_window(top_level)
-        if not focused:
-            focused = _user32_focus_window(hwnd)
-        elif hwnd != top_level:
-            _user32_focus_window(hwnd)
-        if focused:
-            self._last_target_hwnd = hwnd
-        return focused
+        attach_pair = self._attach_to_target_thread(top_level or hwnd)
+        if attach_pair is None and top_level and top_level != hwnd:
+            attach_pair = self._attach_to_target_thread(hwnd)
+        try:
+            if (
+                self._is_wps_slideshow_class(class_name)
+                or self._is_wps_slideshow_class(self._presentation_window_class(top_level))
+            ):
+                self._last_target_hwnd = hwnd
+                return True
+            focused = False
+            if top_level and top_level != hwnd:
+                focused = _user32_focus_window(top_level)
+                if focused:
+                    _user32_focus_window(hwnd)
+            if not focused:
+                focused = _user32_focus_window(hwnd)
+                if not focused and top_level and top_level != hwnd:
+                    focused = _user32_focus_window(top_level)
+            if focused:
+                self._last_target_hwnd = hwnd
+            return focused
+        finally:
+            self._detach_from_target_thread(attach_pair)
+
+    def _attach_to_target_thread(self, hwnd: int) -> Optional[Tuple[int, int]]:
+        if _USER32 is None or hwnd == 0:
+            return None
+        target_thread = self._window_thread_id(hwnd)
+        if not target_thread:
+            return None
+        try:
+            current_thread = int(_USER32.GetCurrentThreadId())
+        except Exception:
+            current_thread = 0
+        if not current_thread or current_thread == target_thread:
+            return None
+        try:
+            attached = bool(_USER32.AttachThreadInput(current_thread, target_thread, True))
+        except Exception:
+            attached = False
+        return (current_thread, target_thread) if attached else None
+
+    def _detach_from_target_thread(self, pair: Optional[Tuple[int, int]]) -> None:
+        if _USER32 is None or not pair:
+            return
+        src, dst = pair
+        if not src or not dst or src == dst:
+            return
+        try:
+            _USER32.AttachThreadInput(src, dst, False)
+        except Exception:
+            pass
+
+    def _window_thread_id(self, hwnd: int) -> int:
+        if _USER32 is None or hwnd == 0:
+            return 0
+        pid = wintypes.DWORD()
+        try:
+            thread_id = int(_USER32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(pid)))
+        except Exception:
+            thread_id = 0
+        return thread_id
 
     def _is_target_window_valid(self, hwnd: int) -> bool:
         if win32gui is None:
@@ -6968,17 +7214,33 @@ class OverlayWindow(QWidget):
 
     # ---- 画图事件 ----
     def wheelEvent(self, e) -> None:
+        delta_vec = e.angleDelta()
+        wheel_delta = int(delta_vec.y() or delta_vec.x())
         allow_cursor = self.mode == "cursor" or self.navigation_active
         target = self._resolve_control_target()
         if target and not self._presentation_control_allowed(target):
             super().wheelEvent(e)
             return
+        if (
+            wheel_delta
+            and target
+            and not self.whiteboard_active
+            and self._is_ms_slideshow_target(target)
+        ):
+            self._set_navigation_reason("wheel", True)
+            try:
+                if wheel_delta < 0:
+                    self._send_slide_virtual_key(VK_DOWN, via_toolbar=False)
+                else:
+                    self._send_slide_virtual_key(VK_UP, via_toolbar=False)
+            finally:
+                self._set_navigation_reason("wheel", False)
+            e.accept()
+            return
         handled = False
         if self._forwarder:
             handled = self._forwarder.forward_wheel(e, allow_cursor=allow_cursor)
         if not handled and not self.whiteboard_active and self.mode != "cursor":
-            delta_vec = e.angleDelta()
-            wheel_delta = int(delta_vec.y() or delta_vec.x())
             if wheel_delta and self._send_navigation_wheel(wheel_delta):
                 handled = True
         if handled:
@@ -6996,6 +7258,9 @@ class OverlayWindow(QWidget):
         self._stroke_smoothed_target = float(self.last_width)
         self._stroke_width_velocity = 0.0
         self._stroke_fill_coverage = QPainterPath()
+        self._stroke_total_length = 0.0
+        self._stroke_tail_state = 0.0
+        self._stroke_jitter_offset = QPointF()
 
     def _start_paint_session(self, event) -> None:
         self._push_history()
@@ -7006,6 +7271,11 @@ class OverlayWindow(QWidget):
         now = time.time()
         self.last_time = now
         self._reset_brush_tracking()
+        try:
+            seed = time.time_ns() ^ (hash((origin.x(), origin.y())) << 1)
+        except AttributeError:
+            seed = int(time.time() * 1_000_000) ^ hash((origin.x(), origin.y()))
+        self._stroke_rng = random.Random(seed)
         self._stroke_points.append(QPointF(origin))
         self._stroke_timestamps.append(now)
         self._stroke_last_midpoint = QPointF(origin)
@@ -7125,7 +7395,9 @@ class OverlayWindow(QWidget):
             return False
         category = self._presentation_target_category(target)
         if category in {"ms_word", "wps_word"}:
-            return False
+            if self.whiteboard_active:
+                return False
+            return self.mode != "cursor"
         return True
 
     def keyPressEvent(self, e: QKeyEvent) -> None:
@@ -7184,6 +7456,62 @@ class OverlayWindow(QWidget):
             return
         super().keyReleaseEvent(e)
 
+    def _style_profile_adjustment(
+        self,
+        style_key: str,
+        *,
+        cur_width: float,
+        effective_base: float,
+        min_width: float,
+        max_width: float,
+        speed_scale: float,
+        curve_scale: float,
+        pressure: float,
+        tail_state: float,
+        fade_alpha: int,
+    ) -> Tuple[float, int]:
+        fade_min = getattr(self, "_active_fade_min", 0)
+        fade_max = getattr(self, "_active_fade_max", 255)
+
+        def _clamp_width(value: float) -> float:
+            return float(clamp(value, min_width, max_width))
+
+        def _clamp_alpha(value: float) -> int:
+            return int(clamp(value, fade_min, fade_max))
+
+        if style_key == PenStyle.HIGHLIGHTER.value:
+            stable = _clamp_width(effective_base * (1.0 + min(0.08, curve_scale * 0.25)))
+            cur_width = _clamp_width(cur_width * 0.35 + stable * 0.65)
+            fade_alpha = _clamp_alpha(fade_max * 0.95 + fade_alpha * 0.05)
+            return cur_width, fade_alpha
+
+        if style_key == PenStyle.CHALK.value:
+            rng = getattr(self, "_stroke_rng", None)
+            if rng is not None:
+                grain = (rng.random() - 0.5) * max(0.0, effective_base * 0.05)
+                cur_width = _clamp_width(cur_width + grain)
+            fade_alpha = _clamp_alpha(fade_alpha * 1.04)
+            return cur_width, fade_alpha
+
+        if style_key == PenStyle.FOUNTAIN.value:
+            slim_factor = clamp(0.25 + speed_scale * 1.1, 0.25, 0.92)
+            curve_gain = clamp(curve_scale * 0.55 + pressure * 0.35, 0.0, 0.8)
+            expressive_target = _clamp_width(
+                effective_base * (0.68 + curve_gain * 0.6 + (1.0 - slim_factor) * 0.4)
+            )
+            cur_width = _clamp_width(cur_width * 0.55 + expressive_target * 0.45)
+            fade_alpha = _clamp_alpha(fade_alpha * (0.94 + curve_gain * 0.08))
+            return cur_width, fade_alpha
+
+        if style_key == PenStyle.BRUSH.value:
+            expressiveness = clamp(pressure * 0.6 + curve_scale * 0.25 + tail_state * 0.3, 0.0, 1.1)
+            target = _clamp_width(effective_base * (0.74 + expressiveness * 0.62))
+            cur_width = _clamp_width(cur_width * 0.4 + target * 0.6)
+            fade_alpha = _clamp_alpha(fade_alpha * (1.0 + expressiveness * 0.12))
+            return cur_width, fade_alpha
+
+        return _clamp_width(cur_width), _clamp_alpha(fade_alpha)
+
     def _draw_brush_line(self, cur: QPointF) -> Optional[QRectF]:
         now = time.time()
         cur_point = QPointF(cur)
@@ -7210,6 +7538,26 @@ class OverlayWindow(QWidget):
         smoothed_x = filter_point.x() + (cur_point.x() - filter_point.x()) * smoothing
         smoothed_y = filter_point.y() + (cur_point.y() - filter_point.y()) * smoothing
         cur_point = QPointF(smoothed_x, smoothed_y)
+        jitter_strength = float(getattr(config, "jitter_strength", 0.0) or 0.0)
+        if jitter_strength > 0.0:
+            rng = getattr(self, "_stroke_rng", None)
+            if rng is None:
+                rng = random.Random()
+                self._stroke_rng = rng
+            jitter_target = QPointF(rng.random() - 0.5, rng.random() - 0.5)
+            prev_jitter = getattr(self, "_stroke_jitter_offset", QPointF())
+            jitter_blend = 0.18 + min(0.32, jitter_strength * 0.12)
+            jitter = QPointF(
+                prev_jitter.x() + (jitter_target.x() - prev_jitter.x()) * jitter_blend,
+                prev_jitter.y() + (jitter_target.y() - prev_jitter.y()) * jitter_blend,
+            )
+            self._stroke_jitter_offset = jitter
+            jitter_scale = min(2.4, max(0.0, effective_base * 0.05 * jitter_strength))
+            if jitter_scale > 0.0:
+                cur_point = QPointF(
+                    cur_point.x() + jitter.x() * jitter_scale,
+                    cur_point.y() + jitter.y() * jitter_scale,
+                )
         self._stroke_filter_point = QPointF(cur_point)
 
         self._stroke_points.append(cur_point)
@@ -7219,6 +7567,7 @@ class OverlayWindow(QWidget):
 
         elapsed = max(1e-4, now - self._stroke_timestamps[-2])
         distance = math.hypot(cur_point.x() - last_point.x(), cur_point.y() - last_point.y())
+        self._stroke_total_length += distance
         if distance < 0.08 and elapsed < 0.012:
             return None
         speed = distance / elapsed
@@ -7257,6 +7606,12 @@ class OverlayWindow(QWidget):
         min_w = effective_base * config.target_min_factor
         max_w = effective_base * max(config.target_min_factor, config.target_max_factor)
         target_w = max(min_w, min(max_w, target_w))
+        gamma = float(getattr(config, "width_gamma", 1.0) or 1.0)
+        if abs(gamma - 1.0) > 1e-3 and (max_w - min_w) > 1e-3:
+            norm = (target_w - min_w) / (max_w - min_w)
+            norm = max(0.0, min(1.0, norm))
+            norm = norm ** max(0.2, min(5.0, gamma))
+            target_w = min_w + norm * (max_w - min_w)
 
         prev_target = getattr(self, "_stroke_target_width", self.last_width)
         blend = max(0.0, min(1.0, getattr(config, "target_blend", 0.3)))
@@ -7289,6 +7644,33 @@ class OverlayWindow(QWidget):
         memory = clamp(getattr(config, "width_memory", 0.9), 0.6, 0.985)
         cur_w = float(clamp(self.last_width * memory + cur_w * (1.0 - memory), min_w, max_w))
         self._stroke_width_velocity = velocity
+        entry_strength = float(getattr(config, "entry_taper_strength", 0.0) or 0.0)
+        entry_distance = float(getattr(config, "entry_taper_distance", 0.0) or 0.0)
+        if entry_strength > 0.0 and entry_distance > 0.0:
+            entry_progress = clamp(self._stroke_total_length / max(4.0, entry_distance), 0.0, 1.0)
+            entry_curve = clamp(float(getattr(config, "entry_taper_curve", 1.0) or 1.0), 0.3, 4.0)
+            entry_mix = entry_progress ** entry_curve
+            entry_weight = clamp(entry_strength * (1.0 - entry_mix), 0.0, 1.0)
+            if entry_weight > 0.0:
+                cur_w = max(min_w, cur_w * (1.0 - entry_weight) + min_w * entry_weight)
+
+        tail_strength = float(getattr(config, "exit_taper_strength", 0.0) or 0.0)
+        tail_speed_threshold = float(getattr(config, "exit_taper_speed", 0.0) or 0.0)
+        tail_curve = clamp(float(getattr(config, "exit_taper_curve", 1.0) or 1.0), 0.3, 4.0)
+        tail_state = float(getattr(self, "_stroke_tail_state", 0.0))
+        if tail_strength > 0.0 and tail_speed_threshold > 0.0:
+            tail_speed_norm = clamp(speed / max(20.0, tail_speed_threshold), 0.0, 1.0)
+            tail_target = (1.0 - tail_speed_norm) ** tail_curve
+            tail_state = tail_state * 0.62 + tail_target * 0.38
+        else:
+            tail_state *= 0.72
+        tail_state = float(clamp(tail_state, 0.0, 1.0))
+        self._stroke_tail_state = tail_state
+        if tail_strength > 0.0 and tail_state > 0.0:
+            tail_weight = clamp(tail_strength * tail_state, 0.0, 1.0)
+            if tail_weight > 0.0:
+                cur_w = max(min_w, cur_w * (1.0 - tail_weight) + min_w * tail_weight)
+        cur_w = float(clamp(cur_w, min_w, max_w))
 
         last_mid = QPointF(self._stroke_last_midpoint) if self._stroke_last_midpoint else QPointF(last_point)
         current_mid = (last_point + cur_point) / 2.0
@@ -7301,11 +7683,34 @@ class OverlayWindow(QWidget):
             + config.fade_curve_weight * curve_scale
         ) * max(0.0, self._active_alpha_scale)
         fade_alpha = int(clamp(fade_candidate, self._active_fade_min, self._active_fade_max))
+        tail_alpha_fade = float(getattr(config, "tail_alpha_fade", 0.0) or 0.0)
+        if tail_alpha_fade > 0.0 and tail_state > 0.0:
+            fade_alpha = int(
+                fade_alpha * (1.0 - clamp(tail_alpha_fade * tail_state, 0.0, 0.9))
+            )
+        fade_alpha = int(clamp(fade_alpha, self._active_fade_min, self._active_fade_max))
+        cur_w, fade_alpha = self._style_profile_adjustment(
+            config.key,
+            cur_width=cur_w,
+            effective_base=effective_base,
+            min_width=min_w,
+            max_width=max_w,
+            speed_scale=speed_scale,
+            curve_scale=curve_scale,
+            pressure=pressure,
+            tail_state=tail_state,
+            fade_alpha=fade_alpha,
+        )
         self._update_brush_pen_appearance(cur_w, fade_alpha)
-        painter.setPen(self._brush_shadow_pen)
-        painter.drawPath(path)
-        painter.setPen(self._brush_pen)
-        if config.key != "highlighter":
+        shadow_alpha_current = (
+            self._brush_shadow_pen.color().alpha() if self._brush_shadow_pen is not None else 0
+        )
+        if shadow_alpha_current > 0:
+            painter.setPen(self._brush_shadow_pen)
+            painter.drawPath(path)
+        pen_alpha_current = self._brush_pen.color().alpha() if self._brush_pen is not None else 0
+        if pen_alpha_current > 0:
+            painter.setPen(self._brush_pen)
             painter.drawPath(path)
         updated_coverage = _PenStyleEffects.apply(
             painter,
