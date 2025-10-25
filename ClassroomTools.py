@@ -119,6 +119,65 @@ def parse_bool(value: Any, default: bool = False) -> bool:
     return default
 
 
+def _collect_resource_roots() -> List[str]:
+    """Return an ordered list of candidate directories containing bundled resources."""
+
+    roots: List[str] = []
+    seen: Set[str] = set()
+
+    def _append(path: Optional[str]) -> None:
+        if not path:
+            return
+        normalized = os.path.normpath(os.path.abspath(path))
+        if normalized in seen:
+            return
+        seen.add(normalized)
+        roots.append(normalized)
+
+    exe_dir: Optional[str] = None
+    with contextlib.suppress(Exception):
+        exe_dir = os.path.dirname(os.path.abspath(getattr(sys, "executable", "")))
+    if getattr(sys, "frozen", False) and exe_dir:
+        _append(exe_dir)
+
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        _append(meipass)
+
+    module_dir = os.path.dirname(os.path.abspath(__file__))
+    _append(module_dir)
+
+    with contextlib.suppress(Exception):
+        cwd = os.getcwd()
+        _append(cwd)
+
+    return roots
+
+
+def _determine_student_photo_roots() -> Tuple[str, List[str]]:
+    """Select the most appropriate student photo root and provide the fallback list."""
+
+    candidate_roots = _collect_resource_roots()
+    candidate_paths = [os.path.join(root, "student_photos") for root in candidate_roots]
+    if not candidate_paths:
+        default_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "student_photos")
+        return default_root, [default_root]
+
+    for path in candidate_paths:
+        if os.path.isdir(path):
+            return path, candidate_paths
+
+    for path in candidate_paths:
+        try:
+            os.makedirs(path, exist_ok=True)
+        except Exception:
+            continue
+        if os.path.isdir(path):
+            return path, candidate_paths
+
+    return candidate_paths[0], candidate_paths
+
+
 def _user32_window_rect(hwnd: int) -> Optional[Tuple[int, int, int, int]]:
     if _USER32 is None or hwnd == 0:
         return None
@@ -9189,7 +9248,7 @@ class RollCallTimerWindow(QWidget):
         if not (self.show_id or self.show_name):
             self.show_name = True
 
-        self.photo_root_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "student_photos")
+        self.photo_root_path, self._photo_search_roots = _determine_student_photo_roots()
         self._photo_extensions = [".png", ".jpg", ".jpeg", ".bmp", ".gif"]
         self._photo_overlay: Optional[StudentPhotoOverlay] = None
         self._last_photo_student_id: Optional[str] = None
@@ -11311,34 +11370,48 @@ class RollCallTimerWindow(QWidget):
         class_name = self._sanitize_photo_segment(self._resolve_active_class_name())
         if not class_name:
             class_name = "default"
-        base_dir = os.path.join(self.photo_root_path, class_name)
-        try:
-            os.makedirs(base_dir, exist_ok=True)
-        except OSError:
-            logger.debug("Unable to ensure photo directory %s", base_dir, exc_info=True)
-        if not os.path.isdir(base_dir):
-            return None
-        for ext in self._photo_extensions:
-            candidate = os.path.join(base_dir, f"{student_id}{ext}")
-            if os.path.isfile(candidate):
-                return candidate
-            upper = os.path.join(base_dir, f"{student_id}{ext.upper()}")
-            if os.path.isfile(upper):
-                return upper
-        lower_id = student_id.lower()
-        try:
-            for entry in os.listdir(base_dir):
-                name, ext = os.path.splitext(entry)
-                if not ext:
-                    continue
-                if ext.lower() not in self._photo_extensions:
-                    continue
-                if name.lower() == lower_id:
-                    candidate = os.path.join(base_dir, entry)
-                    if os.path.isfile(candidate):
-                        return candidate
-        except OSError:
-            logger.debug("Failed to scan photo directory %s", base_dir, exc_info=True)
+        search_roots = list(getattr(self, "_photo_search_roots", []))
+        if not search_roots:
+            search_roots = [self.photo_root_path]
+        primary_root = os.path.normpath(self.photo_root_path)
+        visited: Set[str] = set()
+
+        for root in search_roots:
+            if not root:
+                continue
+            normalized_root = os.path.normpath(root)
+            if normalized_root in visited:
+                continue
+            visited.add(normalized_root)
+            base_dir = os.path.join(root, class_name)
+            if normalized_root == primary_root:
+                try:
+                    os.makedirs(base_dir, exist_ok=True)
+                except OSError:
+                    logger.debug("Unable to ensure photo directory %s", base_dir, exc_info=True)
+            if not os.path.isdir(base_dir):
+                continue
+            for ext in self._photo_extensions:
+                candidate = os.path.join(base_dir, f"{student_id}{ext}")
+                if os.path.isfile(candidate):
+                    return candidate
+                upper = os.path.join(base_dir, f"{student_id}{ext.upper()}")
+                if os.path.isfile(upper):
+                    return upper
+            lower_id = student_id.lower()
+            try:
+                for entry in os.listdir(base_dir):
+                    name, ext = os.path.splitext(entry)
+                    if not ext:
+                        continue
+                    if ext.lower() not in self._photo_extensions:
+                        continue
+                    if name.lower() == lower_id:
+                        candidate = os.path.join(base_dir, entry)
+                        if os.path.isfile(candidate):
+                            return candidate
+            except OSError:
+                logger.debug("Failed to scan photo directory %s", base_dir, exc_info=True)
         return None
 
     @staticmethod
