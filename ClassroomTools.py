@@ -5834,7 +5834,8 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         preferred_category: Optional[str] = None,
     ) -> List[int]:
         resolved_preference = preferred_category or self._preferred_control_category()
-        prioritized: List[Tuple[int, int, int]] = []
+        preferred_entries: List[Tuple[int, int, int]] = []
+        fallback_entries: List[Tuple[int, int, int]] = []
         seen: Set[int] = set()
         for index, hwnd in enumerate(handles):
             if not hwnd or hwnd in seen:
@@ -5846,13 +5847,46 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                 continue
             if not self._presentation_control_allowed(hwnd, log=False):
                 continue
-            base = int(self._CATEGORY_PRIORITY.get(category, 0))
-            score = base * 100
+            base_priority = int(self._CATEGORY_PRIORITY.get(category, 0)) * 100
+            score = base_priority
             if resolved_preference and category == resolved_preference:
-                score += 50
-            prioritized.append((score, -index, hwnd))
-        prioritized.sort(reverse=True)
-        return [hwnd for _, _, hwnd in prioritized]
+                score += 100_000
+            try:
+                class_name = self._presentation_window_class(hwnd)
+            except Exception:
+                class_name = ""
+            top_hwnd = _user32_top_level_hwnd(hwnd)
+            top_class = self._presentation_window_class(top_hwnd) if top_hwnd else ""
+            if category == "wps_ppt":
+                is_slideshow = False
+                try:
+                    is_slideshow = self._is_wps_slideshow_class(class_name) or (
+                        bool(top_class) and self._is_wps_slideshow_class(top_class)
+                    )
+                except Exception:
+                    is_slideshow = False
+                if is_slideshow:
+                    score += 10_000
+                else:
+                    score -= 5_000
+            elif category == "ms_ppt":
+                is_slideshow = False
+                try:
+                    is_slideshow = self._is_ms_slideshow_target(hwnd)
+                except Exception:
+                    is_slideshow = False
+                if is_slideshow:
+                    score += 5_000
+            entry = (score, -index, hwnd)
+            if resolved_preference and category == resolved_preference:
+                preferred_entries.append(entry)
+            else:
+                fallback_entries.append(entry)
+        preferred_entries.sort(reverse=True)
+        fallback_entries.sort(reverse=True)
+        ordered = [hwnd for _, _, hwnd in preferred_entries]
+        ordered.extend(hwnd for _, _, hwnd in fallback_entries)
+        return ordered
 
     def _presentation_target_category(self, hwnd: Optional[int]) -> str:
         if not hwnd:
