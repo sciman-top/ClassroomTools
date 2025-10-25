@@ -2809,6 +2809,8 @@ class PenSettingsDialog(QDialog):
                         initial_control_flags[key], control_defaults[key]
                     )
         self._control_checkboxes: Dict[str, QCheckBox] = {}
+        self._control_toggle_guard = False
+        self._last_word_toggle: Optional[str] = None
 
         style_layout = QHBoxLayout()
         style_layout.setContentsMargins(0, 0, 0, 0)
@@ -2910,6 +2912,10 @@ class PenSettingsDialog(QDialog):
             checkbox.blockSignals(prev_block)
             checkbox.setToolTip("关闭后将不会向对应应用发送翻页或滚动指令。")
             self._control_checkboxes[key] = checkbox
+            if key in {"ms_word", "wps_word"}:
+                checkbox.stateChanged.connect(
+                    lambda state, key=key: self._on_word_control_toggled(key, state)
+                )
             control_grid.addWidget(checkbox, index // 2, index % 2)
         layout.addLayout(control_grid)
 
@@ -3117,10 +3123,38 @@ class PenSettingsDialog(QDialog):
         self._update_preview()
 
     def _collect_control_flags(self) -> Dict[str, bool]:
-        return {
+        flags = {
             key: bool(checkbox.isChecked())
             for key, checkbox in self._control_checkboxes.items()
         }
+        if self._last_word_toggle in {"ms_word", "wps_word"}:
+            flags["_last_word_toggle"] = self._last_word_toggle
+        return flags
+
+    def _on_word_control_toggled(
+        self, key: str, state: Qt.CheckState | int
+    ) -> None:
+        if self._control_toggle_guard:
+            return
+        check_state = state
+        if not isinstance(check_state, Qt.CheckState):
+            check_state = Qt.CheckState(check_state)
+        if check_state != Qt.CheckState.Checked:
+            if self._last_word_toggle == key and not self._control_checkboxes[key].isChecked():
+                self._last_word_toggle = None
+            return
+        other_key = "wps_word" if key == "ms_word" else "ms_word"
+        other = self._control_checkboxes.get(other_key)
+        if other is None:
+            self._last_word_toggle = key
+            return
+        if other.isChecked():
+            self._control_toggle_guard = True
+            try:
+                other.setChecked(False)
+            finally:
+                self._control_toggle_guard = False
+        self._last_word_toggle = key
 
     def get_settings(
         self,
