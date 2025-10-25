@@ -300,6 +300,72 @@ def _mirror_resource_to_primary(primary: str, candidates: Tuple[str, ...]) -> No
 
 
 @dataclass(frozen=True)
+class _ResolvedPathGroup:
+    primary: str
+    candidates: Tuple[str, ...]
+
+    def first_existing(self) -> Optional[str]:
+        return _any_existing_path(self.candidates)
+
+
+@functools.lru_cache(maxsize=None)
+def _resolve_writable_resource(
+    relative_path: str,
+    *,
+    fallback_name: Optional[str] = None,
+    is_dir: bool = False,
+    extra_candidates: Tuple[str, ...] = (),
+    ensure_primary_exists: bool = False,
+    copy_from_candidates: bool = True,
+    prefer_extra_candidates: bool = False,
+) -> _ResolvedPathGroup:
+    normalized_rel = str(relative_path).strip().replace("\\", "/")
+    locator = _get_resource_locator()
+    candidate_list: List[str] = []
+    seen: Set[str] = set()
+
+    def _append(path: Optional[str]) -> None:
+        if not path:
+            return
+        normalized = os.path.normpath(os.path.abspath(path))
+        marker = os.path.normcase(normalized)
+        if marker in seen:
+            return
+        seen.add(marker)
+        candidate_list.append(normalized)
+
+    locator_candidates = locator.candidates(normalized_rel)
+    if prefer_extra_candidates:
+        for extra in extra_candidates:
+            _append(extra)
+        for candidate in locator_candidates:
+            _append(candidate)
+    else:
+        for candidate in locator_candidates:
+            _append(candidate)
+        for extra in extra_candidates:
+            _append(extra)
+
+    if not candidate_list:
+        module_dir = os.path.dirname(os.path.abspath(__file__))
+        _append(os.path.join(module_dir, normalized_rel))
+
+    fallback = fallback_name or os.path.basename(normalized_rel) or normalized_rel.replace("/", "_")
+    primary = _choose_writable_target(tuple(candidate_list), is_dir=is_dir, fallback_name=fallback)
+    unique_candidates = (primary,) + tuple(
+        candidate for candidate in candidate_list if os.path.normcase(candidate) != os.path.normcase(primary)
+    )
+
+    if is_dir:
+        if ensure_primary_exists:
+            _ensure_directory(primary)
+    elif copy_from_candidates:
+        _mirror_resource_to_primary(primary, unique_candidates)
+
+    return _ResolvedPathGroup(primary=primary, candidates=unique_candidates)
+
+
+@dataclass(frozen=True)
 class _StudentResourcePaths:
     plain: str
     encrypted: str
@@ -309,34 +375,31 @@ class _StudentResourcePaths:
 
 @functools.lru_cache(maxsize=1)
 def _resolve_student_resource_paths() -> _StudentResourcePaths:
-    locator = _get_resource_locator()
-    plain_candidates = locator.candidates("students.xlsx")
-    encrypted_candidates = locator.candidates("students.xlsx.enc")
-    if not plain_candidates:
-        module_dir = os.path.dirname(os.path.abspath(__file__))
-        plain_candidates = (os.path.join(module_dir, "students.xlsx"),)
-    if not encrypted_candidates:
-        module_dir = os.path.dirname(os.path.abspath(__file__))
-        encrypted_candidates = (os.path.join(module_dir, "students.xlsx.enc"),)
-
-    plain_primary = _choose_writable_target(plain_candidates, is_dir=False, fallback_name="students.xlsx")
-    encrypted_primary = os.path.join(os.path.dirname(plain_primary), "students.xlsx.enc")
-
-    unique_plain = (plain_primary,) + tuple(
-        path for path in plain_candidates if os.path.normcase(path) != os.path.normcase(plain_primary)
-    )
-    unique_encrypted = (encrypted_primary,) + tuple(
-        path for path in encrypted_candidates if os.path.normcase(path) != os.path.normcase(encrypted_primary)
+    legacy_plain = os.path.abspath("students.xlsx")
+    plain_group = _resolve_writable_resource(
+        "students.xlsx",
+        fallback_name="students.xlsx",
+        extra_candidates=(legacy_plain,),
+        is_dir=False,
+        copy_from_candidates=True,
     )
 
-    _mirror_resource_to_primary(plain_primary, unique_plain)
-    _mirror_resource_to_primary(encrypted_primary, unique_encrypted)
+    preferred_encrypted = os.path.join(os.path.dirname(plain_group.primary), "students.xlsx.enc")
+    legacy_encrypted = os.path.abspath("students.xlsx.enc")
+    encrypted_group = _resolve_writable_resource(
+        "students.xlsx.enc",
+        fallback_name="students.xlsx.enc",
+        extra_candidates=(preferred_encrypted, legacy_encrypted),
+        is_dir=False,
+        copy_from_candidates=True,
+        prefer_extra_candidates=True,
+    )
 
     return _StudentResourcePaths(
-        plain=plain_primary,
-        encrypted=encrypted_primary,
-        plain_candidates=unique_plain,
-        encrypted_candidates=unique_encrypted,
+        plain=plain_group.primary,
+        encrypted=encrypted_group.primary,
+        plain_candidates=plain_group.candidates,
+        encrypted_candidates=encrypted_group.candidates,
     )
 
 
@@ -346,22 +409,15 @@ _STUDENT_RESOURCES = _resolve_student_resource_paths()
 def _determine_student_photo_roots() -> Tuple[str, List[str]]:
     """Select the most appropriate student photo root and provide the fallback list."""
 
-    locator = _get_resource_locator()
-    candidate_paths = locator.candidates("student_photos")
-    if not candidate_paths:
-        default_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "student_photos")
-        return default_root, [default_root]
-
-    primary = _choose_writable_target(candidate_paths, is_dir=True, fallback_name="student_photos")
-    search_roots = [primary] + [
-        path for path in candidate_paths if os.path.normcase(path) != os.path.normcase(primary)
-    ]
-
-    if _ensure_directory(primary):
-        with contextlib.suppress(Exception):
-            os.makedirs(primary, exist_ok=True)
-
-    return primary, search_roots
+    group = _resolve_writable_resource(
+        "student_photos",
+        fallback_name="student_photos",
+        is_dir=True,
+        extra_candidates=(os.path.abspath("student_photos"),),
+        ensure_primary_exists=True,
+        copy_from_candidates=False,
+    )
+    return group.primary, list(group.candidates)
 
 
 def _user32_window_rect(hwnd: int) -> Optional[Tuple[int, int, int, int]]:
@@ -1610,67 +1666,28 @@ class SettingsManager:
 
         base_name = os.path.basename(filename) or "settings.ini"
         legacy_path = os.path.abspath(filename)
-        locator = _get_resource_locator()
-        candidate_sources: List[str] = []
-        seen_sources: Set[str] = set()
+        resolved = _resolve_writable_resource(
+            base_name,
+            fallback_name=base_name,
+            extra_candidates=(legacy_path,),
+            is_dir=False,
+            copy_from_candidates=True,
+        )
 
-        def _append_candidate(path: Optional[str]) -> None:
-            if not path:
-                return
-            normalized = os.path.normcase(os.path.abspath(path))
-            if normalized in seen_sources:
-                return
-            seen_sources.add(normalized)
-            candidate_sources.append(os.path.abspath(path))
-
-        _append_candidate(legacy_path)
-        for candidate in locator.candidates(base_name):
-            _append_candidate(candidate)
-
-        config_dir = self._get_config_dir()
-        try:
-            os.makedirs(config_dir, exist_ok=True)
-        except OSError:
-            config_dir = os.path.dirname(legacy_path) or os.getcwd()
-        target_path = os.path.join(config_dir, base_name)
-
-        source_path: Optional[str] = None
-        normalized_target = os.path.normcase(os.path.abspath(target_path))
-        for candidate in candidate_sources:
+        for candidate in resolved.candidates[1:]:
             if not os.path.exists(candidate):
                 continue
-            try:
-                if os.path.samefile(candidate, target_path):
-                    source_path = None
-                    break
-            except (OSError, FileNotFoundError):
-                pass
-            source_path = candidate
-            break
-
-        if source_path is not None:
-            same_file = False
-            try:
-                same_file = os.path.samefile(source_path, target_path)
-            except (OSError, FileNotFoundError):
-                same_file = normalized_target == os.path.normcase(os.path.abspath(source_path))
-            if not same_file and not os.path.exists(target_path):
-                try:
-                    shutil.copy2(source_path, target_path)
-                except Exception:
-                    target_path = source_path
-            if not same_file:
-                legacy_dir = os.path.dirname(source_path) or os.getcwd()
-                if os.access(legacy_dir, os.W_OK):
-                    self._mirror_targets.add(source_path)
+            directory = os.path.dirname(candidate) or os.getcwd()
+            if os.access(directory, os.W_OK):
+                self._mirror_targets.add(candidate)
 
         try:
-            with open(target_path, "a", encoding="utf-8"):
+            with open(resolved.primary, "a", encoding="utf-8"):
                 pass
         except OSError:
-            target_path = legacy_path
+            return legacy_path
 
-        return target_path
+        return resolved.primary
 
     def get_defaults(self) -> Dict[str, Dict[str, str]]:
         return {section: values.copy() for section, values in self.defaults.items()}
