@@ -909,22 +909,25 @@ class _ParsedGeometry:
     y: int
 
 
+_GEOMETRY_TEXT_PATTERN = re.compile(
+    r"^\s*(?P<width>\d+)\s*x\s*(?P<height>\d+)\s*\+\s*(?P<x>-?\d+)\s*\+\s*(?P<y>-?\d+)\s*$"
+)
+
+
 def _parse_geometry_text(value: str) -> Optional[_ParsedGeometry]:
     if not value:
         return None
-    parts = value.split("+")
-    if len(parts) != 3:
+    match = _GEOMETRY_TEXT_PATTERN.match(value)
+    if not match:
         return None
-    size_part, x_str, y_str = parts
-    if "x" not in size_part:
-        return None
-    width_str, height_str = size_part.split("x", 1)
     try:
-        width = int(width_str)
-        height = int(height_str)
-        x = int(x_str)
-        y = int(y_str)
-    except ValueError:
+        width = int(match.group("width"))
+        height = int(match.group("height"))
+        x = int(match.group("x"))
+        y = int(match.group("y"))
+    except (TypeError, ValueError):
+        return None
+    if width <= 0 or height <= 0:
         return None
     return _ParsedGeometry(width=width, height=height, x=x, y=y)
 
@@ -965,11 +968,33 @@ def _widget_minimum_size(widget: QWidget) -> tuple[int, int]:
 
 def _measure_widget_geometry(widget: QWidget) -> tuple[int, int, int, int]:
     geom = widget.frameGeometry()
-    width = widget.width() or geom.width() or widget.sizeHint().width()
-    height = widget.height() or geom.height() or widget.sizeHint().height()
+    width = widget.width()
+    height = widget.height()
     x = geom.x() if geom.width() else widget.x()
     y = geom.y() if geom.height() else widget.y()
-    return width, height, x, y
+
+    if width <= 0 or height <= 0:
+        frame_width = geom.width()
+        frame_height = geom.height()
+        inner = widget.geometry()
+        if width <= 0:
+            width = frame_width or inner.width() or width
+        if height <= 0:
+            height = frame_height or inner.height() or height
+
+    if width <= 0 or height <= 0:
+        size_hint = None
+        try:
+            size_hint = widget.sizeHint()
+        except Exception:
+            size_hint = None
+        if size_hint is not None:
+            if width <= 0:
+                width = size_hint.width()
+            if height <= 0:
+                height = size_hint.height()
+
+    return max(width, 1), max(height, 1), x, y
 
 
 def _constrain_geometry_to_available(
@@ -1022,8 +1047,12 @@ def apply_geometry_from_text(widget: QWidget, geometry: str) -> None:
             extra_height_floor=extra_height_floor,
         )
 
-    widget.resize(max(min_width, width), max(min_height, height))
-    widget.move(x, y)
+    target_width = max(min_width, width)
+    target_height = max(min_height, height)
+    if widget.width() != target_width or widget.height() != target_height:
+        widget.resize(target_width, target_height)
+    if widget.x() != x or widget.y() != y:
+        widget.move(x, y)
 
 
 def ensure_widget_within_screen(widget: QWidget) -> None:
@@ -1049,8 +1078,10 @@ def ensure_widget_within_screen(widget: QWidget) -> None:
         extra_height_floor=extra_height_floor,
     )
 
-    widget.resize(width, height)
-    widget.move(x, y)
+    if widget.width() != width or widget.height() != height:
+        widget.resize(width, height)
+    if widget.x() != x or widget.y() != y:
+        widget.move(x, y)
 
 
 def str_to_bool(value: Any, default: bool = False) -> bool:
