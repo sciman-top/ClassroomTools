@@ -6312,6 +6312,9 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             process_name = self._window_process_name(top_hwnd or hwnd)
             if process_name.startswith("wpp"):
                 return True
+        category = self._presentation_target_category(hwnd)
+        if category == "wps_ppt":
+            return True
         return False
 
     def _is_ms_slideshow_target(self, hwnd: Optional[int] = None) -> bool:
