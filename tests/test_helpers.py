@@ -303,6 +303,16 @@ def test_presentation_category_handles_wps_hosted_screenclass() -> None:
     assert _compute_category("screenclass", "", "wps.exe") == "wps_ppt"
 
 
+def test_presentation_category_accepts_non_string_hints(tmp_path: Path) -> None:
+    path = tmp_path / "WPP.EXE"
+    path.write_text("dummy")
+    assert (
+        _compute_category(b"KwppShowFrameClass", memoryview(b"kwpsframeclass"), path)
+        == "wps_ppt"
+    )
+    assert _compute_category(bytearray(), None, None) == "other"
+
+
 class _MixinHarness(helpers._PresentationWindowMixin):  # type: ignore[attr-defined]
     def _overlay_widget(self):  # pragma: no cover - interface requirement
         return None
