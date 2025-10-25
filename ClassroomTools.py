@@ -1022,51 +1022,38 @@ def _constrain_geometry_to_available(
     return width, height, x, y
 
 
-def apply_geometry_from_text(widget: QWidget, geometry: str) -> None:
-    parsed = _parse_geometry_text(geometry)
-    if parsed is None:
-        return
-
-    min_width, min_height = _widget_minimum_size(widget)
-
-    screen = _resolve_widget_screen(widget, fallback_point=QPoint(parsed.x, parsed.y))
-    width, height, x, y = parsed.width, parsed.height, parsed.x, parsed.y
-    if screen is not None:
-        available = screen.availableGeometry()
-        extra_width_floor = max(320, int(available.width() * 0.9))
-        extra_height_floor = max(240, int(available.height() * 0.9))
-        width, height, x, y = _constrain_geometry_to_available(
-            width,
-            height,
-            x,
-            y,
-            min_width=min_width,
-            min_height=min_height,
-            available=available,
-            extra_width_floor=extra_width_floor,
-            extra_height_floor=extra_height_floor,
-        )
-
-    target_width = max(min_width, width)
-    target_height = max(min_height, height)
-    if widget.width() != target_width or widget.height() != target_height:
-        widget.resize(target_width, target_height)
-    if widget.x() != x or widget.y() != y:
-        widget.move(x, y)
+def _extra_floor_expand(available: QRect) -> tuple[int, int]:
+    return (
+        max(320, int(available.width() * 0.9)),
+        max(240, int(available.height() * 0.9)),
+    )
 
 
-def ensure_widget_within_screen(widget: QWidget) -> None:
-    screen = _resolve_widget_screen(widget)
+def _extra_floor_restrict(available: QRect) -> tuple[int, int]:
+    return (
+        min(available.width(), int(available.width() * 0.9)),
+        min(available.height(), int(available.height() * 0.9)),
+    )
+
+
+def _constrain_within_screen(
+    width: int,
+    height: int,
+    x: int,
+    y: int,
+    *,
+    min_width: int,
+    min_height: int,
+    screen: Optional[QScreen],
+    extra_floor_factory: Callable[[QRect], tuple[int, int]],
+) -> tuple[int, int, int, int]:
+    width = max(min_width, width)
+    height = max(min_height, height)
     if screen is None:
-        return
-
-    min_width, min_height = _widget_minimum_size(widget)
+        return width, height, x, y
     available = screen.availableGeometry()
-
-    width, height, x, y = _measure_widget_geometry(widget)
-    extra_width_floor = min(available.width(), int(available.width() * 0.9))
-    extra_height_floor = min(available.height(), int(available.height() * 0.9))
-    width, height, x, y = _constrain_geometry_to_available(
+    extra_width_floor, extra_height_floor = extra_floor_factory(available)
+    return _constrain_geometry_to_available(
         width,
         height,
         x,
@@ -1078,10 +1065,56 @@ def ensure_widget_within_screen(widget: QWidget) -> None:
         extra_height_floor=extra_height_floor,
     )
 
+
+def _apply_widget_geometry(widget: QWidget, width: int, height: int, x: int, y: int) -> None:
     if widget.width() != width or widget.height() != height:
         widget.resize(width, height)
     if widget.x() != x or widget.y() != y:
         widget.move(x, y)
+
+
+def apply_geometry_from_text(widget: QWidget, geometry: str) -> None:
+    parsed = _parse_geometry_text(geometry)
+    if parsed is None:
+        return
+
+    min_width, min_height = _widget_minimum_size(widget)
+
+    screen = _resolve_widget_screen(widget, fallback_point=QPoint(parsed.x, parsed.y))
+    width, height, x, y = _constrain_within_screen(
+        parsed.width,
+        parsed.height,
+        parsed.x,
+        parsed.y,
+        min_width=min_width,
+        min_height=min_height,
+        screen=screen,
+        extra_floor_factory=_extra_floor_expand,
+    )
+
+    _apply_widget_geometry(widget, width, height, x, y)
+
+
+def ensure_widget_within_screen(widget: QWidget) -> None:
+    screen = _resolve_widget_screen(widget)
+    if screen is None:
+        return
+
+    min_width, min_height = _widget_minimum_size(widget)
+
+    width, height, x, y = _measure_widget_geometry(widget)
+    width, height, x, y = _constrain_within_screen(
+        width,
+        height,
+        x,
+        y,
+        min_width=min_width,
+        min_height=min_height,
+        screen=screen,
+        extra_floor_factory=_extra_floor_restrict,
+    )
+
+    _apply_widget_geometry(widget, width, height, x, y)
 
 
 def str_to_bool(value: Any, default: bool = False) -> bool:
