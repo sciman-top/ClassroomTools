@@ -4174,13 +4174,25 @@ class _PresentationForwarder(_PresentationWindowMixin):
             self.clear_cached_target()
             return False
         if self._is_wps_slideshow_window(target):
-            success = self._send_wps_slideshow_key_sequence(target, vk_code)
-            if not success:
-                self._log_debug(
-                    "send_virtual_key: wps slideshow delivery failed vk=%s",
-                    vk_code,
-                )
-            return success
+            candidates = [target]
+            try:
+                extra = self._collect_wps_slideshow_targets(target)
+            except Exception:
+                extra = []
+            for candidate in extra:
+                if candidate not in candidates:
+                    candidates.append(candidate)
+            for candidate in candidates:
+                success = self._send_wps_slideshow_key_sequence(candidate, vk_code)
+                if success:
+                    if candidate != target:
+                        self._last_target_hwnd = candidate
+                    return True
+            self._log_debug(
+                "send_virtual_key: wps slideshow delivery failed vk=%s",
+                vk_code,
+            )
+            return False
         if self._is_ms_slideshow_window(target) or self._is_word_window(target):
             success = False
             for hwnd, update_cache in self._iter_key_targets(target):
@@ -4530,8 +4542,29 @@ class _PresentationForwarder(_PresentationWindowMixin):
                 hwnd,
                 vk_code,
             )
+            release = self._deliver_key_message(hwnd, win32con.WM_KEYUP, vk_code, up_param)
+            if not release:
+                return False
         self._last_target_hwnd = hwnd
         return True
+
+    def _collect_wps_slideshow_targets(self, hwnd: int) -> List[int]:
+        handles: List[int] = []
+        if hwnd:
+            handles.append(hwnd)
+        try:
+            candidates = list(self._iter_key_targets(hwnd))
+        except Exception:
+            candidates = []
+        for candidate, _update_cache in candidates:
+            if candidate in handles:
+                continue
+            if self._is_wps_slideshow_window(candidate):
+                handles.append(candidate)
+        if hwnd and hwnd in handles:
+            # Ensure the provided target remains first
+            handles = [hwnd] + [h for h in handles if h != hwnd]
+        return handles
 
     def _map_virtual_key(self, vk_code: int) -> int:
         map_vk = getattr(win32api, "MapVirtualKey", None) if win32api is not None else None
@@ -6716,28 +6749,41 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         if forwarder is None or win32con is None:
             return False
         try:
-            down_param = forwarder._build_basic_key_lparam(vk_code, is_press=True)
-            up_param = forwarder._build_basic_key_lparam(vk_code, is_press=False)
+            candidates = forwarder._collect_wps_slideshow_targets(hwnd)
         except Exception:
-            return False
-        try:
-            press = forwarder._deliver_key_message(hwnd, win32con.WM_KEYDOWN, vk_code, down_param)
-            release = forwarder._deliver_key_message(hwnd, win32con.WM_KEYUP, vk_code, up_param)
-        except Exception:
-            return False
-        if not press:
-            return False
-        try:
-            forwarder._last_target_hwnd = hwnd
-        except Exception:
-            pass
-        if not release:
-            self._log_navigation_debug(
-                "wps_keyup_failed",
-                target=hex(hwnd),
-                vk_code=vk_code,
-            )
-        return True
+            candidates = [hwnd]
+        if not candidates:
+            candidates = [hwnd]
+        for candidate in candidates:
+            if not candidate:
+                continue
+            if not forwarder._is_wps_slideshow_window(candidate):
+                # Allow the explicit hwnd as a fallback candidate
+                if candidate != hwnd:
+                    continue
+            try:
+                success = forwarder._send_wps_slideshow_key_sequence(candidate, vk_code)
+            except Exception:
+                success = False
+            if not success and candidate != hwnd:
+                continue
+            if not success:
+                self._log_navigation_debug(
+                    "wps_keyup_failed",
+                    target=hex(candidate),
+                    vk_code=vk_code,
+                )
+                continue
+            try:
+                self._last_target_hwnd = candidate
+            except Exception:
+                pass
+            try:
+                forwarder._last_target_hwnd = candidate
+            except Exception:
+                pass
+            return True
+        return False
 
     def _attempt_wps_keyup_recovery(
         self,
