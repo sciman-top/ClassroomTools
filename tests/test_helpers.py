@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import ast
+import enum
+import math
 import contextlib
 import os
 import sys
@@ -34,11 +36,15 @@ def _load_helper_module() -> types.ModuleType:
             "List": List,
             "Iterable": Iterable,
             "Set": Set,
+            "Enum": enum.Enum,
+            "math": math,
         }
     )
     sys.modules[module.__name__] = module
 
     targets = {
+        "_TRUE_STRINGS",
+        "_FALSE_STRINGS",
         "parse_bool",
         "_ensure_directory",
         "_ensure_writable_directory",
@@ -52,6 +58,18 @@ def _load_helper_module() -> types.ModuleType:
             submodule = ast.Module(body=[node], type_ignores=[])
             ast.fix_missing_locations(submodule)
             exec(compile(submodule, str(path), "exec"), namespace)
+        elif isinstance(node, ast.Assign):
+            constant_names = {
+                target.id
+                for target in node.targets
+                if isinstance(target, ast.Name) and target.id in targets
+            }
+            if constant_names:
+                for name in constant_names:
+                    targets.remove(name)
+                submodule = ast.Module(body=[node], type_ignores=[])
+                ast.fix_missing_locations(submodule)
+                exec(compile(submodule, str(path), "exec"), namespace)
         if not targets:
             break
     missing = sorted(targets)
@@ -82,6 +100,29 @@ def test_str_to_bool_handles_non_string_inputs() -> None:
     assert helpers.str_to_bool(False) is False
     assert helpers.str_to_bool(3) is True
     assert helpers.str_to_bool(0) is False
+
+
+def test_str_to_bool_handles_bytes_and_enums() -> None:
+    class _SampleEnum(enum.Enum):
+        ENABLED = "yes"
+        DISABLED = "no"
+
+    assert helpers.str_to_bool(b"YES") is True
+    assert helpers.str_to_bool(b"off") is False
+    assert helpers.str_to_bool(_SampleEnum.ENABLED) is True
+    assert helpers.str_to_bool(_SampleEnum.DISABLED) is False
+
+
+def test_str_to_bool_interprets_numeric_strings() -> None:
+    assert helpers.str_to_bool(" 2 ") is True
+    assert helpers.str_to_bool("-1") is True
+    assert helpers.str_to_bool("0.0") is False
+    assert helpers.str_to_bool("+0") is False
+
+
+def test_str_to_bool_ignores_nan_strings() -> None:
+    assert helpers.str_to_bool("nan", default=True) is True
+    assert helpers.str_to_bool("nan", default=False) is False
 
 
 def test_choose_writable_target_falls_back_when_parent_is_file(tmp_path: Path) -> None:
