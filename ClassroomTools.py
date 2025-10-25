@@ -186,6 +186,53 @@ def parse_bool(value: Any, default: bool = False) -> bool:
     return bool(result)
 
 
+def _resolve_word_control_conflict(
+    ms_word_enabled: bool,
+    wps_word_enabled: bool,
+    *,
+    source_flags: Optional[Mapping[str, Any]] = None,
+    previous_flags: Optional[Mapping[str, Any]] = None,
+) -> tuple[bool, bool]:
+    """Ensure the Word-scrolling toggles are mutually exclusive.
+
+    When both *ms_word_enabled* and *wps_word_enabled* evaluate to :data:`True`,
+    resolve the conflict by preferring the last explicitly toggled checkbox if it
+    is known, then falling back to the previously persisted preference. If no
+    hints are available the Microsoft Word option wins by default because it is
+    the first implementation we shipped and therefore the safer compatibility
+    choice.
+    """
+
+    if not (ms_word_enabled and wps_word_enabled):
+        return bool(ms_word_enabled), bool(wps_word_enabled)
+
+    last_toggle: Optional[str] = None
+    if isinstance(source_flags, Mapping):
+        raw_last = source_flags.get("_last_word_toggle")
+        if raw_last is not None:
+            candidate = str(raw_last).strip().lower()
+            if candidate in {"ms_word", "wps_word"}:
+                last_toggle = candidate
+
+    if last_toggle == "ms_word":
+        return True, False
+    if last_toggle == "wps_word":
+        return False, True
+
+    previous_ms = False
+    previous_wps = False
+    if isinstance(previous_flags, Mapping):
+        previous_ms = parse_bool(previous_flags.get("ms_word"), False)
+        previous_wps = parse_bool(previous_flags.get("wps_word"), False)
+
+    if previous_ms and not previous_wps:
+        return True, False
+    if previous_wps and not previous_ms:
+        return False, True
+
+    return True, False
+
+
 def _preferred_app_directory() -> str:
     """Return the user-specific data directory without creating it."""
 
@@ -2758,7 +2805,6 @@ class PenSettingsDialog(QDialog):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
 
-        disabled_control_keys = {"ms_word", "wps_word"}
         control_defaults = {
             "ms_ppt": True,
             "ms_word": False,
@@ -2771,9 +2817,9 @@ class PenSettingsDialog(QDialog):
                     control_defaults[key] = parse_bool(
                         initial_control_flags[key], control_defaults[key]
                     )
-        for key in disabled_control_keys:
-            control_defaults[key] = False
         self._control_checkboxes: Dict[str, QCheckBox] = {}
+        self._control_toggle_guard = False
+        self._last_word_toggle: Optional[str] = None
 
         style_layout = QHBoxLayout()
         style_layout.setContentsMargins(0, 0, 0, 0)
@@ -2870,12 +2916,15 @@ class PenSettingsDialog(QDialog):
         ]
         for index, (key, text) in enumerate(control_items):
             checkbox = QCheckBox(text, self)
+            prev_block = checkbox.blockSignals(True)
             checkbox.setChecked(control_defaults.get(key, True))
-            if key in disabled_control_keys:
-                checkbox.setChecked(False)
-                checkbox.setEnabled(False)
+            checkbox.blockSignals(prev_block)
             checkbox.setToolTip("关闭后将不会向对应应用发送翻页或滚动指令。")
             self._control_checkboxes[key] = checkbox
+            if key in {"ms_word", "wps_word"}:
+                checkbox.stateChanged.connect(
+                    lambda state, key=key: self._on_word_control_toggled(key, state)
+                )
             control_grid.addWidget(checkbox, index // 2, index % 2)
         layout.addLayout(control_grid)
 
@@ -3083,10 +3132,38 @@ class PenSettingsDialog(QDialog):
         self._update_preview()
 
     def _collect_control_flags(self) -> Dict[str, bool]:
-        return {
+        flags = {
             key: bool(checkbox.isChecked())
             for key, checkbox in self._control_checkboxes.items()
         }
+        if self._last_word_toggle in {"ms_word", "wps_word"}:
+            flags["_last_word_toggle"] = self._last_word_toggle
+        return flags
+
+    def _on_word_control_toggled(
+        self, key: str, state: Qt.CheckState | int
+    ) -> None:
+        if self._control_toggle_guard:
+            return
+        check_state = state
+        if not isinstance(check_state, Qt.CheckState):
+            check_state = Qt.CheckState(check_state)
+        if check_state != Qt.CheckState.Checked:
+            if self._last_word_toggle == key and not self._control_checkboxes[key].isChecked():
+                self._last_word_toggle = None
+            return
+        other_key = "wps_word" if key == "ms_word" else "ms_word"
+        other = self._control_checkboxes.get(other_key)
+        if other is None:
+            self._last_word_toggle = key
+            return
+        if other.isChecked():
+            self._control_toggle_guard = True
+            try:
+                other.setChecked(False)
+            finally:
+                self._control_toggle_guard = False
+        self._last_word_toggle = key
 
     def get_settings(
         self,
@@ -8004,19 +8081,27 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         }
         resolved: Dict[str, bool] = {}
         source = flags or {}
+        source_mapping: Mapping[str, Any] = source if isinstance(source, Mapping) else {}
         for key, default in defaults.items():
             raw = None
-            if isinstance(source, Mapping):
-                raw = source.get(key)
-                if raw is None:
-                    raw = source.get(f"control_{key}")
+            raw = source_mapping.get(key)
+            if raw is None:
+                raw = source_mapping.get(f"control_{key}")
             resolved[key] = parse_bool(raw, default)
-        for key in ("ms_word", "wps_word"):
-            resolved[key] = False
         previous = getattr(self, "_presentation_control_flags", None)
         previous_flags: Mapping[str, Any] = previous or {}
-        changed = previous != resolved
-        self._presentation_control_flags = resolved
+        (
+            resolved["ms_word"],
+            resolved["wps_word"],
+        ) = _resolve_word_control_conflict(
+            resolved["ms_word"],
+            resolved["wps_word"],
+            source_flags=source_mapping,
+            previous_flags=previous_flags,
+        )
+        previous_mapping = dict(previous_flags)
+        changed = previous_mapping != resolved
+        self._presentation_control_flags = dict(resolved)
         self.control_ms_ppt = resolved["ms_ppt"]
         self.control_ms_word = resolved["ms_word"]
         self.control_wps_ppt = resolved["wps_ppt"]
