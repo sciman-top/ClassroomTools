@@ -4023,8 +4023,9 @@ class _PresentationWindowMixin:
             return None
         return candidates
 
-    def _overlay_widget(self) -> Optional[QWidget]:
-        raise NotImplementedError
+    @classmethod
+    def _normalize_class_hint(cls, value: Any) -> str:
+        return cls._PrefixKeywordClassifier._normalize(value)
 
     def _overlay_child_widget(self, attribute: str) -> Optional[QWidget]:
         overlay = self._overlay_widget()
@@ -4034,10 +4035,56 @@ class _PresentationWindowMixin:
         if widget is None:
             return 0
         try:
-            wid = widget.winId()
+            if isinstance(value, bytes):
+                value = value.decode("utf-8", "ignore")
+            else:
+                value = str(value)
         except Exception:
-            return 0
-        return int(wid) if wid else 0
+            return ""
+        return value.strip().casefold()
+
+    def _normalized_process_context(
+        self, process_name: Any, classes: Iterable[Any]
+    ) -> Tuple[str, Tuple[str, ...]]:
+        normalized_name = self._normalize_process_name(process_name)
+        normalized_classes = self._normalized_class_hints(*classes)
+        return normalized_name, normalized_classes
+
+    def _summarize_wps_process_hints(
+        self, normalized_classes: Iterable[str]
+    ) -> "_PresentationWindowMixin._WPSProcessHints":
+        classes = tuple(normalized_classes)
+        if not classes:
+            return self._WPSProcessHints(classes, False, False, False, False)
+
+        slideshow_predicate = self._is_wps_slideshow_class
+        wps_presentation_predicate = self._class_has_wps_presentation_signature
+        ms_presentation_predicate = self._class_has_ms_presentation_signature
+        writer_predicate = self._class_has_wps_writer_signature
+
+        has_slideshow = False
+        has_wps_presentation_signature = False
+        has_ms_presentation_signature = False
+        has_writer_signature = False
+
+        def _safe_call(
+            predicate: Callable[[str], bool],
+            class_name: str,
+        ) -> bool:
+            try:
+                return bool(predicate(class_name))
+            except Exception:
+                logger_ref = globals().get("logger")
+                if logger_ref is None:  # pragma: no cover - fallback for helper extraction
+                    logging_module = globals().get("logging")
+                    if logging_module is None:
+                        import logging as logging_module  # type: ignore[import-not-found]
+                    logger_ref = logging_module.getLogger(__name__)
+                logger_ref.debug(
+                    "WPS process hint predicate failed",  # pragma: no cover - debug logging
+                    exc_info=True,
+                )
+                return False
 
     def _toolbar_widget(self) -> Optional[QWidget]:
         return self._overlay_child_widget("toolbar")
