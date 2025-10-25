@@ -1014,6 +1014,70 @@ def dedupe_strings(values: List[str]) -> List[str]:
     return unique
 
 
+def _compute_presentation_category(
+    class_name: str,
+    top_class: str,
+    process_name: str,
+    *,
+    has_wps_presentation_signature: Callable[[str], bool],
+    is_wps_slideshow_class: Callable[[str], bool],
+    has_wps_writer_signature: Callable[[str], bool],
+    is_word_like_class: Callable[[str], bool],
+    has_ms_presentation_signature: Callable[[str], bool],
+    is_wps_presentation_process: Callable[..., bool],
+    is_wps_writer_process: Callable[..., bool],
+) -> str:
+    """Classify a presentation window based on class and process hints."""
+
+    def _normalize(name: str) -> str:
+        return name.strip().lower() if name else ""
+
+    primary = _normalize(class_name)
+    secondary = _normalize(top_class)
+    classes = tuple(dict.fromkeys(filter(None, (primary, secondary))))
+
+    process = process_name.strip()
+    process_lower = process.lower()
+
+    for candidate in classes:
+        if has_wps_presentation_signature(candidate):
+            return "wps_ppt"
+
+    for candidate in classes:
+        if is_wps_slideshow_class(candidate):
+            return "wps_ppt"
+
+    if process and is_wps_presentation_process(process, *classes):
+        return "wps_ppt"
+
+    for candidate in classes:
+        if has_wps_writer_signature(candidate):
+            return "wps_word"
+
+    for candidate in classes:
+        if is_word_like_class(candidate):
+            return "ms_word"
+
+    if process and is_wps_writer_process(process, *classes):
+        return "wps_word"
+
+    if process_lower:
+        if process_lower.startswith(("wpp", "wppt")):
+            return "wps_ppt"
+        if process_lower.startswith("wps"):
+            return "wps_word"
+        if "powerpnt" in process_lower:
+            return "ms_ppt"
+        if "winword" in process_lower:
+            return "ms_word"
+
+    for candidate in classes:
+        if has_ms_presentation_signature(candidate):
+            return "ms_ppt"
+
+    return "other"
+
+
 def _try_import_module(module: str) -> bool:
     try:
         importlib.import_module(module)
@@ -3568,6 +3632,102 @@ class _PresentationWindowMixin:
                 return True
         return False
 
+    def _class_has_wps_writer_signature(self, class_name: str) -> bool:
+        if not class_name:
+            return False
+        if any(class_name.startswith(prefix) for prefix in self._WPS_WRITER_PREFIXES):
+            if any(excluded in class_name for excluded in self._WPS_WRITER_EXCLUDE_KEYWORDS):
+                return False
+            if any(keyword in class_name for keyword in self._WPS_WRITER_KEYWORDS):
+                return True
+        if class_name in {
+            "kwpsdocview",
+            "wpsdocview",
+            "kwpsframeclass",
+            "kwpsmainframe",
+            "wpsframeclass",
+            "wpsmainframe",
+        }:
+            return True
+        return False
+
+    def _class_has_wps_presentation_signature(self, class_name: str) -> bool:
+        if not class_name:
+            return False
+        if self._is_wps_slideshow_class(class_name):
+            return True
+        if class_name.startswith("kwpp") or "kwpp" in class_name:
+            return True
+        if class_name.startswith("wpp") and "wps" not in class_name:
+            return True
+        if class_name.startswith("wpsshow") or "wpsshow" in class_name:
+            return True
+        return False
+
+    def _class_has_ms_presentation_signature(self, class_name: str) -> bool:
+        if not class_name:
+            return False
+        if self._class_has_wps_presentation_signature(class_name):
+            return False
+        if class_name in self._SLIDESHOW_PRIORITY_CLASSES:
+            return True
+        if class_name in self._SLIDESHOW_SECONDARY_CLASSES:
+            return True
+        if class_name in self._PRESENTATION_EDITOR_CLASSES:
+            if class_name.startswith("kwpp") or class_name.startswith("kwps"):
+                return False
+            if class_name.startswith("wps"):
+                return False
+            return True
+        keywords = ("ppt", "powerpnt", "powerpoint", "screenclass")
+        return any(keyword in class_name for keyword in keywords)
+
+    def _normalized_class_hints(self, *classes: str) -> Tuple[str, ...]:
+        normalized: List[str] = []
+        for value in classes:
+            if not value:
+                continue
+            hint = value.strip().lower()
+            if hint:
+                normalized.append(hint)
+        return tuple(normalized)
+
+    def _is_wps_presentation_process(self, process_name: str, *classes: str) -> bool:
+        name = (process_name or "").strip().lower()
+        if not name:
+            return False
+        if name.startswith(("wpp", "wppt")):
+            return True
+        if "wpspresentation" in name:
+            return True
+        if not name.startswith("wps"):
+            return False
+        normalized_classes = self._normalized_class_hints(*classes)
+        if not normalized_classes:
+            return False
+        if any(self._is_wps_slideshow_class(cls) for cls in normalized_classes):
+            return True
+        if any(self._class_has_wps_presentation_signature(cls) for cls in normalized_classes):
+            return True
+        return False
+
+    def _is_wps_writer_process(self, process_name: str, *classes: str) -> bool:
+        name = (process_name or "").strip().lower()
+        if not name:
+            return False
+        if self._is_wps_presentation_process(process_name, *classes):
+            return False
+        if "wpswriter" in name:
+            return True
+        normalized_classes = self._normalized_class_hints(*classes)
+        if any(self._class_has_wps_writer_signature(cls) for cls in normalized_classes):
+            return True
+        if not name.startswith("wps"):
+            return False
+        if any(self._is_wps_slideshow_class(cls) for cls in normalized_classes):
+            return False
+        return False
+
     def _window_thread_id(self, hwnd: int) -> int:
         if _USER32 is None or hwnd == 0:
             return 0
@@ -3756,6 +3916,26 @@ class _PresentationWindowMixin:
         if not rect:
             return False
         return self._rect_intersects_overlay(rect)
+
+    def _presentation_target_category(self, hwnd: Optional[int]) -> str:
+        if not hwnd:
+            return "other"
+        class_name = self._presentation_window_class(hwnd)
+        top_hwnd = _user32_top_level_hwnd(hwnd)
+        top_class = self._presentation_window_class(top_hwnd) if top_hwnd else ""
+        process_name = self._window_process_name(top_hwnd or hwnd)
+        return _compute_presentation_category(
+            class_name,
+            top_class,
+            process_name,
+            has_wps_presentation_signature=self._class_has_wps_presentation_signature,
+            is_wps_slideshow_class=self._is_wps_slideshow_class,
+            has_wps_writer_signature=self._class_has_wps_writer_signature,
+            is_word_like_class=self._is_word_like_class,
+            has_ms_presentation_signature=self._class_has_ms_presentation_signature,
+            is_wps_presentation_process=self._is_wps_presentation_process,
+            is_wps_writer_process=self._is_wps_writer_process,
+        )
 
 
 class _PresentationForwarder(_PresentationWindowMixin):
@@ -5758,84 +5938,6 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         if vk_code in (VK_UP, VK_LEFT):
             return 120
         return 0
-
-    def _class_has_wps_writer_signature(self, class_name: str) -> bool:
-        if not class_name:
-            return False
-        if any(class_name.startswith(prefix) for prefix in self._WPS_WRITER_PREFIXES):
-            if any(excluded in class_name for excluded in self._WPS_WRITER_EXCLUDE_KEYWORDS):
-                return False
-            if any(keyword in class_name for keyword in self._WPS_WRITER_KEYWORDS):
-                return True
-        if class_name in {
-            "kwpsdocview",
-            "wpsdocview",
-            "kwpsframeclass",
-            "kwpsmainframe",
-            "wpsframeclass",
-            "wpsmainframe",
-        }:
-            return True
-        return False
-
-    def _class_has_wps_presentation_signature(self, class_name: str) -> bool:
-        if not class_name:
-            return False
-        if self._is_wps_slideshow_class(class_name):
-            return True
-        if class_name.startswith("kwpp") or "kwpp" in class_name:
-            return True
-        if class_name.startswith("wpp") and "wps" not in class_name:
-            return True
-        if class_name.startswith("wpsshow") or "wpsshow" in class_name:
-            return True
-        return False
-
-    def _class_has_ms_presentation_signature(self, class_name: str) -> bool:
-        if not class_name:
-            return False
-        if self._class_has_wps_presentation_signature(class_name):
-            return False
-        if class_name in self._SLIDESHOW_PRIORITY_CLASSES:
-            return True
-        if class_name in self._SLIDESHOW_SECONDARY_CLASSES:
-            return True
-        if class_name in self._PRESENTATION_EDITOR_CLASSES:
-            if class_name.startswith("kwpp") or class_name.startswith("kwps"):
-                return False
-            if class_name.startswith("wps"):
-                return False
-            return True
-        keywords = ("ppt", "powerpnt", "powerpoint", "screenclass")
-        return any(keyword in class_name for keyword in keywords)
-
-    def _presentation_target_category(self, hwnd: Optional[int]) -> str:
-        if not hwnd:
-            return "other"
-        class_name = self._presentation_window_class(hwnd)
-        top_hwnd = _user32_top_level_hwnd(hwnd)
-        top_class = self._presentation_window_class(top_hwnd) if top_hwnd else ""
-        if self._class_has_wps_presentation_signature(class_name) or self._class_has_wps_presentation_signature(top_class):
-            return "wps_ppt"
-        if self._class_has_wps_writer_signature(class_name) or self._class_has_wps_writer_signature(top_class):
-            return "wps_word"
-        if self._is_wps_slideshow_class(class_name) or self._is_wps_slideshow_class(top_class):
-            return "wps_ppt"
-        if self._is_word_like_class(class_name) or self._is_word_like_class(top_class):
-            return "ms_word"
-        process_name = self._window_process_name(top_hwnd or hwnd)
-        if process_name:
-            if process_name.startswith("wpp"):
-                return "wps_ppt"
-            if process_name.startswith("wps"):
-                return "wps_word"
-            if "powerpnt" in process_name:
-                return "ms_ppt"
-            if "winword" in process_name:
-                return "ms_word"
-        if self._class_has_ms_presentation_signature(class_name) or self._class_has_ms_presentation_signature(top_class):
-            return "ms_ppt"
-        return "other"
 
     def _is_presentation_category_allowed(self, category: str) -> bool:
         if not category or category == "other":
