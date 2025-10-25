@@ -3681,6 +3681,69 @@ class _PresentationWindowMixin:
     _WPS_WRITER_KEYWORDS: Tuple[str, ...] = ("frame", "view", "doc", "page")
     _WPS_WRITER_EXCLUDE_KEYWORDS: Tuple[str, ...] = ("show", "slideshow")
 
+    def _class_indicates_slideshow(self, class_name: str) -> bool:
+        if not class_name:
+            return False
+        if class_name in self._WPS_SLIDESHOW_CLASSES:
+            return True
+        if class_name in self._SLIDESHOW_PRIORITY_CLASSES:
+            return True
+        if class_name in self._SLIDESHOW_SECONDARY_CLASSES:
+            return True
+        keywords = ("show", "slideshow", "slide")
+        return any(keyword in class_name for keyword in keywords)
+
+    def _is_wps_presentation_process(self, process_name: str, *classes: str) -> bool:
+        if not process_name:
+            return False
+        normalized = process_name.strip().lower()
+        if not normalized:
+            return False
+        if normalized.startswith(("wpp", "wppt", "wpspresentation")):
+            return True
+        if "wpp" in normalized or "wpspresentation" in normalized:
+            return True
+        if normalized.startswith("wps"):
+            if any(self._class_indicates_slideshow(cls) for cls in classes if cls):
+                return True
+        return False
+
+    def _is_wps_writer_process(self, process_name: str, *classes: str) -> bool:
+        if not process_name:
+            return False
+        normalized = process_name.strip().lower()
+        if not normalized:
+            return False
+        if self._is_wps_presentation_process(normalized, *classes):
+            return False
+        if any(self._class_has_wps_writer_signature(cls) for cls in classes if cls):
+            return True
+        if normalized.startswith("wps"):
+            return True
+        if "wpswriter" in normalized:
+            return True
+        return False
+
+    def _class_has_wps_writer_signature(self, class_name: str) -> bool:
+        if not class_name:
+            return False
+        if any(class_name.startswith(prefix) for prefix in self._WPS_WRITER_PREFIXES):
+            if any(excluded in class_name for excluded in self._WPS_WRITER_EXCLUDE_KEYWORDS):
+                return False
+            if any(keyword in class_name for keyword in self._WPS_WRITER_KEYWORDS):
+                return True
+        writer_classes = {
+            "kwpsdocview",
+            "wpsdocview",
+            "kwpsframeclass",
+            "kwpsmainframe",
+            "wpsframeclass",
+            "wpsmainframe",
+        }
+        if class_name in writer_classes:
+            return True
+        return False
+
     def _overlay_widget(self) -> Optional[QWidget]:
         raise NotImplementedError
 
@@ -3949,8 +4012,10 @@ class _PresentationForwarder(_PresentationWindowMixin):
         if self._is_wps_slideshow_class(class_name):
             return True
         if class_name in self._SLIDESHOW_PRIORITY_CLASSES or class_name in self._SLIDESHOW_SECONDARY_CLASSES:
-            process_name = self._window_process_name(self._top_level_hwnd(hwnd))
-            if process_name.startswith("wpp"):
+            top_hwnd = self._top_level_hwnd(hwnd)
+            top_class = self._window_class_name(top_hwnd) if top_hwnd else ""
+            process_name = self._window_process_name(top_hwnd)
+            if self._is_wps_presentation_process(process_name, class_name, top_class):
                 return True
         return False
 
@@ -3977,10 +4042,16 @@ class _PresentationForwarder(_PresentationWindowMixin):
             return True
         if class_name and class_name.startswith("_ww"):
             return True
-        process_name = self._window_process_name(self._top_level_hwnd(hwnd))
+        top_hwnd = _user32_top_level_hwnd(hwnd)
+        process_name = self._window_process_name(top_hwnd)
+        top_class = self._presentation_window_class(top_hwnd) if top_hwnd else ""
         if not process_name:
             return False
-        return "winword" in process_name or process_name.startswith("wps")
+        if self._is_wps_presentation_process(process_name, class_name, top_class):
+            return False
+        if "winword" in process_name:
+            return True
+        return self._is_wps_writer_process(process_name, class_name, top_class)
 
     def _is_slideshow_class(self, class_name: str) -> bool:
         if not class_name:
@@ -6086,25 +6157,6 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             return 120
         return 0
 
-    def _class_has_wps_writer_signature(self, class_name: str) -> bool:
-        if not class_name:
-            return False
-        if any(class_name.startswith(prefix) for prefix in self._WPS_WRITER_PREFIXES):
-            if any(excluded in class_name for excluded in self._WPS_WRITER_EXCLUDE_KEYWORDS):
-                return False
-            if any(keyword in class_name for keyword in self._WPS_WRITER_KEYWORDS):
-                return True
-        if class_name in {
-            "kwpsdocview",
-            "wpsdocview",
-            "kwpsframeclass",
-            "kwpsmainframe",
-            "wpsframeclass",
-            "wpsmainframe",
-        }:
-            return True
-        return False
-
     def _class_has_wps_presentation_signature(self, class_name: str) -> bool:
         if not class_name:
             return False
@@ -6152,9 +6204,9 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             return "ms_word"
         process_name = self._window_process_name(top_hwnd or hwnd)
         if process_name:
-            if process_name.startswith("wpp"):
+            if self._is_wps_presentation_process(process_name, class_name, top_class):
                 return "wps_ppt"
-            if process_name.startswith("wps"):
+            if self._is_wps_writer_process(process_name, class_name, top_class):
                 return "wps_word"
             if "powerpnt" in process_name:
                 return "ms_ppt"
@@ -6184,17 +6236,19 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
     def _process_control_disallowed(self, hwnd: Optional[int]) -> bool:
         if not hwnd:
             return False
-        process_name = self._window_process_name(_user32_top_level_hwnd(hwnd) or hwnd)
+        top_hwnd = _user32_top_level_hwnd(hwnd)
+        process_name = self._window_process_name(top_hwnd or hwnd)
         if not process_name:
             return False
-        name = process_name.lower()
-        if name.startswith("wpp"):
+        class_name = self._presentation_window_class(hwnd)
+        top_class = self._presentation_window_class(top_hwnd) if top_hwnd else ""
+        if self._is_wps_presentation_process(process_name, class_name, top_class):
             return not getattr(self, "control_wps_ppt", True)
-        if name.startswith("wps"):
+        if self._is_wps_writer_process(process_name, class_name, top_class):
             return not getattr(self, "control_wps_word", True)
-        if "powerpnt" in name:
+        if "powerpnt" in process_name:
             return not getattr(self, "control_ms_ppt", True)
-        if "winword" in name:
+        if "winword" in process_name:
             return not getattr(self, "control_ms_word", True)
         return False
 
@@ -6529,8 +6583,9 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             return True
         if class_name in self._SLIDESHOW_PRIORITY_CLASSES or class_name in self._SLIDESHOW_SECONDARY_CLASSES:
             top_hwnd = _user32_top_level_hwnd(hwnd)
+            top_class = self._presentation_window_class(top_hwnd) if top_hwnd else ""
             process_name = self._window_process_name(top_hwnd or hwnd)
-            if process_name.startswith("wpp"):
+            if self._is_wps_presentation_process(process_name, class_name, top_class):
                 return True
         category = self._presentation_target_category(hwnd)
         if category == "wps_ppt":
