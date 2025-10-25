@@ -119,6 +119,52 @@ def parse_bool(value: Any, default: bool = False) -> bool:
     return default
 
 
+def _preferred_app_directory() -> str:
+    """Return the user-specific data directory without creating it."""
+
+    home = os.path.expanduser("~")
+    if sys.platform.startswith("win"):
+        base = os.environ.get("APPDATA") or os.path.join(home, "AppData", "Roaming")
+    elif sys.platform == "darwin":
+        base = os.path.join(home, "Library", "Application Support")
+    else:
+        base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
+    return os.path.abspath(os.path.join(base, "ClassroomTools"))
+
+
+def _ensure_directory(path: str) -> bool:
+    if not path:
+        return False
+    try:
+        os.makedirs(path, exist_ok=True)
+    except Exception:
+        return False
+    return os.path.isdir(path)
+
+
+def _ensure_writable_directory(path: str) -> bool:
+    if not path:
+        return False
+    if not _ensure_directory(path):
+        return False
+    test_path: Optional[str] = None
+    fd: Optional[int] = None
+    try:
+        fd, test_path = tempfile.mkstemp(prefix="ctools_", dir=path)
+    except OSError:
+        return os.access(path, os.W_OK)
+    except Exception:
+        return False
+    finally:
+        if fd is not None:
+            with contextlib.suppress(Exception):
+                os.close(fd)
+        if test_path:
+            with contextlib.suppress(Exception):
+                os.remove(test_path)
+    return True
+
+
 def _collect_resource_roots() -> List[str]:
     """Return an ordered list of candidate directories containing bundled resources."""
 
@@ -134,6 +180,10 @@ def _collect_resource_roots() -> List[str]:
         seen.add(normalized)
         roots.append(normalized)
 
+    app_dir = _preferred_app_directory()
+    if _ensure_directory(app_dir):
+        _append(app_dir)
+
     exe_dir: Optional[str] = None
     with contextlib.suppress(Exception):
         exe_dir = os.path.dirname(os.path.abspath(getattr(sys, "executable", "")))
@@ -143,6 +193,12 @@ def _collect_resource_roots() -> List[str]:
     meipass = getattr(sys, "_MEIPASS", None)
     if meipass:
         _append(meipass)
+
+    script_dir: Optional[str] = None
+    with contextlib.suppress(Exception):
+        script_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+    if script_dir:
+        _append(script_dir)
 
     module_dir = os.path.dirname(os.path.abspath(__file__))
     _append(module_dir)
@@ -154,28 +210,158 @@ def _collect_resource_roots() -> List[str]:
     return roots
 
 
+class _ResourceLocator:
+    """Centralised helper for resolving bundled and user data paths."""
+
+    __slots__ = ("_roots", "_cache")
+
+    def __init__(self) -> None:
+        self._roots: Tuple[str, ...] = tuple(_collect_resource_roots())
+        self._cache: Dict[str, Tuple[str, ...]] = {}
+
+    def candidates(self, relative_path: str) -> Tuple[str, ...]:
+        normalized_key = os.path.normpath(str(relative_path).strip().replace("\\", "/"))
+        cached = self._cache.get(normalized_key)
+        if cached is not None:
+            return cached
+        norm_rel = normalized_key.lstrip("./")
+        if not norm_rel:
+            result = self._roots
+            self._cache[normalized_key] = result
+            return result
+        paths: List[str] = []
+        seen: Set[str] = set()
+        for root in self._roots:
+            candidate = os.path.join(root, norm_rel)
+            normalized = os.path.normpath(candidate)
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            paths.append(normalized)
+        result = tuple(paths)
+        self._cache[normalized_key] = result
+        return result
+
+
+@functools.lru_cache(maxsize=1)
+def _get_resource_locator() -> _ResourceLocator:
+    return _ResourceLocator()
+
+
+def _any_existing_path(paths: Iterable[str]) -> Optional[str]:
+    for path in paths:
+        if path and os.path.exists(path):
+            return path
+    return None
+
+
+def _choose_writable_target(
+    candidates: Tuple[str, ...],
+    *,
+    is_dir: bool,
+    fallback_name: str,
+) -> str:
+    for target in candidates:
+        directory = target if is_dir else os.path.dirname(target)
+        if _ensure_writable_directory(directory or os.getcwd()):
+            return target
+    app_dir = _preferred_app_directory()
+    base_dir = app_dir if _ensure_writable_directory(app_dir) else os.getcwd()
+    fallback = os.path.join(base_dir, fallback_name)
+    directory = fallback if is_dir else os.path.dirname(fallback)
+    if directory and not _ensure_writable_directory(directory):
+        fallback = os.path.abspath(fallback_name)
+        directory = fallback if is_dir else os.path.dirname(fallback)
+        _ensure_writable_directory(directory or os.getcwd())
+    return fallback
+
+
+def _mirror_resource_to_primary(primary: str, candidates: Tuple[str, ...]) -> None:
+    if os.path.exists(primary):
+        return
+    source = None
+    for candidate in candidates:
+        if not candidate:
+            continue
+        if os.path.normcase(os.path.abspath(candidate)) == os.path.normcase(os.path.abspath(primary)):
+            continue
+        if os.path.exists(candidate):
+            source = candidate
+            break
+    if source is None:
+        return
+    directory = os.path.dirname(primary)
+    if directory and not _ensure_directory(directory):
+        return
+    try:
+        shutil.copy2(source, primary)
+    except Exception:
+        logger.debug("Failed to mirror %s to %s", source, primary, exc_info=True)
+
+
+@dataclass(frozen=True)
+class _StudentResourcePaths:
+    plain: str
+    encrypted: str
+    plain_candidates: Tuple[str, ...]
+    encrypted_candidates: Tuple[str, ...]
+
+
+@functools.lru_cache(maxsize=1)
+def _resolve_student_resource_paths() -> _StudentResourcePaths:
+    locator = _get_resource_locator()
+    plain_candidates = locator.candidates("students.xlsx")
+    encrypted_candidates = locator.candidates("students.xlsx.enc")
+    if not plain_candidates:
+        module_dir = os.path.dirname(os.path.abspath(__file__))
+        plain_candidates = (os.path.join(module_dir, "students.xlsx"),)
+    if not encrypted_candidates:
+        module_dir = os.path.dirname(os.path.abspath(__file__))
+        encrypted_candidates = (os.path.join(module_dir, "students.xlsx.enc"),)
+
+    plain_primary = _choose_writable_target(plain_candidates, is_dir=False, fallback_name="students.xlsx")
+    encrypted_primary = os.path.join(os.path.dirname(plain_primary), "students.xlsx.enc")
+
+    unique_plain = (plain_primary,) + tuple(
+        path for path in plain_candidates if os.path.normcase(path) != os.path.normcase(plain_primary)
+    )
+    unique_encrypted = (encrypted_primary,) + tuple(
+        path for path in encrypted_candidates if os.path.normcase(path) != os.path.normcase(encrypted_primary)
+    )
+
+    _mirror_resource_to_primary(plain_primary, unique_plain)
+    _mirror_resource_to_primary(encrypted_primary, unique_encrypted)
+
+    return _StudentResourcePaths(
+        plain=plain_primary,
+        encrypted=encrypted_primary,
+        plain_candidates=unique_plain,
+        encrypted_candidates=unique_encrypted,
+    )
+
+
+_STUDENT_RESOURCES = _resolve_student_resource_paths()
+
+
 def _determine_student_photo_roots() -> Tuple[str, List[str]]:
     """Select the most appropriate student photo root and provide the fallback list."""
 
-    candidate_roots = _collect_resource_roots()
-    candidate_paths = [os.path.join(root, "student_photos") for root in candidate_roots]
+    locator = _get_resource_locator()
+    candidate_paths = locator.candidates("student_photos")
     if not candidate_paths:
         default_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "student_photos")
         return default_root, [default_root]
 
-    for path in candidate_paths:
-        if os.path.isdir(path):
-            return path, candidate_paths
+    primary = _choose_writable_target(candidate_paths, is_dir=True, fallback_name="student_photos")
+    search_roots = [primary] + [
+        path for path in candidate_paths if os.path.normcase(path) != os.path.normcase(primary)
+    ]
 
-    for path in candidate_paths:
-        try:
-            os.makedirs(path, exist_ok=True)
-        except Exception:
-            continue
-        if os.path.isdir(path):
-            return path, candidate_paths
+    if _ensure_directory(primary):
+        with contextlib.suppress(Exception):
+            os.makedirs(primary, exist_ok=True)
 
-    return candidate_paths[0], candidate_paths
+    return primary, search_roots
 
 
 def _user32_window_rect(hwnd: int) -> Optional[Tuple[int, int, int, int]]:
@@ -1417,20 +1603,30 @@ class SettingsManager:
     def _get_config_dir(self) -> str:
         """返回当前系统下建议的配置目录。"""
 
-        home = os.path.expanduser("~")
-        if sys.platform.startswith("win"):
-            base = os.environ.get("APPDATA") or os.path.join(home, "AppData", "Roaming")
-            return os.path.join(base, "ClassroomTools")
-        if sys.platform == "darwin":
-            return os.path.join(home, "Library", "Application Support", "ClassroomTools")
-        base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
-        return os.path.join(base, "ClassroomTools")
+        return _preferred_app_directory()
 
     def _prepare_storage_path(self, filename: str) -> str:
         """根据平台选择合适的设置文件路径，并在需要时迁移旧文件。"""
 
         base_name = os.path.basename(filename) or "settings.ini"
         legacy_path = os.path.abspath(filename)
+        locator = _get_resource_locator()
+        candidate_sources: List[str] = []
+        seen_sources: Set[str] = set()
+
+        def _append_candidate(path: Optional[str]) -> None:
+            if not path:
+                return
+            normalized = os.path.normcase(os.path.abspath(path))
+            if normalized in seen_sources:
+                return
+            seen_sources.add(normalized)
+            candidate_sources.append(os.path.abspath(path))
+
+        _append_candidate(legacy_path)
+        for candidate in locator.candidates(base_name):
+            _append_candidate(candidate)
+
         config_dir = self._get_config_dir()
         try:
             os.makedirs(config_dir, exist_ok=True)
@@ -1438,21 +1634,35 @@ class SettingsManager:
             config_dir = os.path.dirname(legacy_path) or os.getcwd()
         target_path = os.path.join(config_dir, base_name)
 
-        if os.path.exists(legacy_path):
+        source_path: Optional[str] = None
+        normalized_target = os.path.normcase(os.path.abspath(target_path))
+        for candidate in candidate_sources:
+            if not os.path.exists(candidate):
+                continue
+            try:
+                if os.path.samefile(candidate, target_path):
+                    source_path = None
+                    break
+            except (OSError, FileNotFoundError):
+                pass
+            source_path = candidate
+            break
+
+        if source_path is not None:
             same_file = False
             try:
-                same_file = os.path.samefile(legacy_path, target_path)
+                same_file = os.path.samefile(source_path, target_path)
             except (OSError, FileNotFoundError):
-                same_file = False
+                same_file = normalized_target == os.path.normcase(os.path.abspath(source_path))
             if not same_file and not os.path.exists(target_path):
                 try:
-                    shutil.copy2(legacy_path, target_path)
+                    shutil.copy2(source_path, target_path)
                 except Exception:
-                    target_path = legacy_path
+                    target_path = source_path
             if not same_file:
-                legacy_dir = os.path.dirname(legacy_path) or os.getcwd()
+                legacy_dir = os.path.dirname(source_path) or os.getcwd()
                 if os.access(legacy_dir, os.W_OK):
-                    self._mirror_targets.add(legacy_path)
+                    self._mirror_targets.add(source_path)
 
         try:
             with open(target_path, "a", encoding="utf-8"):
@@ -9160,8 +9370,10 @@ class RollCallTimerWindow(QWidget):
     window_closed = pyqtSignal()
     visibility_changed = pyqtSignal(bool)
 
-    STUDENT_FILE = "students.xlsx"
-    ENCRYPTED_STUDENT_FILE = "students.xlsx.enc"
+    STUDENT_FILE = _STUDENT_RESOURCES.plain
+    STUDENT_FILE_CANDIDATES = _STUDENT_RESOURCES.plain_candidates
+    ENCRYPTED_STUDENT_FILE = _STUDENT_RESOURCES.encrypted
+    ENCRYPTED_STUDENT_FILE_CANDIDATES = _STUDENT_RESOURCES.encrypted_candidates
     MIN_FONT_SIZE = 5
     MAX_FONT_SIZE = 220
 
@@ -9207,8 +9419,8 @@ class RollCallTimerWindow(QWidget):
             elif self.student_data is not None:
                 base_empty = False
             if base_empty:
-                has_plain = os.path.exists(self.STUDENT_FILE)
-                has_encrypted = os.path.exists(self._encrypted_file_path)
+                has_plain = _any_existing_path(self.STUDENT_FILE_CANDIDATES) is not None
+                has_encrypted = _any_existing_path(self.ENCRYPTED_STUDENT_FILE_CANDIDATES) is not None
                 if has_plain or has_encrypted:
                     self._student_data_pending_load = True
                     if self.student_data is None and PANDAS_READY:
@@ -9279,7 +9491,9 @@ class RollCallTimerWindow(QWidget):
         order_value = str(s.get("scoreboard_order", "rank")).strip().lower()
         self.scoreboard_order = order_value if order_value in {"rank", "id"} else "rank"
         saved_encrypted = str_to_bool(s.get("students_encrypted", bool_to_str(self._student_file_encrypted)), self._student_file_encrypted)
-        disk_encrypted = os.path.exists(self._encrypted_file_path) and not os.path.exists(self.STUDENT_FILE)
+        plain_exists = _any_existing_path(self.STUDENT_FILE_CANDIDATES) is not None
+        encrypted_exists = _any_existing_path(self.ENCRYPTED_STUDENT_FILE_CANDIDATES) is not None
+        disk_encrypted = encrypted_exists and not plain_exists
         if disk_encrypted:
             self._student_file_encrypted = True
         elif not saved_encrypted:
@@ -9534,10 +9748,12 @@ class RollCallTimerWindow(QWidget):
     def _update_encryption_button(self) -> None:
         if not hasattr(self, "encrypt_button"):
             return
-        disk_encrypted = os.path.exists(self._encrypted_file_path) and not os.path.exists(self.STUDENT_FILE)
+        plain_exists = _any_existing_path(self.STUDENT_FILE_CANDIDATES) is not None
+        encrypted_exists = _any_existing_path(self.ENCRYPTED_STUDENT_FILE_CANDIDATES) is not None
+        disk_encrypted = encrypted_exists and not plain_exists
         if disk_encrypted and not self._student_file_encrypted:
             self._student_file_encrypted = True
-        elif not disk_encrypted and self._student_file_encrypted and not os.path.exists(self._encrypted_file_path):
+        elif not disk_encrypted and self._student_file_encrypted and not encrypted_exists:
             self._student_file_encrypted = False
             self._student_password = None
         self.encrypt_button.setText("解密" if self._student_file_encrypted else "加密")
@@ -11922,7 +12138,10 @@ class StudentWorkbook:
 
 def _write_student_workbook(file_path: str, data: Mapping[str, PandasDataFrame]) -> None:
     payload = _export_student_workbook_bytes(data)
-    tmp_dir = os.path.dirname(os.path.abspath(file_path)) or "."
+    target_dir = os.path.dirname(os.path.abspath(file_path))
+    if target_dir and not _ensure_directory(target_dir):
+        target_dir = os.getcwd()
+    tmp_dir = target_dir or "."
     fd, tmp_path = tempfile.mkstemp(suffix=".xlsx", dir=tmp_dir)
     try:
         with os.fdopen(fd, "wb") as tmp_file:
@@ -11936,7 +12155,10 @@ def _write_student_workbook(file_path: str, data: Mapping[str, PandasDataFrame])
 def _write_encrypted_student_workbook(file_path: str, data: Mapping[str, PandasDataFrame], password: str) -> None:
     payload = _export_student_workbook_bytes(data)
     encrypted = _encrypt_student_bytes(password, payload)
-    tmp_dir = os.path.dirname(os.path.abspath(file_path)) or "."
+    target_dir = os.path.dirname(os.path.abspath(file_path))
+    if target_dir and not _ensure_directory(target_dir):
+        target_dir = os.getcwd()
+    tmp_dir = target_dir or "."
     fd, tmp_path = tempfile.mkstemp(suffix=".enc", dir=tmp_dir)
     try:
         with os.fdopen(fd, "wb") as tmp_file:
@@ -12002,11 +12224,14 @@ def load_student_data(parent: Optional[QWidget]) -> Optional[StudentWorkbook]:
         QMessageBox.warning(parent, "提示", "未安装 pandas/openpyxl，点名功能不可用。")
         return None
 
-    file_path = RollCallTimerWindow.STUDENT_FILE
-    encrypted_path = getattr(RollCallTimerWindow, "ENCRYPTED_STUDENT_FILE", file_path + ".enc")
+    resources = _STUDENT_RESOURCES
+    file_path = resources.plain
+    existing_plain = _any_existing_path(resources.plain_candidates)
+    existing_encrypted = _any_existing_path(resources.encrypted_candidates)
 
-    if not os.path.exists(file_path) and os.path.exists(encrypted_path):
+    if existing_plain is None and existing_encrypted is not None:
         attempts = 0
+        encrypted_source = existing_encrypted
         while attempts < 3:
             password, ok = PasswordPromptDialog.get_password(
                 parent,
@@ -12023,13 +12248,17 @@ def load_student_data(parent: Optional[QWidget]) -> Optional[StudentWorkbook]:
                 attempts += 1
                 continue
             try:
-                with open(encrypted_path, "rb") as fh:
+                with open(encrypted_source, "rb") as fh:
                     payload = fh.read()
                 plain_bytes = _decrypt_student_bytes(password, payload)
                 buffer = io.BytesIO(plain_bytes)
                 raw_data = pd.read_excel(buffer, sheet_name=None)
                 workbook = StudentWorkbook(OrderedDict(raw_data), active_class="")
                 _set_session_student_encryption(True, password)
+                try:
+                    _write_student_workbook(file_path, workbook.as_dict())
+                except Exception:
+                    logger.debug("Failed to persist decrypted workbook to %s", file_path, exc_info=True)
                 return workbook
             except Exception as exc:
                 attempts += 1
@@ -12037,7 +12266,7 @@ def load_student_data(parent: Optional[QWidget]) -> Optional[StudentWorkbook]:
         QMessageBox.critical(parent, "错误", "多次输入密码失败，无法加载学生名单。")
         return None
 
-    if not os.path.exists(file_path):
+    if existing_plain is None:
         try:
             template = pd.DataFrame(
                 {"学号": [101, 102, 103], "姓名": ["张三", "李四", "王五"], "分组": ["A", "B", "A"], "成绩": [0, 0, 0]}
@@ -12046,16 +12275,18 @@ def load_student_data(parent: Optional[QWidget]) -> Optional[StudentWorkbook]:
             _write_student_workbook(file_path, workbook.as_dict())
             show_quiet_information(parent, f"未找到学生名单，已为您创建模板文件：{file_path}")
             _set_session_student_encryption(False, None)
+            existing_plain = file_path
         except Exception as exc:
             QMessageBox.critical(parent, "错误", f"创建模板文件失败：{exc}")
             return None
 
     try:
-        raw_data = pd.read_excel(file_path, sheet_name=None)
+        read_path = existing_plain if existing_plain and os.path.exists(existing_plain) else file_path
+        raw_data = pd.read_excel(read_path, sheet_name=None)
         workbook = StudentWorkbook(OrderedDict(raw_data), active_class="")
         _write_student_workbook(file_path, workbook.as_dict())
         _set_session_student_encryption(False, None)
-        if os.path.exists(encrypted_path):
+        if _any_existing_path(resources.encrypted_candidates):
             show_quiet_information(parent, "检测到同时存在加密文件，将优先使用明文 students.xlsx。")
         return workbook
     except Exception as exc:
