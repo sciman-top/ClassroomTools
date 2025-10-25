@@ -3140,10 +3140,15 @@ class PenSettingsDialog(QDialog):
             flags["_last_word_toggle"] = self._last_word_toggle
         return flags
 
-    def _on_word_control_toggled(self, key: str, state: int) -> None:
+    def _on_word_control_toggled(
+        self, key: str, state: Qt.CheckState | int
+    ) -> None:
         if self._control_toggle_guard:
             return
-        if state != int(Qt.CheckState.Checked):
+        check_state = state
+        if not isinstance(check_state, Qt.CheckState):
+            check_state = Qt.CheckState(check_state)
+        if check_state != Qt.CheckState.Checked:
             if self._last_word_toggle == key and not self._control_checkboxes[key].isChecked():
                 self._last_word_toggle = None
             return
