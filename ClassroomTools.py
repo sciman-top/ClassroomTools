@@ -921,8 +921,19 @@ def ensure_widget_within_screen(widget: QWidget) -> None:
 
 
 def str_to_bool(value: str, default: bool = False) -> bool:
+    """Coerce configuration strings into booleans with sensible fallbacks."""
+
+    if isinstance(value, bool):
+        return value
     if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on", "y"}:
+            return True
+        if normalized in {"0", "false", "no", "off", "n"}:
+            return False
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
     return default
 
 
