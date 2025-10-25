@@ -10,6 +10,7 @@ import os
 import sys
 import tempfile
 import types
+from functools import singledispatch
 from pathlib import Path
 from typing import Iterable, List, Optional, Set, Tuple
 
@@ -38,6 +39,7 @@ def _load_helper_module() -> types.ModuleType:
             "Set": Set,
             "Enum": enum.Enum,
             "math": math,
+            "singledispatch": singledispatch,
         }
     )
     sys.modules[module.__name__] = module
@@ -45,6 +47,8 @@ def _load_helper_module() -> types.ModuleType:
     targets = {
         "_TRUE_STRINGS",
         "_FALSE_STRINGS",
+        "_BooleanParseResult",
+        "_coerce_bool",
         "parse_bool",
         "_ensure_directory",
         "_ensure_writable_directory",
@@ -52,8 +56,29 @@ def _load_helper_module() -> types.ModuleType:
         "_choose_writable_target",
         "str_to_bool",
     }
+    def _should_include_function(node: ast.FunctionDef) -> bool:
+        if node.name in targets:
+            return True
+        for decorator in node.decorator_list:
+            candidate = decorator
+            if isinstance(candidate, ast.Call):
+                candidate = candidate.func
+            if (
+                isinstance(candidate, ast.Attribute)
+                and isinstance(candidate.value, ast.Name)
+                and candidate.value.id == "_coerce_bool"
+                and candidate.attr == "register"
+            ):
+                return True
+        return False
+
     for node in tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name in targets:
+        if isinstance(node, ast.FunctionDef) and _should_include_function(node):
+            targets.discard(node.name)
+            submodule = ast.Module(body=[node], type_ignores=[])
+            ast.fix_missing_locations(submodule)
+            exec(compile(submodule, str(path), "exec"), namespace)
+        elif isinstance(node, ast.ClassDef) and node.name in targets:
             targets.remove(node.name)
             submodule = ast.Module(body=[node], type_ignores=[])
             ast.fix_missing_locations(submodule)
