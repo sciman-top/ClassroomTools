@@ -5833,6 +5833,7 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         handles: Iterable[int],
         preferred_category: Optional[str] = None,
     ) -> List[int]:
+        resolved_preference = preferred_category or self._preferred_control_category()
         prioritized: List[Tuple[int, int, int]] = []
         seen: Set[int] = set()
         for index, hwnd in enumerate(handles):
@@ -5846,9 +5847,10 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             if not self._presentation_control_allowed(hwnd, log=False):
                 continue
             base = int(self._CATEGORY_PRIORITY.get(category, 0))
-            if preferred_category and category == preferred_category:
-                base += 1000
-            prioritized.append((base, -index, hwnd))
+            score = base * 100
+            if resolved_preference and category == resolved_preference:
+                score += 50
+            prioritized.append((score, -index, hwnd))
         prioritized.sort(reverse=True)
         return [hwnd for _, _, hwnd in prioritized]
 
@@ -6465,7 +6467,10 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                     for candidate in candidates:
                         if not candidate:
                             continue
-                        success = self._dispatch_virtual_key(candidate)
+                        success = self._dispatch_virtual_key(
+                            candidate,
+                            preferred_category=category,
+                        )
                         if success:
                             current_target = self._current_navigation_target()
                             current_class = (
@@ -6505,7 +6510,12 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                 for candidate in doc_candidates:
                     if not candidate:
                         continue
-                    if self._dispatch_virtual_key(candidate):
+                    if self._dispatch_virtual_key(
+                        candidate,
+                        preferred_category="wps_word"
+                        if category == "wps_word"
+                        else "ms_word",
+                    ):
                         success = True
                         break
             self._pending_tool_restore = None
@@ -6742,13 +6752,20 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
     def _release_navigation_hold(self) -> None:
         self._deactivate_navigation_hold(restore=True)
 
-    def _dispatch_virtual_key(self, vk_code: int) -> bool:
+    def _dispatch_virtual_key(
+        self,
+        vk_code: int,
+        *,
+        preferred_category: Optional[str] = None,
+    ) -> bool:
         if vk_code == 0 or self.whiteboard_active:
             return False
         success = False
         suppress_focus_restore = False
         override_dispatch_suppress = bool(getattr(self, "_dispatch_suppress_override", False))
-        wps_override = self._find_wps_slideshow_target()
+        wps_override: Optional[int] = None
+        if preferred_category in (None, "wps_ppt"):
+            wps_override = self._find_wps_slideshow_target()
         if wps_override:
             suppress_focus_restore = True
             forwarder = getattr(self, "_forwarder", None)
@@ -6812,7 +6829,7 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                     self._forwarder.clear_cached_target()
         if not success:
             self._focus_presentation_window_fallback(
-                preferred_category=self._preferred_control_category()
+                preferred_category=preferred_category or self._preferred_control_category()
             )
             success = self._fallback_send_virtual_key(vk_code)
         if success:
@@ -7096,7 +7113,7 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             _record_candidate(normalized)
             _record_candidate(foreground)
         if _WNDENUMPROC is None:
-            prioritized = self._prioritize_control_candidates(ordered_candidates, preferred_category)
+            prioritized = self._prioritize_control_candidates(ordered_candidates, preferred)
             return prioritized[0] if prioritized else None
 
         candidates: List[int] = []
@@ -7125,7 +7142,7 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             normalized = self._normalize_presentation_target(hwnd)
             _record_candidate(normalized)
             _record_candidate(hwnd)
-        prioritized = self._prioritize_control_candidates(ordered_candidates, preferred_category)
+        prioritized = self._prioritize_control_candidates(ordered_candidates, preferred)
         return prioritized[0] if prioritized else None
 
     def _presentation_window_class(self, hwnd: int) -> str:
