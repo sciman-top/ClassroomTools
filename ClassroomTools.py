@@ -3662,19 +3662,39 @@ class _PresentationWindowMixin:
                 return any(keyword in normalized for keyword in self.keywords)
             return False
 
+    _WPS_FRAME_CLASSES: Set[str] = frozenset(
+        {"kwpsframeclass", "kwpsmainframe", "wpsframeclass", "wpsmainframe"}
+    )
+    _WPS_DOC_VIEW_CLASSES: Set[str] = frozenset({"kwpsdocview", "wpsdocview"})
+    _WPS_VIEW_CLASSES: Set[str] = frozenset(
+        {"kwpsviewclass", "wpsviewclass", "kwpspageview", "wpspageview"}
+    )
+    _WORD_SHELL_CLASSES: Set[str] = frozenset(
+        {"opusapp", "nuidocumentwindow", "netuihwnd", "documentwindow", "mdiclient"}
+    )
+    _WORD_CONTENT_CORE_CLASSES: Set[str] = frozenset(
+        {"worddocument", "paneclassdc", "_wwg", "_wwb"}
+    )
+    _WORD_HOST_CLASSES: Set[str] = frozenset(
+        set(_WORD_SHELL_CLASSES).union(_WPS_FRAME_CLASSES)
+    )
+    _WORD_CONTENT_CLASSES: Set[str] = frozenset(
+        set(_WORD_CONTENT_CORE_CLASSES)
+        .union(_WPS_DOC_VIEW_CLASSES)
+        .union(_WPS_VIEW_CLASSES)
+    )
+    _WORD_WINDOW_CLASSES: Set[str] = frozenset(
+        set(_WORD_HOST_CLASSES).union(_WORD_CONTENT_CORE_CLASSES)
+    )
     _KNOWN_PRESENTATION_CLASSES: Set[str] = {
         "screenclass",
         "pptframeclass",
         "pptviewwndclass",
         "powerpntframeclass",
         "powerpointframeclass",
-        "opusapp",
         "acrobatsdiwindow",
         "kwppframeclass",
         "kwppmainframe",
-        "kwpsframeclass",
-        "wpsframeclass",
-        "wpsmainframe",
         "nuidocumentwindow",
         "netuihwnd",
         "mdiclient",
@@ -3684,6 +3704,8 @@ class _PresentationWindowMixin:
         "worddocument",
         "paneclassdc",
     }
+    _KNOWN_PRESENTATION_CLASSES.update(_WORD_HOST_CLASSES)
+    _KNOWN_PRESENTATION_CLASSES.update(_WPS_DOC_VIEW_CLASSES)
     _KNOWN_PRESENTATION_PREFIXES: Tuple[str, ...] = (
         ("kwpp", "kwps", "wpsframe", "wpsmain") if win32gui is not None else tuple()
     )
@@ -3702,68 +3724,20 @@ class _PresentationWindowMixin:
         "kwpsshowframe",
         "wpsshowframe",
     }
-    _WORD_WINDOW_CLASSES: Set[str] = {
-        "opusapp",
-        "nuidocumentwindow",
-        "netuihwnd",
-        "documentwindow",
-        "mdiclient",
-        "paneclassdc",
-        "worddocument",
-        "_wwg",
-        "_wwb",
-        "kwpsframeclass",
-        "kwpsmainframe",
-        "wpsframeclass",
-        "wpsmainframe",
-    }
-    _WORD_CONTENT_CLASSES: Set[str] = {
-        "worddocument",
-        "paneclassdc",
-        "_wwg",
-        "_wwb",
-        "kwpsviewclass",
-        "wpsviewclass",
-        "kwpspageview",
-        "wpspageview",
-        "kwpsdocview",
-        "wpsdocview",
-    }
-    _WORD_HOST_CLASSES: Set[str] = {
-        "opusapp",
-        "nuidocumentwindow",
-        "netuihwnd",
-        "documentwindow",
-        "mdiclient",
-        "kwpsframeclass",
-        "kwpsmainframe",
-        "wpsframeclass",
-        "wpsmainframe",
-    }
-    _PRESENTATION_EDITOR_CLASSES: Set[str] = {
-        "pptframeclass",
-        "powerpntframeclass",
-        "powerpointframeclass",
-        "kwppframeclass",
-        "kwppmainframe",
-        "kwpsframeclass",
-        "wpsframeclass",
-        "wpsmainframe",
-    }
+    _PRESENTATION_EDITOR_CLASSES: Set[str] = frozenset(
+        {
+            "pptframeclass",
+            "powerpntframeclass",
+            "powerpointframeclass",
+            "kwppframeclass",
+            "kwppmainframe",
+        }
+    ).union(_WPS_FRAME_CLASSES)
     _WPS_WRITER_CLASSIFIER = _PrefixKeywordClassifier(
         prefixes=("kwps", "wps"),
         keywords=("frame", "view", "doc", "page"),
         excludes=("show", "slideshow"),
-        canonical=frozenset(
-            {
-                "kwpsdocview",
-                "wpsdocview",
-                "kwpsframeclass",
-                "kwpsmainframe",
-                "wpsframeclass",
-                "wpsmainframe",
-            }
-        ),
+        canonical=_WPS_DOC_VIEW_CLASSES.union(_WPS_FRAME_CLASSES),
     )
 
     @classmethod
@@ -4075,15 +4049,18 @@ class _PresentationWindowMixin:
                 return bool(predicate(class_name))
             except Exception:
                 logger_ref = globals().get("logger")
-                if logger_ref is None:  # pragma: no cover - fallback for helper extraction
+                debug = getattr(logger_ref, "debug", None)
+                if not callable(debug):
                     logging_module = globals().get("logging")
-                    if logging_module is None:
+                    if logging_module is None:  # pragma: no cover - helper extraction fallback
                         import logging as logging_module  # type: ignore[import-not-found]
                     logger_ref = logging_module.getLogger(__name__)
-                logger_ref.debug(
-                    "WPS process hint predicate failed",  # pragma: no cover - debug logging
-                    exc_info=True,
-                )
+                    debug = getattr(logger_ref, "debug", None)
+                if callable(debug):
+                    debug(
+                        "WPS process hint predicate failed",  # pragma: no cover - debug logging
+                        exc_info=True,
+                    )
                 return False
 
     def _toolbar_widget(self) -> Optional[QWidget]:
