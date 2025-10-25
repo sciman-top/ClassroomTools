@@ -3657,8 +3657,7 @@ class _PresentationWindowMixin:
         def _normalize(value: Any) -> str:
             return _normalize_class_token(value)
 
-        def has_signature(self, class_name: Any) -> bool:
-            normalized = self._normalize(class_name)
+        def _matches(self, normalized: str) -> bool:
             if not normalized:
                 return False
             if normalized in self.canonical:
@@ -3673,6 +3672,17 @@ class _PresentationWindowMixin:
             if self.keywords:
                 return any(keyword in normalized for keyword in self.keywords)
             return False
+
+        def has_signature(self, class_name: Any) -> bool:
+            normalized = self._normalize(class_name)
+            return self._matches(normalized)
+
+        def has_normalized_signature(self, class_name: Any) -> bool:
+            if not isinstance(class_name, str):
+                normalized = self._normalize(class_name)
+            else:
+                normalized = class_name.strip()
+            return self._matches(normalized)
 
     class _ClassTokens:
         __slots__ = ()
@@ -3778,13 +3788,16 @@ class _PresentationWindowMixin:
     def _normalize_class_hint(cls, value: Any) -> str:
         return cls._PrefixKeywordClassifier._normalize(value)
 
-    def _is_wps_slideshow_class(self, class_name: str) -> bool:
-        normalized = self._normalize_class_hint(class_name)
+    def _normalized_is_wps_slideshow_class(self, normalized: str) -> bool:
         if not normalized:
             return False
         if normalized in self._WPS_SLIDESHOW_CLASSES:
             return True
         return normalized.startswith("kwppshow")
+
+    def _is_wps_slideshow_class(self, class_name: str) -> bool:
+        normalized = self._normalize_class_hint(class_name)
+        return self._normalized_is_wps_slideshow_class(normalized)
 
     def _is_word_like_class(self, class_name: str) -> bool:
         normalized = self._normalize_class_hint(class_name)
@@ -3805,11 +3818,15 @@ class _PresentationWindowMixin:
     def _class_has_wps_writer_signature(self, class_name: str) -> bool:
         return self._WPS_WRITER_CLASSIFIER.has_signature(class_name)
 
-    def _class_has_wps_presentation_signature(self, class_name: str) -> bool:
-        normalized = self._normalize_class_hint(class_name)
+    def _normalized_has_wps_writer_signature(self, normalized: str) -> bool:
         if not normalized:
             return False
-        if self._is_wps_slideshow_class(normalized):
+        return self._WPS_WRITER_CLASSIFIER.has_normalized_signature(normalized)
+
+    def _normalized_has_wps_presentation_signature(self, normalized: str) -> bool:
+        if not normalized:
+            return False
+        if self._normalized_is_wps_slideshow_class(normalized):
             return True
         if normalized.startswith("kwpp") or "kwpp" in normalized:
             return True
@@ -3819,11 +3836,14 @@ class _PresentationWindowMixin:
             return True
         return False
 
-    def _class_has_ms_presentation_signature(self, class_name: str) -> bool:
+    def _class_has_wps_presentation_signature(self, class_name: str) -> bool:
         normalized = self._normalize_class_hint(class_name)
+        return self._normalized_has_wps_presentation_signature(normalized)
+
+    def _normalized_has_ms_presentation_signature(self, normalized: str) -> bool:
         if not normalized:
             return False
-        if self._class_has_wps_presentation_signature(normalized):
+        if self._normalized_has_wps_presentation_signature(normalized):
             return False
         if normalized in self._SLIDESHOW_PRIORITY_CLASSES:
             return True
@@ -3837,6 +3857,10 @@ class _PresentationWindowMixin:
             return True
         keywords = ("ppt", "powerpnt", "powerpoint", "screenclass")
         return any(keyword in normalized for keyword in keywords)
+
+    def _class_has_ms_presentation_signature(self, class_name: str) -> bool:
+        normalized = self._normalize_class_hint(class_name)
+        return self._normalized_has_ms_presentation_signature(normalized)
 
     def _normalized_class_hints(self, *classes: Any) -> Tuple[str, ...]:
         normalized: List[str] = []
@@ -3877,47 +3901,94 @@ class _PresentationWindowMixin:
         ms_presentation_predicate = self._class_has_ms_presentation_signature
         writer_predicate = self._class_has_wps_writer_signature
 
+        slideshow_uses_base = (
+            getattr(slideshow_predicate, "__func__", None)
+            is _PresentationWindowMixin._is_wps_slideshow_class
+        )
+        wps_uses_base = (
+            getattr(wps_presentation_predicate, "__func__", None)
+            is _PresentationWindowMixin._class_has_wps_presentation_signature
+        )
+        ms_uses_base = (
+            getattr(ms_presentation_predicate, "__func__", None)
+            is _PresentationWindowMixin._class_has_ms_presentation_signature
+        )
+        writer_uses_base = (
+            getattr(writer_predicate, "__func__", None)
+            is _PresentationWindowMixin._class_has_wps_writer_signature
+        )
+
+        logger_ref = globals().get("logger")
+        debug = getattr(logger_ref, "debug", None)
+        if not callable(debug):
+            logging_module = globals().get("logging")
+            if logging_module is None:  # pragma: no cover - helper extraction fallback
+                import logging as logging_module  # type: ignore[import-not-found]
+            logger_ref = logging_module.getLogger(__name__)
+            debug = getattr(logger_ref, "debug", None)
+
+        def _log_predicate_failure() -> None:
+            if callable(debug):
+                debug(
+                    "WPS process hint predicate failed",  # pragma: no cover - debug logging
+                    exc_info=True,
+                )
+
+        def _memoize(
+            predicate: Callable[[str], bool],
+            normalized_impl: Optional[Callable[[str], bool]],
+        ) -> Callable[[str], bool]:
+            cache: Dict[str, bool] = {}
+
+            def _call(class_name: str) -> bool:
+                cached = cache.get(class_name)
+                if cached is not None:
+                    return cached
+                try:
+                    if normalized_impl is not None:
+                        result = bool(normalized_impl(class_name))
+                    else:
+                        result = bool(predicate(class_name))
+                except Exception:
+                    _log_predicate_failure()
+                    result = False
+                cache[class_name] = result
+                return result
+
+            return _call
+
+        memoized_slideshow = _memoize(
+            slideshow_predicate,
+            self._normalized_is_wps_slideshow_class if slideshow_uses_base else None,
+        )
+        memoized_wps = _memoize(
+            wps_presentation_predicate,
+            self._normalized_has_wps_presentation_signature if wps_uses_base else None,
+        )
+        memoized_ms = _memoize(
+            ms_presentation_predicate,
+            self._normalized_has_ms_presentation_signature if ms_uses_base else None,
+        )
+        memoized_writer = _memoize(
+            writer_predicate,
+            self._normalized_has_wps_writer_signature if writer_uses_base else None,
+        )
+
         has_slideshow = False
         has_wps_presentation_signature = False
         has_ms_presentation_signature = False
         has_writer_signature = False
 
-        def _safe_call(
-            predicate: Callable[[str], bool],
-            class_name: str,
-        ) -> bool:
-            try:
-                return bool(predicate(class_name))
-            except Exception:
-                logger_ref = globals().get("logger")
-                debug = getattr(logger_ref, "debug", None)
-                if not callable(debug):
-                    logging_module = globals().get("logging")
-                    if logging_module is None:  # pragma: no cover - helper extraction fallback
-                        import logging as logging_module  # type: ignore[import-not-found]
-                    logger_ref = logging_module.getLogger(__name__)
-                    debug = getattr(logger_ref, "debug", None)
-                if callable(debug):
-                    debug(
-                        "WPS process hint predicate failed",  # pragma: no cover - debug logging
-                        exc_info=True,
-                    )
-                return False
+        unique_classes = tuple(dict.fromkeys(classes))
 
-        for class_name in classes:
-            if not has_slideshow and _safe_call(slideshow_predicate, class_name):
+        for class_name in unique_classes:
+            if not has_slideshow and memoized_slideshow(class_name):
                 has_slideshow = True
-            if not has_wps_presentation_signature and _safe_call(
-                wps_presentation_predicate, class_name
-            ):
+            if not has_wps_presentation_signature and memoized_wps(class_name):
                 has_wps_presentation_signature = True
-            if not has_ms_presentation_signature and _safe_call(
-                ms_presentation_predicate, class_name
-            ):
+            if not has_ms_presentation_signature and memoized_ms(class_name):
                 has_ms_presentation_signature = True
-            if not has_writer_signature and _safe_call(
-                writer_predicate, class_name
-            ):
+            if not has_writer_signature and memoized_writer(class_name):
                 has_writer_signature = True
             if (
                 has_slideshow
@@ -4031,9 +4102,14 @@ class _PresentationWindowMixin:
             return None
         return candidates
 
-    @classmethod
-    def _normalize_class_hint(cls, value: Any) -> str:
-        return cls._PrefixKeywordClassifier._normalize(value)
+    def _toolbar_widget(self) -> Optional[QWidget]:
+        return self._overlay_child_widget("toolbar")
+
+    def _photo_overlay_widget(self) -> Optional[QWidget]:
+        return self._overlay_child_widget("_photo_overlay")
+
+    def _overlay_hwnd(self) -> int:
+        return self._widget_hwnd(self._overlay_widget())
 
     def _overlay_child_widget(self, attribute: str) -> Optional[QWidget]:
         overlay = self._overlay_widget()
@@ -4043,68 +4119,10 @@ class _PresentationWindowMixin:
         if widget is None:
             return 0
         try:
-            if isinstance(value, bytes):
-                value = value.decode("utf-8", "ignore")
-            else:
-                value = str(value)
+            wid = widget.winId()
         except Exception:
-            return ""
-        return value.strip().casefold()
-
-    def _normalized_process_context(
-        self, process_name: Any, classes: Iterable[Any]
-    ) -> Tuple[str, Tuple[str, ...]]:
-        normalized_name = self._normalize_process_name(process_name)
-        normalized_classes = self._normalized_class_hints(*classes)
-        return normalized_name, normalized_classes
-
-    def _summarize_wps_process_hints(
-        self, normalized_classes: Iterable[str]
-    ) -> "_PresentationWindowMixin._WPSProcessHints":
-        classes = tuple(normalized_classes)
-        if not classes:
-            return self._WPSProcessHints(classes, False, False, False, False)
-
-        slideshow_predicate = self._is_wps_slideshow_class
-        wps_presentation_predicate = self._class_has_wps_presentation_signature
-        ms_presentation_predicate = self._class_has_ms_presentation_signature
-        writer_predicate = self._class_has_wps_writer_signature
-
-        has_slideshow = False
-        has_wps_presentation_signature = False
-        has_ms_presentation_signature = False
-        has_writer_signature = False
-
-        def _safe_call(
-            predicate: Callable[[str], bool],
-            class_name: str,
-        ) -> bool:
-            try:
-                return bool(predicate(class_name))
-            except Exception:
-                logger_ref = globals().get("logger")
-                debug = getattr(logger_ref, "debug", None)
-                if not callable(debug):
-                    logging_module = globals().get("logging")
-                    if logging_module is None:  # pragma: no cover - helper extraction fallback
-                        import logging as logging_module  # type: ignore[import-not-found]
-                    logger_ref = logging_module.getLogger(__name__)
-                    debug = getattr(logger_ref, "debug", None)
-                if callable(debug):
-                    debug(
-                        "WPS process hint predicate failed",  # pragma: no cover - debug logging
-                        exc_info=True,
-                    )
-                return False
-
-    def _toolbar_widget(self) -> Optional[QWidget]:
-        return self._overlay_child_widget("toolbar")
-
-    def _photo_overlay_widget(self) -> Optional[QWidget]:
-        return self._overlay_child_widget("_photo_overlay")
-
-    def _overlay_hwnd(self) -> int:
-        return self._widget_hwnd(self._overlay_widget())
+            return 0
+        return int(wid) if wid else 0
 
     def _toolbar_widget(self) -> Optional[QWidget]:
         return self._overlay_child_widget("toolbar")

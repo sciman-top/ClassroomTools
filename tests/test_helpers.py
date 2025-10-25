@@ -332,6 +332,18 @@ def test_prefix_keyword_classifier_normalizes_tokens() -> None:
     assert classifier.has_signature("wpp main show window") is True
 
 
+def test_prefix_keyword_classifier_accepts_normalized_signature() -> None:
+    classifier = helpers._PresentationWindowMixin._PrefixKeywordClassifier(  # type: ignore[attr-defined]
+        prefixes=["kwps"],
+        keywords=["frame"],
+        excludes=["show"],
+        canonical=["kwpsframeclass"],
+    )
+    assert classifier.has_signature("KWPSFrameClass") is True
+    assert classifier.has_normalized_signature("kwpsframeclass") is True
+    assert classifier.has_normalized_signature("kwpsframeclass ") is True
+
+
 def test_class_tokens_freeze_normalizes_inputs() -> None:
     tokens = helpers._PresentationWindowMixin._ClassTokens.freeze(  # type: ignore[attr-defined]
         [" KWPPShowFrameClass "],
@@ -418,3 +430,20 @@ def test_summarize_wps_process_hints_logs_with_fallback_logger() -> None:
     assert hints.classes == normalized
     assert hints.has_wps_presentation_signature is False
     assert hints.has_writer_signature is True
+
+
+def test_summarize_wps_process_hints_caches_duplicate_classes() -> None:
+    class _CountingHarness(_MixinHarness):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        def _class_has_wps_presentation_signature(self, class_name: str) -> bool:
+            self.calls += 1
+            return super()._class_has_wps_presentation_signature(class_name)
+
+    harness = _CountingHarness()
+    normalized = harness._normalized_class_hints("KwppShowFrameClass", "KwppShowFrameClass")
+    hints = harness._summarize_wps_process_hints(normalized)
+    assert hints.has_wps_presentation_signature is True
+    assert harness.calls == 1
