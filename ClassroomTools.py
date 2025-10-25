@@ -920,10 +920,10 @@ def ensure_widget_within_screen(widget: QWidget) -> None:
     widget.move(x, y)
 
 
-def str_to_bool(value: str, default: bool = False) -> bool:
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return default
+def str_to_bool(value: Any, default: bool = False) -> bool:
+    """Backward-compatible wrapper around :func:`parse_bool`."""
+
+    return parse_bool(value, default)
 
 
 def bool_to_str(value: bool) -> str:
