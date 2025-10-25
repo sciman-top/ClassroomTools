@@ -186,51 +186,42 @@ def parse_bool(value: Any, default: bool = False) -> bool:
     return bool(result)
 
 
-def _resolve_word_control_conflict(
-    ms_word_enabled: bool,
-    wps_word_enabled: bool,
+def _compute_presentation_category(
+    class_name: str,
+    top_class: str,
+    process_name: str,
     *,
-    source_flags: Optional[Mapping[str, Any]] = None,
-    previous_flags: Optional[Mapping[str, Any]] = None,
-) -> tuple[bool, bool]:
-    """Ensure the Word-scrolling toggles are mutually exclusive.
-
-    When both *ms_word_enabled* and *wps_word_enabled* evaluate to :data:`True`,
-    resolve the conflict by preferring the last explicitly toggled checkbox if it
-    is known, then falling back to the previously persisted preference. If no
-    hints are available the Microsoft Word option wins by default because it is
-    the first implementation we shipped and therefore the safer compatibility
-    choice.
-    """
-
-    if not (ms_word_enabled and wps_word_enabled):
-        return bool(ms_word_enabled), bool(wps_word_enabled)
-
-    last_toggle: Optional[str] = None
-    if isinstance(source_flags, Mapping):
-        raw_last = source_flags.get("_last_word_toggle")
-        if raw_last is not None:
-            candidate = str(raw_last).strip().lower()
-            if candidate in {"ms_word", "wps_word"}:
-                last_toggle = candidate
-
-    if last_toggle == "ms_word":
-        return True, False
-    if last_toggle == "wps_word":
-        return False, True
-
-    previous_ms = False
-    previous_wps = False
-    if isinstance(previous_flags, Mapping):
-        previous_ms = parse_bool(previous_flags.get("ms_word"), False)
-        previous_wps = parse_bool(previous_flags.get("wps_word"), False)
-
-    if previous_ms and not previous_wps:
-        return True, False
-    if previous_wps and not previous_ms:
-        return False, True
-
-    return True, False
+    has_wps_presentation_signature: Callable[[str], bool],
+    is_wps_slideshow_class: Callable[[str], bool],
+    has_wps_writer_signature: Callable[[str], bool],
+    is_word_like_class: Callable[[str], bool],
+    has_ms_presentation_signature: Callable[[str], bool],
+    is_wps_presentation_process: Callable[[str, str, str], bool],
+    is_wps_writer_process: Callable[[str, str, str], bool],
+) -> str:
+    lowered_process = process_name.strip().lower() if process_name else ""
+    if lowered_process:
+        if is_wps_presentation_process(process_name, class_name, top_class):
+            return "wps_ppt"
+        if is_wps_writer_process(process_name, class_name, top_class):
+            return "wps_word"
+        if "powerpnt" in lowered_process:
+            return "ms_ppt"
+        if "winword" in lowered_process:
+            return "ms_word"
+    if has_wps_presentation_signature(class_name) or has_wps_presentation_signature(top_class):
+        return "wps_ppt"
+    if is_wps_slideshow_class(class_name) or is_wps_slideshow_class(top_class):
+        return "wps_ppt"
+    if has_wps_writer_signature(class_name) or has_wps_writer_signature(top_class):
+        return "wps_word"
+    if is_word_like_class(class_name) or is_word_like_class(top_class):
+        return "ms_word"
+    if has_ms_presentation_signature(class_name) or has_ms_presentation_signature(top_class):
+        return "ms_ppt"
+    if lowered_process and ("ppt" in lowered_process or "powerpoint" in lowered_process):
+        return "ms_ppt"
+    return "other"
 
 
 def _preferred_app_directory() -> str:
@@ -6271,27 +6262,19 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         class_name = self._presentation_window_class(hwnd)
         top_hwnd = _user32_top_level_hwnd(hwnd)
         top_class = self._presentation_window_class(top_hwnd) if top_hwnd else ""
-        if self._class_has_wps_presentation_signature(class_name) or self._class_has_wps_presentation_signature(top_class):
-            return "wps_ppt"
-        if self._class_has_wps_writer_signature(class_name) or self._class_has_wps_writer_signature(top_class):
-            return "wps_word"
-        if self._is_wps_slideshow_class(class_name) or self._is_wps_slideshow_class(top_class):
-            return "wps_ppt"
-        if self._is_word_like_class(class_name) or self._is_word_like_class(top_class):
-            return "ms_word"
         process_name = self._window_process_name(top_hwnd or hwnd)
-        if process_name:
-            if self._is_wps_presentation_process(process_name, class_name, top_class):
-                return "wps_ppt"
-            if self._is_wps_writer_process(process_name, class_name, top_class):
-                return "wps_word"
-            if "powerpnt" in process_name:
-                return "ms_ppt"
-            if "winword" in process_name:
-                return "ms_word"
-        if self._class_has_ms_presentation_signature(class_name) or self._class_has_ms_presentation_signature(top_class):
-            return "ms_ppt"
-        return "other"
+        return _compute_presentation_category(
+            class_name or "",
+            top_class or "",
+            process_name or "",
+            has_wps_presentation_signature=self._class_has_wps_presentation_signature,
+            is_wps_slideshow_class=self._is_wps_slideshow_class,
+            has_wps_writer_signature=self._class_has_wps_writer_signature,
+            is_word_like_class=self._is_word_like_class,
+            has_ms_presentation_signature=self._class_has_ms_presentation_signature,
+            is_wps_presentation_process=self._is_wps_presentation_process,
+            is_wps_writer_process=self._is_wps_writer_process,
+        )
 
     def _is_presentation_category_allowed(self, category: str) -> bool:
         if not category or category == "other":
@@ -8090,15 +8073,6 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             resolved[key] = parse_bool(raw, default)
         previous = getattr(self, "_presentation_control_flags", None)
         previous_flags: Mapping[str, Any] = previous or {}
-        (
-            resolved["ms_word"],
-            resolved["wps_word"],
-        ) = _resolve_word_control_conflict(
-            resolved["ms_word"],
-            resolved["wps_word"],
-            source_flags=source_mapping,
-            previous_flags=previous_flags,
-        )
         previous_mapping = dict(previous_flags)
         changed = previous_mapping != resolved
         self._presentation_control_flags = dict(resolved)
