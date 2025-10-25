@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import dataclasses
 import enum
+import functools
 import math
 import contextlib
 import os
@@ -39,6 +40,7 @@ def _load_helper_module() -> types.ModuleType:
             "Iterable": Iterable,
             "Set": Set,
             "Mapping": Mapping,
+            "functools": functools,
             "dataclass": dataclasses.dataclass,
             "Enum": enum.Enum,
             "math": math,
@@ -447,3 +449,56 @@ def test_summarize_wps_process_hints_caches_duplicate_classes() -> None:
     hints = harness._summarize_wps_process_hints(normalized)
     assert hints.has_wps_presentation_signature is True
     assert harness.calls == 1
+
+
+def test_summarize_wps_process_hints_ignores_duplicate_specs() -> None:
+    class _DuplicateHarness(_MixinHarness):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        def _is_wps_slideshow_class(self, class_name: str) -> bool:
+            self.calls += 1
+            return super()._is_wps_slideshow_class(class_name)
+
+        def _wps_hint_predicate_specs(self):  # type: ignore[override]
+            specs = list(super()._wps_hint_predicate_specs())
+            spec_type = type(specs[0])
+            specs.append(
+                spec_type(
+                    specs[0].flag_name,
+                    specs[0].predicate,
+                    specs[0].normalized_predicate,
+                    specs[0].base_impl,
+                )
+            )
+            return tuple(specs)
+
+    harness = _DuplicateHarness()
+    normalized = harness._normalized_class_hints("KwppShowFrameClass")
+    hints = harness._summarize_wps_process_hints(normalized)
+    assert hints.has_slideshow is True
+    assert harness.calls == 1
+
+
+def test_summarize_wps_process_hints_skips_specs_without_flag_names() -> None:
+    class _NamelessHarness(_MixinHarness):
+        def _wps_hint_predicate_specs(self):  # type: ignore[override]
+            specs = list(super()._wps_hint_predicate_specs())
+            spec_type = type(specs[0])
+            return (
+                spec_type(
+                    "",
+                    specs[0].predicate,
+                    specs[0].normalized_predicate,
+                    specs[0].base_impl,
+                ),
+            )
+
+    harness = _NamelessHarness()
+    normalized = harness._normalized_class_hints("KwppShowFrameClass")
+    hints = harness._summarize_wps_process_hints(normalized)
+    assert hints.has_slideshow is False
+    assert hints.has_wps_presentation_signature is False
+    assert hints.has_ms_presentation_signature is False
+    assert hints.has_writer_signature is False
