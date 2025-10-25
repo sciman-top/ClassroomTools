@@ -901,6 +901,28 @@ def geometry_to_text(widget: QWidget) -> str:
     return f"{width}x{height}+{frame.x()}+{frame.y()}"
 
 
+def _resolve_widget_screen(
+    widget: QWidget, *, fallback_point: Optional[QPoint] = None
+) -> Optional[QScreen]:
+    """Return the best-effort screen for *widget*.
+
+    ``QApplication.screenAt`` may raise on some platforms (notably Wayland) so we
+    guard all calls.  The helper keeps the scattered fallback logic in a single
+    place so other geometry helpers can reuse it safely.
+    """
+
+    screen: Optional[QScreen] = None
+    if fallback_point is not None:
+        with contextlib.suppress(Exception):
+            screen = QApplication.screenAt(fallback_point)
+    if screen is None:
+        with contextlib.suppress(Exception):
+            screen = widget.screen()
+    if screen is None:
+        screen = QApplication.primaryScreen()
+    return screen
+
+
 def apply_geometry_from_text(widget: QWidget, geometry: str) -> None:
     if not geometry:
         return
@@ -928,12 +950,7 @@ def apply_geometry_from_text(widget: QWidget, geometry: str) -> None:
     min_width = max(base_min_width, custom_min_width)
     min_height = max(base_min_height, custom_min_height)
 
-    screen = QApplication.screenAt(QPoint(x, y))
-    if screen is None:
-        try:
-            screen = widget.screen() or QApplication.primaryScreen()
-        except Exception:
-            screen = QApplication.primaryScreen()
+    screen = _resolve_widget_screen(widget, fallback_point=QPoint(x, y))
     if screen is not None:
         available = screen.availableGeometry()
         max_width = max(min_width, 320, int(available.width() * 0.9))
@@ -949,13 +966,7 @@ def apply_geometry_from_text(widget: QWidget, geometry: str) -> None:
 
 
 def ensure_widget_within_screen(widget: QWidget) -> None:
-    screen = None
-    try:
-        screen = widget.screen()
-    except Exception:
-        screen = None
-    if screen is None:
-        screen = QApplication.primaryScreen()
+    screen = _resolve_widget_screen(widget)
     if screen is None:
         return
     base_min_width = getattr(widget, "_base_minimum_width", widget.minimumWidth())
