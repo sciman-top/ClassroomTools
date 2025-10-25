@@ -6346,7 +6346,14 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         effective_target = target_hwnd or self._resolve_control_target()
         if not target_hwnd and effective_target:
             target_hwnd = effective_target
-        wps_override = self._find_wps_slideshow_target()
+        base_target = target_hwnd or effective_target
+        base_category = (
+            self._presentation_target_category(base_target)
+            if base_target
+            else "other"
+        )
+        allow_wps_override = base_category not in {"ms_word", "wps_word"}
+        wps_override = self._find_wps_slideshow_target() if allow_wps_override else None
         ms_override: Optional[int] = None
         if not wps_override:
             try:
@@ -6356,6 +6363,17 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         if wps_override:
             target_hwnd = wps_override
             effective_target = wps_override
+            try:
+                if self._presentation_control_allowed(wps_override, log=False):
+                    self._last_target_hwnd = wps_override
+            except Exception:
+                pass
+            forwarder = getattr(self, "_forwarder", None)
+            if forwarder is not None:
+                try:
+                    forwarder._last_target_hwnd = wps_override  # type: ignore[attr-defined]
+                except Exception:
+                    pass
         elif ms_override:
             target_hwnd = ms_override
             effective_target = ms_override
@@ -6593,6 +6611,22 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                 if target_hwnd
                 else "other"
             )
+            if target_category not in {"ms_word", "wps_word"}:
+                slideshow_target = self._find_wps_slideshow_target()
+                if slideshow_target and slideshow_target != target_hwnd:
+                    target_hwnd = slideshow_target
+                    target_category = "wps_ppt"
+                    try:
+                        if self._presentation_control_allowed(slideshow_target, log=False):
+                            self._last_target_hwnd = slideshow_target
+                    except Exception:
+                        pass
+                    forwarder = getattr(self, "_forwarder", None)
+                    if forwarder is not None:
+                        try:
+                            forwarder._last_target_hwnd = slideshow_target  # type: ignore[attr-defined]
+                        except Exception:
+                            pass
             if (
                 target_hwnd
                 and target_category in {"ms_word", "wps_word"}
