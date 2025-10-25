@@ -3917,6 +3917,7 @@ class _PresentationForwarder(_PresentationWindowMixin):
         self.overlay = overlay
         self._last_target_hwnd: Optional[int] = None
         self._child_buffer: List[int] = []
+        self._wps_pending_keyups: Set[int] = set()
 
     def _log_debug(self, message: str, *args: Any) -> None:
         if logger.isEnabledFor(logging.DEBUG):
@@ -3924,6 +3925,7 @@ class _PresentationForwarder(_PresentationWindowMixin):
 
     def clear_cached_target(self) -> None:
         self._last_target_hwnd = None
+        self._wps_pending_keyups.clear()
 
     def _window_class_name(self, hwnd: int) -> str:
         if hwnd == 0:
@@ -4126,6 +4128,9 @@ class _PresentationForwarder(_PresentationWindowMixin):
         vk_code = self._resolve_vk_code(event)
         if vk_code is None:
             return False
+        if not is_press and vk_code in self._wps_pending_keyups:
+            self._wps_pending_keyups.discard(vk_code)
+            return True
         target = self._resolve_presentation_target()
         if not target:
             target = self._detect_presentation_window()
@@ -4141,6 +4146,10 @@ class _PresentationForwarder(_PresentationWindowMixin):
             )
             self.clear_cached_target()
             return False
+        if self._is_wps_slideshow_window(target) and is_press:
+            if self._forward_wps_navigation_key(target, vk_code):
+                self._wps_pending_keyups.add(vk_code)
+                return True
         for hwnd, update_cache in self._iter_key_targets(target):
             if self._send_key_to_window(
                 hwnd, vk_code, event, is_press=is_press, update_cache=update_cache
@@ -4547,6 +4556,28 @@ class _PresentationForwarder(_PresentationWindowMixin):
                 return False
         self._last_target_hwnd = hwnd
         return True
+
+    def _forward_wps_navigation_key(self, hwnd: int, vk_code: int) -> bool:
+        if hwnd == 0 or vk_code == 0:
+            return False
+        candidates = [hwnd]
+        try:
+            extra = self._collect_wps_slideshow_targets(hwnd)
+        except Exception:
+            extra = []
+        for candidate in extra:
+            if candidate not in candidates:
+                candidates.append(candidate)
+        for candidate in candidates:
+            if not candidate:
+                continue
+            if not self._is_wps_slideshow_window(candidate) and candidate != hwnd:
+                continue
+            if self._send_wps_slideshow_key_sequence(candidate, vk_code):
+                if candidate != hwnd:
+                    self._last_target_hwnd = candidate
+                return True
+        return False
 
     def _collect_wps_slideshow_targets(self, hwnd: int) -> List[int]:
         handles: List[int] = []
