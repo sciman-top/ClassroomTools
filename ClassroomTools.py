@@ -1717,9 +1717,9 @@ class SettingsManager:
                 "brush_color": "#ff0000",
                 "brush_style": "chalk",
                 "control_ms_ppt": "True",
-                "control_ms_word": "True",
+                "control_ms_word": "False",
                 "control_wps_ppt": "True",
-                "control_wps_word": "True",
+                "control_wps_word": "False",
             },
         }
 
@@ -2628,11 +2628,12 @@ class PenSettingsDialog(QDialog):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
 
+        disabled_control_keys = {"ms_word", "wps_word"}
         control_defaults = {
             "ms_ppt": True,
-            "ms_word": True,
+            "ms_word": False,
             "wps_ppt": True,
-            "wps_word": True,
+            "wps_word": False,
         }
         if initial_control_flags:
             for key in list(control_defaults):
@@ -2640,6 +2641,8 @@ class PenSettingsDialog(QDialog):
                     control_defaults[key] = parse_bool(
                         initial_control_flags[key], control_defaults[key]
                     )
+        for key in disabled_control_keys:
+            control_defaults[key] = False
         self._control_checkboxes: Dict[str, QCheckBox] = {}
 
         style_layout = QHBoxLayout()
@@ -2738,6 +2741,9 @@ class PenSettingsDialog(QDialog):
         for index, (key, text) in enumerate(control_items):
             checkbox = QCheckBox(text, self)
             checkbox.setChecked(control_defaults.get(key, True))
+            if key in disabled_control_keys:
+                checkbox.setChecked(False)
+                checkbox.setEnabled(False)
             checkbox.setToolTip("关闭后将不会向对应应用发送翻页或滚动指令。")
             self._control_checkboxes[key] = checkbox
             control_grid.addWidget(checkbox, index // 2, index % 2)
@@ -7484,9 +7490,9 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
     def _update_presentation_control_flags(self, flags: Optional[Mapping[str, Any]]) -> None:
         defaults = {
             "ms_ppt": True,
-            "ms_word": True,
+            "ms_word": False,
             "wps_ppt": True,
-            "wps_word": True,
+            "wps_word": False,
         }
         resolved: Dict[str, bool] = {}
         source = flags or {}
@@ -7497,6 +7503,8 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                 if raw is None:
                     raw = source.get(f"control_{key}")
             resolved[key] = parse_bool(raw, default)
+        for key in ("ms_word", "wps_word"):
+            resolved[key] = False
         previous = getattr(self, "_presentation_control_flags", None)
         previous_flags: Mapping[str, Any] = previous or {}
         changed = previous != resolved
