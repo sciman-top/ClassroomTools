@@ -41,6 +41,7 @@ from typing import (
     Set,
     Tuple,
     Union,
+    Literal,
 )
 
 logger = logging.getLogger(__name__)
@@ -987,6 +988,11 @@ def ensure_widget_within_screen(widget: QWidget) -> None:
     widget.move(x, y)
 
 
+def _hide_label_if_visible(label: QWidget) -> None:
+    if label.isVisible():
+        label.hide()
+
+
 def str_to_bool(value: Any, default: bool = False) -> bool:
     """Backward-compatible wrapper around :func:`parse_bool`."""
 
@@ -1007,6 +1013,151 @@ def dedupe_strings(values: List[str]) -> List[str]:
         seen.add(normalized)
         unique.append(normalized)
     return unique
+
+
+def _compute_presentation_category(
+    class_name: str,
+    top_class: str,
+    process_name: str,
+    *,
+    has_wps_presentation_signature: Callable[[str], bool],
+    is_wps_slideshow_class: Callable[[str], bool],
+    has_wps_writer_signature: Callable[[str], bool],
+    is_word_like_class: Callable[[str], bool],
+    has_ms_presentation_signature: Callable[[str], bool],
+    is_wps_presentation_process: Callable[..., bool],
+    is_wps_writer_process: Callable[..., bool],
+) -> str:
+    """Classify a presentation window based on class and process hints."""
+
+    def _decode_bytes(raw: Union[bytes, bytearray, memoryview]) -> str:
+        try:
+            return bytes(raw).decode("utf-8", "ignore")
+        except Exception:
+            return ""
+
+    def _to_text(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, (bytes, bytearray, memoryview)):
+            return _decode_bytes(value)
+        if isinstance(value, os.PathLike):
+            try:
+                return os.fspath(value)
+            except Exception:
+                return ""
+        try:
+            return str(value)
+        except Exception:
+            return ""
+
+    def _normalize(value: Any) -> str:
+        text = _to_text(value)
+        if not text:
+            return ""
+        stripped = text.strip()
+        return stripped.casefold()
+
+    def _normalize_process(value: Any) -> Tuple[str, str]:
+        text = _to_text(value)
+        if not text:
+            return "", ""
+        stripped = text.strip()
+        lowered = stripped.casefold()
+        return stripped, lowered
+
+    primary = _normalize(class_name)
+    secondary = _normalize(top_class)
+    classes = tuple(dict.fromkeys(filter(None, (primary, secondary))))
+
+    process, process_lower = _normalize_process(process_name)
+
+    if not classes and not process_lower:
+        return "other"
+
+    predicate_cache: Dict[int, Dict[str, bool]] = {}
+    process_cache: Dict[int, bool] = {}
+    _missing = object()
+
+    def _class_check(predicate: Optional[Callable[[str], bool]]) -> bool:
+        if predicate is None:
+            return False
+        key = id(predicate)
+        cache = predicate_cache.setdefault(key, {})
+        for candidate in classes:
+            cached = cache.get(candidate, _missing)
+            if cached is _missing:
+                try:
+                    cached = bool(predicate(candidate))
+                except Exception:
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug(
+                            "presentation: predicate %s failed for %s",  # pragma: no cover - log only
+                            getattr(predicate, "__name__", repr(predicate)),
+                            candidate,
+                            exc_info=True,
+                        )
+                    cached = False
+                cache[candidate] = bool(cached)
+            if cached:
+                return True
+        return False
+
+    def _process_check(predicate: Optional[Callable[..., bool]]) -> bool:
+        if not process:
+            return False
+        if predicate is None:
+            return False
+        key = id(predicate)
+        cached = process_cache.get(key, _missing)
+        if cached is _missing:
+            try:
+                cached = bool(predicate(process, *classes))
+            except Exception:
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "presentation: process predicate %s failed",  # pragma: no cover - log only
+                        getattr(predicate, "__name__", repr(predicate)),
+                        exc_info=True,
+                    )
+                cached = False
+            process_cache[key] = bool(cached)
+        return bool(cached)
+
+    if _class_check(has_wps_presentation_signature):
+        return "wps_ppt"
+
+    if _class_check(is_wps_slideshow_class):
+        return "wps_ppt"
+
+    if _process_check(is_wps_presentation_process):
+        return "wps_ppt"
+
+    if _class_check(has_wps_writer_signature):
+        return "wps_word"
+
+    if _class_check(is_word_like_class):
+        return "ms_word"
+
+    if _process_check(is_wps_writer_process):
+        return "wps_word"
+
+    if process_lower:
+        if process_lower.startswith(("wpp", "wppt")):
+            return "wps_ppt"
+        if process_lower.startswith("wps"):
+            return "wps_word"
+        if "powerpnt" in process_lower:
+            return "ms_ppt"
+        if "winword" in process_lower:
+            return "ms_word"
+
+    if _class_check(has_ms_presentation_signature):
+        return "ms_ppt"
+
+    return "other"
 
 
 def _try_import_module(module: str) -> bool:
@@ -1367,7 +1518,9 @@ class PasswordPromptDialog(QDialog):
         layout.addWidget(button_box)
 
         self.line_edit.returnPressed.connect(self.accept)
-        self.line_edit.textChanged.connect(self._clear_error)
+        self.line_edit.textChanged.connect(
+            lambda _text: _hide_label_if_visible(self.error_label)
+        )
 
     @classmethod
     def get_password(
@@ -1404,11 +1557,6 @@ class PasswordPromptDialog(QDialog):
         self.error_label.setText(message)
         self.error_label.show()
         self.line_edit.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
-
-    def _clear_error(self, _: str) -> None:
-        if self.error_label.isVisible():
-            self.error_label.hide()
-
 
 class PasswordSetupDialog(QDialog):
     """一次性采集两次输入的新密码，避免外部循环引发界面阻塞。"""
@@ -1475,8 +1623,12 @@ class PasswordSetupDialog(QDialog):
 
         self.password_edit.returnPressed.connect(self._focus_confirm)
         self.confirm_edit.returnPressed.connect(self.accept)
-        self.password_edit.textChanged.connect(self._clear_error)
-        self.confirm_edit.textChanged.connect(self._clear_error)
+        self.password_edit.textChanged.connect(
+            lambda _text: _hide_label_if_visible(self.error_label)
+        )
+        self.confirm_edit.textChanged.connect(
+            lambda _text: _hide_label_if_visible(self.error_label)
+        )
 
     @classmethod
     def get_new_password(
@@ -1516,10 +1668,6 @@ class PasswordSetupDialog(QDialog):
         self.error_label.show()
         target = focus_widget or self.password_edit
         target.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
-
-    def _clear_error(self, _: str) -> None:
-        if self.error_label.isVisible():
-            self.error_label.hide()
 
     def _focus_confirm(self) -> None:
         self.confirm_edit.setFocus(Qt.FocusReason.TabFocusReason)
@@ -2566,7 +2714,13 @@ class TipWindow(QWidget):
 
 
 # ---------- 对话框 ----------
-class PenSettingsDialog(QDialog):
+class _EnsureOnScreenMixin:
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        ensure_widget_within_screen(self)  # type: ignore[arg-type]
+
+
+class PenSettingsDialog(_EnsureOnScreenMixin, QDialog):
     """画笔粗细与颜色选择对话框。"""
 
     COLORS = {
@@ -2984,12 +3138,7 @@ class PenSettingsDialog(QDialog):
             self._collect_control_flags(),
         )
 
-    def showEvent(self, event) -> None:  # type: ignore[override]
-        super().showEvent(event)
-        ensure_widget_within_screen(self)
-
-
-class ShapeSettingsDialog(QDialog):
+class ShapeSettingsDialog(_EnsureOnScreenMixin, QDialog):
     """图形工具的快捷选择窗口。"""
     SHAPES = {"line": "直线", "dashed_line": "虚线", "rect": "矩形", "circle": "圆形"}
 
@@ -3024,12 +3173,7 @@ class ShapeSettingsDialog(QDialog):
     def get_shape(self) -> Optional[str]:
         return self.selected_shape
 
-    def showEvent(self, event) -> None:  # type: ignore[override]
-        super().showEvent(event)
-        ensure_widget_within_screen(self)
-
-
-class BoardColorDialog(QDialog):
+class BoardColorDialog(_EnsureOnScreenMixin, QDialog):
     """白板背景颜色选择对话框。"""
     COLORS = {"#FFFFFF": "白板", "#000000": "黑板", "#0E4020": "绿板"}
 
@@ -3059,10 +3203,7 @@ class BoardColorDialog(QDialog):
     def get_color(self) -> Optional[QColor]:
         return self.selected_color
 
-    def showEvent(self, event) -> None:  # type: ignore[override]
-        super().showEvent(event)
-        ensure_widget_within_screen(self)
-
+    
 
 # ---------- 标题栏 ----------
 class TitleBar(QWidget):
@@ -3119,7 +3260,7 @@ class TitleBar(QWidget):
 
 
 # ---------- 浮动工具条（画笔/白板） ----------
-class FloatingToolbar(QWidget):
+class FloatingToolbar(_EnsureOnScreenMixin, QWidget):
     """悬浮工具条：提供画笔、图形、白板等常用按钮。"""
 
     def __init__(self, overlay: "OverlayWindow", settings_manager: SettingsManager) -> None:
@@ -3450,15 +3591,77 @@ class FloatingToolbar(QWidget):
             return
         super().wheelEvent(event)
 
-    def showEvent(self, event) -> None:  # type: ignore[override]
-        super().showEvent(event)
-        ensure_widget_within_screen(self)
-
-
 # ---------- 叠加层（画笔/白板） ----------
 
 
 class _PresentationWindowMixin:
+    @dataclass(frozen=True)
+    class _WPSProcessHints:
+        classes: Tuple[str, ...]
+        has_slideshow: bool
+        has_wps_presentation_signature: bool
+        has_ms_presentation_signature: bool
+        has_writer_signature: bool
+
+    class _PrefixKeywordClassifier:
+        __slots__ = ("prefixes", "keywords", "excludes", "canonical")
+
+        def __init__(
+            self,
+            *,
+            prefixes: Iterable[str],
+            keywords: Iterable[str],
+            excludes: Iterable[str] = (),
+            canonical: Iterable[str] = (),
+        ) -> None:
+            normalizer = self._normalize
+
+            def _normalize_sequence(values: Iterable[str]) -> Tuple[str, ...]:
+                seen: Set[str] = set()
+                normalized: List[str] = []
+                for value in values:
+                    candidate = normalizer(value)
+                    if not candidate or candidate in seen:
+                        continue
+                    seen.add(candidate)
+                    normalized.append(candidate)
+                return tuple(normalized)
+
+            self.prefixes = _normalize_sequence(prefixes)
+            self.keywords = _normalize_sequence(keywords)
+            self.excludes = _normalize_sequence(excludes)
+            self.canonical = frozenset(_normalize_sequence(canonical))
+
+        @staticmethod
+        def _normalize(value: Any) -> str:
+            if not value:
+                return ""
+            if isinstance(value, str):
+                text = value
+            else:
+                try:
+                    text = str(value)
+                except Exception:
+                    return ""
+            return text.strip().casefold()
+
+        def has_signature(self, class_name: Any) -> bool:
+            normalized = self._normalize(class_name)
+            if not normalized:
+                return False
+            if normalized in self.canonical:
+                return True
+            if not self.prefixes:
+                return False
+            has_prefix = any(normalized.startswith(prefix) for prefix in self.prefixes)
+            if not has_prefix:
+                return False
+            if self.excludes and any(token in normalized for token in self.excludes):
+                return False
+            if self.keywords:
+                return any(keyword in normalized for keyword in self.keywords)
+            return False
+
     _KNOWN_PRESENTATION_CLASSES: Set[str] = {
         "screenclass",
         "pptframeclass",
@@ -3547,23 +3750,287 @@ class _PresentationWindowMixin:
         "wpsframeclass",
         "wpsmainframe",
     }
-    _WPS_WRITER_PREFIXES: Tuple[str, ...] = ("kwps", "wps")
-    _WPS_WRITER_KEYWORDS: Tuple[str, ...] = ("frame", "view", "doc", "page")
-    _WPS_WRITER_EXCLUDE_KEYWORDS: Tuple[str, ...] = ("show", "slideshow")
+    _WPS_WRITER_CLASSIFIER = _PrefixKeywordClassifier(
+        prefixes=("kwps", "wps"),
+        keywords=("frame", "view", "doc", "page"),
+        excludes=("show", "slideshow"),
+        canonical=frozenset(
+            {
+                "kwpsdocview",
+                "wpsdocview",
+                "kwpsframeclass",
+                "kwpsmainframe",
+                "wpsframeclass",
+                "wpsmainframe",
+            }
+        ),
+    )
+
+    @classmethod
+    def _normalize_class_hint(cls, value: Any) -> str:
+        return cls._PrefixKeywordClassifier._normalize(value)
+
+    def _is_wps_slideshow_class(self, class_name: str) -> bool:
+        normalized = self._normalize_class_hint(class_name)
+        if not normalized:
+            return False
+        if normalized in self._WPS_SLIDESHOW_CLASSES:
+            return True
+        return normalized.startswith("kwppshow")
+
+    def _is_word_like_class(self, class_name: str) -> bool:
+        normalized = self._normalize_class_hint(class_name)
+        if not normalized:
+            return False
+        if normalized in self._WORD_WINDOW_CLASSES:
+            return True
+        if normalized in self._WORD_CONTENT_CLASSES:
+            return True
+        if normalized in self._WORD_HOST_CLASSES:
+            return True
+        if normalized.startswith("_ww"):
+            return True
+        if "word" in normalized:
+            return True
+        return self._WPS_WRITER_CLASSIFIER.has_signature(normalized)
+
+    def _class_has_wps_writer_signature(self, class_name: str) -> bool:
+        return self._WPS_WRITER_CLASSIFIER.has_signature(class_name)
+
+    def _class_has_wps_presentation_signature(self, class_name: str) -> bool:
+        normalized = self._normalize_class_hint(class_name)
+        if not normalized:
+            return False
+        if self._is_wps_slideshow_class(normalized):
+            return True
+        if normalized.startswith("kwpp") or "kwpp" in normalized:
+            return True
+        if normalized.startswith("wpp") and "wps" not in normalized:
+            return True
+        if normalized.startswith("wpsshow") or "wpsshow" in normalized:
+            return True
+        return False
+
+    def _class_has_ms_presentation_signature(self, class_name: str) -> bool:
+        normalized = self._normalize_class_hint(class_name)
+        if not normalized:
+            return False
+        if self._class_has_wps_presentation_signature(normalized):
+            return False
+        if normalized in self._SLIDESHOW_PRIORITY_CLASSES:
+            return True
+        if normalized in self._SLIDESHOW_SECONDARY_CLASSES:
+            return True
+        if normalized in self._PRESENTATION_EDITOR_CLASSES:
+            if normalized.startswith("kwpp") or normalized.startswith("kwps"):
+                return False
+            if normalized.startswith("wps"):
+                return False
+            return True
+        keywords = ("ppt", "powerpnt", "powerpoint", "screenclass")
+        return any(keyword in normalized for keyword in keywords)
+
+    def _normalized_class_hints(self, *classes: Any) -> Tuple[str, ...]:
+        normalized: List[str] = []
+        for value in classes:
+            hint = self._normalize_class_hint(value)
+            if hint:
+                normalized.append(hint)
+        return tuple(normalized)
+
+    def _normalize_process_name(self, value: Any) -> str:
+        if value is None:
+            return ""
+        try:
+            if isinstance(value, bytes):
+                value = value.decode("utf-8", "ignore")
+            else:
+                value = str(value)
+        except Exception:
+            return ""
+        return value.strip().casefold()
+
+    def _normalized_process_context(
+        self, process_name: Any, classes: Iterable[Any]
+    ) -> Tuple[str, Tuple[str, ...]]:
+        normalized_name = self._normalize_process_name(process_name)
+        normalized_classes = self._normalized_class_hints(*classes)
+        return normalized_name, normalized_classes
+
+    def _summarize_wps_process_hints(
+        self, normalized_classes: Iterable[str]
+    ) -> "_PresentationWindowMixin._WPSProcessHints":
+        classes = tuple(normalized_classes)
+        if not classes:
+            return self._WPSProcessHints(classes, False, False, False, False)
+
+        slideshow_predicate = self._is_wps_slideshow_class
+        wps_presentation_predicate = self._class_has_wps_presentation_signature
+        ms_presentation_predicate = self._class_has_ms_presentation_signature
+        writer_predicate = self._class_has_wps_writer_signature
+
+        has_slideshow = False
+        has_wps_presentation_signature = False
+        has_ms_presentation_signature = False
+        has_writer_signature = False
+
+        def _safe_call(
+            predicate: Callable[[str], bool],
+            class_name: str,
+        ) -> bool:
+            try:
+                return bool(predicate(class_name))
+            except Exception:
+                logger_ref = globals().get("logger")
+                debug = getattr(logger_ref, "debug", None)
+                if not callable(debug):
+                    logging_module = globals().get("logging")
+                    if logging_module is None:  # pragma: no cover - helper extraction fallback
+                        import logging as logging_module  # type: ignore[import-not-found]
+                    logger_ref = logging_module.getLogger(__name__)
+                    debug = getattr(logger_ref, "debug", None)
+                if callable(debug):
+                    debug(
+                        "WPS process hint predicate failed",  # pragma: no cover - debug logging
+                        exc_info=True,
+                    )
+                return False
+
+        for class_name in classes:
+            if not has_slideshow and _safe_call(slideshow_predicate, class_name):
+                has_slideshow = True
+            if not has_wps_presentation_signature and _safe_call(
+                wps_presentation_predicate, class_name
+            ):
+                has_wps_presentation_signature = True
+            if not has_ms_presentation_signature and _safe_call(
+                ms_presentation_predicate, class_name
+            ):
+                has_ms_presentation_signature = True
+            if not has_writer_signature and _safe_call(
+                writer_predicate, class_name
+            ):
+                has_writer_signature = True
+            if (
+                has_slideshow
+                and has_wps_presentation_signature
+                and has_ms_presentation_signature
+                and has_writer_signature
+            ):
+                break
+
+        return self._WPSProcessHints(
+            classes=classes,
+            has_slideshow=has_slideshow,
+            has_wps_presentation_signature=has_wps_presentation_signature,
+            has_ms_presentation_signature=has_ms_presentation_signature,
+            has_writer_signature=has_writer_signature,
+        )
+
+    def _classify_wps_process(
+        self, process_name: Any, *classes: Any
+    ) -> Literal["presentation", "writer", "other"]:
+        name, normalized_classes = self._normalized_process_context(process_name, classes)
+        if not name:
+            return "other"
+        if name.startswith(("wpp", "wppt")) or "wpspresentation" in name:
+            return "presentation"
+
+        hints = self._summarize_wps_process_hints(normalized_classes)
+
+        if name.startswith("wps"):
+            if hints.has_slideshow:
+                return "presentation"
+            if hints.has_wps_presentation_signature:
+                return "presentation"
+            if hints.has_ms_presentation_signature:
+                return "presentation"
+            if "wpswriter" in name or hints.has_writer_signature:
+                return "writer"
+            return "other"
+
+        if hints.has_writer_signature:
+            return "writer"
+        return "other"
+
+    def _is_wps_presentation_process(self, process_name: str, *classes: str) -> bool:
+        return self._classify_wps_process(process_name, *classes) == "presentation"
+
+    def _is_wps_writer_process(self, process_name: str, *classes: str) -> bool:
+        return self._classify_wps_process(process_name, *classes) == "writer"
+
+    def _window_thread_id(self, hwnd: int) -> int:
+        if _USER32 is None or hwnd == 0:
+            return 0
+        pid = wintypes.DWORD()
+        try:
+            thread_id = int(_USER32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(pid)))
+        except Exception:
+            thread_id = 0
+        return thread_id
+
+    def _attach_to_target_thread(self, hwnd: int) -> Optional[Tuple[int, int]]:
+        if _USER32 is None or hwnd == 0:
+            return None
+        target_thread = self._window_thread_id(hwnd)
+        if not target_thread:
+            return None
+        try:
+            current_thread = int(_USER32.GetCurrentThreadId())
+        except Exception:
+            current_thread = 0
+        if not current_thread or current_thread == target_thread:
+            return None
+        try:
+            attached = bool(_USER32.AttachThreadInput(current_thread, target_thread, True))
+        except Exception:
+            attached = False
+        return (current_thread, target_thread) if attached else None
+
+    def _detach_from_target_thread(self, pair: Optional[Tuple[int, int]]) -> None:
+        if _USER32 is None or not pair:
+            return
+        src, dst = pair
+        if not src or not dst or src == dst:
+            return
+        try:
+            _USER32.AttachThreadInput(src, dst, False)
+        except Exception:
+            pass
+
+    def _enumerate_overlay_candidate_windows(self, overlay_hwnd: int) -> Optional[List[int]]:
+        if _USER32 is None or _WNDENUMPROC is None:
+            return None
+        candidates: List[int] = []
+
+        def _enum_callback(hwnd: int, _l_param: int) -> int:
+            if hwnd == overlay_hwnd:
+                return True
+            if self._should_ignore_window(hwnd):
+                return True
+            if not _user32_is_window_visible(hwnd) or _user32_is_window_iconic(hwnd):
+                return True
+            rect = _user32_window_rect(hwnd)
+            if not rect or not self._rect_intersects_overlay(rect):
+                return True
+            candidates.append(int(hwnd))
+            return True
+
+        enum_proc = _WNDENUMPROC(_enum_callback)
+        try:
+            _USER32.EnumWindows(enum_proc, 0)
+        except Exception:
+            return None
+        return candidates
 
     def _overlay_widget(self) -> Optional[QWidget]:
         raise NotImplementedError
 
-    def _toolbar_widget(self) -> Optional[QWidget]:
+    def _overlay_child_widget(self, attribute: str) -> Optional[QWidget]:
         overlay = self._overlay_widget()
-        return getattr(overlay, "toolbar", None) if overlay is not None else None
+        return getattr(overlay, attribute, None) if overlay is not None else None
 
-    def _photo_overlay_widget(self) -> Optional[QWidget]:
-        overlay = self._overlay_widget()
-        return getattr(overlay, "_photo_overlay", None) if overlay is not None else None
-
-    def _overlay_hwnd(self) -> int:
-        widget = self._overlay_widget()
+    def _widget_hwnd(self, widget: Optional[QWidget]) -> int:
         if widget is None:
             return 0
         try:
@@ -3572,25 +4039,20 @@ class _PresentationWindowMixin:
             return 0
         return int(wid) if wid else 0
 
+    def _toolbar_widget(self) -> Optional[QWidget]:
+        return self._overlay_child_widget("toolbar")
+
+    def _photo_overlay_widget(self) -> Optional[QWidget]:
+        return self._overlay_child_widget("_photo_overlay")
+
+    def _overlay_hwnd(self) -> int:
+        return self._widget_hwnd(self._overlay_widget())
+
     def _toolbar_hwnd(self) -> int:
-        toolbar = self._toolbar_widget()
-        if toolbar is None:
-            return 0
-        try:
-            wid = toolbar.winId()
-        except Exception:
-            return 0
-        return int(wid) if wid else 0
+        return self._widget_hwnd(self._toolbar_widget())
 
     def _photo_overlay_hwnd(self) -> int:
-        photo = self._photo_overlay_widget()
-        if photo is None:
-            return 0
-        try:
-            wid = photo.winId()
-        except Exception:
-            return 0
-        return int(wid) if wid else 0
+        return self._widget_hwnd(self._photo_overlay_widget())
 
     def _overlay_rect_tuple(self) -> Optional[Tuple[int, int, int, int]]:
         widget = self._overlay_widget()
@@ -3675,6 +4137,26 @@ class _PresentationWindowMixin:
         if not rect:
             return False
         return self._rect_intersects_overlay(rect)
+
+    def _presentation_target_category(self, hwnd: Optional[int]) -> str:
+        if not hwnd:
+            return "other"
+        class_name = self._presentation_window_class(hwnd)
+        top_hwnd = _user32_top_level_hwnd(hwnd)
+        top_class = self._presentation_window_class(top_hwnd) if top_hwnd else ""
+        process_name = self._window_process_name(top_hwnd or hwnd)
+        return _compute_presentation_category(
+            class_name,
+            top_class,
+            process_name,
+            has_wps_presentation_signature=self._class_has_wps_presentation_signature,
+            is_wps_slideshow_class=self._is_wps_slideshow_class,
+            has_wps_writer_signature=self._class_has_wps_writer_signature,
+            is_word_like_class=self._is_word_like_class,
+            has_ms_presentation_signature=self._class_has_ms_presentation_signature,
+            is_wps_presentation_process=self._is_wps_presentation_process,
+            is_wps_writer_process=self._is_wps_writer_process,
+        )
 
 
 class _PresentationForwarder(_PresentationWindowMixin):
@@ -3804,13 +4286,6 @@ class _PresentationForwarder(_PresentationWindowMixin):
             except Exception:
                 return ""
         return _user32_window_class_name(hwnd)
-
-    def _is_wps_slideshow_class(self, class_name: str) -> bool:
-        if not class_name:
-            return False
-        if class_name in self._WPS_SLIDESHOW_CLASSES:
-            return True
-        return class_name.startswith("kwppshow")
 
     def _is_wps_slideshow_window(self, hwnd: int) -> bool:
         class_name = self._window_class_name(hwnd)
@@ -4250,45 +4725,6 @@ class _PresentationForwarder(_PresentationWindowMixin):
                     except Exception:
                         pass
 
-    def _attach_to_target_thread(self, hwnd: int) -> Optional[Tuple[int, int]]:
-        if _USER32 is None:
-            return None
-        target_thread = self._window_thread_id(hwnd)
-        if not target_thread:
-            return None
-        try:
-            current_thread = int(_USER32.GetCurrentThreadId())
-        except Exception:
-            current_thread = 0
-        if not current_thread or current_thread == target_thread:
-            return None
-        try:
-            attached = bool(_USER32.AttachThreadInput(current_thread, target_thread, True))
-        except Exception:
-            attached = False
-        return (current_thread, target_thread) if attached else None
-
-    def _detach_from_target_thread(self, pair: Optional[Tuple[int, int]]) -> None:
-        if _USER32 is None or not pair:
-            return
-        src, dst = pair
-        if not src or not dst or src == dst:
-            return
-        try:
-            _USER32.AttachThreadInput(src, dst, False)
-        except Exception:
-            pass
-
-    def _window_thread_id(self, hwnd: int) -> int:
-        if _USER32 is None or hwnd == 0:
-            return 0
-        pid = wintypes.DWORD()
-        try:
-            thread_id = int(_USER32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(pid)))
-        except Exception:
-            thread_id = 0
-        return thread_id
-
     def _activate_window_for_input(self, hwnd: int) -> bool:
         if _USER32 is None or hwnd == 0:
             return False
@@ -4408,26 +4844,6 @@ class _PresentationForwarder(_PresentationWindowMixin):
             return True
         if class_name.startswith("_ww"):
             return True
-        return False
-
-    def _is_word_like_class(self, class_name: str) -> bool:
-        if not class_name:
-            return False
-        if class_name in self._WORD_WINDOW_CLASSES:
-            return True
-        if class_name in self._WORD_CONTENT_CLASSES:
-            return True
-        if class_name in self._WORD_HOST_CLASSES:
-            return True
-        if class_name.startswith("_ww"):
-            return True
-        if "word" in class_name:
-            return True
-        if any(class_name.startswith(prefix) for prefix in self._WPS_WRITER_PREFIXES):
-            if any(excluded in class_name for excluded in self._WPS_WRITER_EXCLUDE_KEYWORDS):
-                return False
-            if any(keyword in class_name for keyword in self._WPS_WRITER_KEYWORDS):
-                return True
         return False
 
     def _locate_word_content_window(self, hwnd: int) -> Optional[int]:
@@ -4959,27 +5375,8 @@ class _PresentationForwarder(_PresentationWindowMixin):
             if score > best_score and self._is_control_allowed(foreground, log=False):
                 best_score = score
                 best_hwnd = foreground
-        if _WNDENUMPROC is None:
-            return best_hwnd
-        candidates: List[int] = []
-
-        def _enum_callback(hwnd: int, _l_param: int) -> int:
-            if hwnd == overlay_hwnd:
-                return True
-            if self._should_ignore_window(hwnd):
-                return True
-            if not _user32_is_window_visible(hwnd) or _user32_is_window_iconic(hwnd):
-                return True
-            rect = _user32_window_rect(hwnd)
-            if not rect or not self._rect_intersects_overlay(rect):
-                return True
-            candidates.append(int(hwnd))
-            return True
-
-        enum_proc = _WNDENUMPROC(_enum_callback)
-        try:
-            _USER32.EnumWindows(enum_proc, 0)
-        except Exception:
+        candidates = self._enumerate_overlay_candidate_windows(overlay_hwnd)
+        if candidates is None:
             return best_hwnd
         for hwnd in candidates:
             if not self._fallback_is_candidate_window(hwnd):
@@ -5763,84 +6160,6 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             return 120
         return 0
 
-    def _class_has_wps_writer_signature(self, class_name: str) -> bool:
-        if not class_name:
-            return False
-        if any(class_name.startswith(prefix) for prefix in self._WPS_WRITER_PREFIXES):
-            if any(excluded in class_name for excluded in self._WPS_WRITER_EXCLUDE_KEYWORDS):
-                return False
-            if any(keyword in class_name for keyword in self._WPS_WRITER_KEYWORDS):
-                return True
-        if class_name in {
-            "kwpsdocview",
-            "wpsdocview",
-            "kwpsframeclass",
-            "kwpsmainframe",
-            "wpsframeclass",
-            "wpsmainframe",
-        }:
-            return True
-        return False
-
-    def _class_has_wps_presentation_signature(self, class_name: str) -> bool:
-        if not class_name:
-            return False
-        if self._is_wps_slideshow_class(class_name):
-            return True
-        if class_name.startswith("kwpp") or "kwpp" in class_name:
-            return True
-        if class_name.startswith("wpp") and "wps" not in class_name:
-            return True
-        if class_name.startswith("wpsshow") or "wpsshow" in class_name:
-            return True
-        return False
-
-    def _class_has_ms_presentation_signature(self, class_name: str) -> bool:
-        if not class_name:
-            return False
-        if self._class_has_wps_presentation_signature(class_name):
-            return False
-        if class_name in self._SLIDESHOW_PRIORITY_CLASSES:
-            return True
-        if class_name in self._SLIDESHOW_SECONDARY_CLASSES:
-            return True
-        if class_name in self._PRESENTATION_EDITOR_CLASSES:
-            if class_name.startswith("kwpp") or class_name.startswith("kwps"):
-                return False
-            if class_name.startswith("wps"):
-                return False
-            return True
-        keywords = ("ppt", "powerpnt", "powerpoint", "screenclass")
-        return any(keyword in class_name for keyword in keywords)
-
-    def _presentation_target_category(self, hwnd: Optional[int]) -> str:
-        if not hwnd:
-            return "other"
-        class_name = self._presentation_window_class(hwnd)
-        top_hwnd = _user32_top_level_hwnd(hwnd)
-        top_class = self._presentation_window_class(top_hwnd) if top_hwnd else ""
-        if self._class_has_wps_presentation_signature(class_name) or self._class_has_wps_presentation_signature(top_class):
-            return "wps_ppt"
-        if self._class_has_wps_writer_signature(class_name) or self._class_has_wps_writer_signature(top_class):
-            return "wps_word"
-        if self._is_wps_slideshow_class(class_name) or self._is_wps_slideshow_class(top_class):
-            return "wps_ppt"
-        if self._is_word_like_class(class_name) or self._is_word_like_class(top_class):
-            return "ms_word"
-        process_name = self._window_process_name(top_hwnd or hwnd)
-        if process_name:
-            if process_name.startswith("wpp"):
-                return "wps_ppt"
-            if process_name.startswith("wps"):
-                return "wps_word"
-            if "powerpnt" in process_name:
-                return "ms_ppt"
-            if "winword" in process_name:
-                return "ms_word"
-        if self._class_has_ms_presentation_signature(class_name) or self._class_has_ms_presentation_signature(top_class):
-            return "ms_ppt"
-        return "other"
-
     def _is_presentation_category_allowed(self, category: str) -> bool:
         if not category or category == "other":
             return True
@@ -6141,33 +6460,6 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         if fallback and self._presentation_control_allowed(fallback, log=False):
             return fallback
         return None
-
-    def _is_word_like_class(self, class_name: str) -> bool:
-        if not class_name:
-            return False
-        if class_name in self._WORD_WINDOW_CLASSES:
-            return True
-        if class_name in self._WORD_CONTENT_CLASSES:
-            return True
-        if class_name in self._WORD_HOST_CLASSES:
-            return True
-        if class_name.startswith("_ww"):
-            return True
-        if "word" in class_name:
-            return True
-        if any(class_name.startswith(prefix) for prefix in self._WPS_WRITER_PREFIXES):
-            if any(excluded in class_name for excluded in self._WPS_WRITER_EXCLUDE_KEYWORDS):
-                return False
-            if any(keyword in class_name for keyword in self._WPS_WRITER_KEYWORDS):
-                return True
-        return False
-
-    def _is_wps_slideshow_class(self, class_name: str) -> bool:
-        if not class_name:
-            return False
-        if class_name in self._WPS_SLIDESHOW_CLASSES:
-            return True
-        return class_name.startswith("kwppshow")
 
     def _is_wps_slideshow_target(self, hwnd: Optional[int] = None) -> bool:
         if hwnd is None:
@@ -7020,27 +7312,8 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             for candidate in ordered:
                 if self._presentation_control_allowed(candidate, log=False):
                     return candidate
-        if _WNDENUMPROC is None:
-            return None
-        candidates: List[int] = []
-
-        def _enum_callback(hwnd: int, _l_param: int) -> int:
-            if hwnd == overlay_hwnd:
-                return True
-            if self._should_ignore_window(hwnd):
-                return True
-            if not _user32_is_window_visible(hwnd) or _user32_is_window_iconic(hwnd):
-                return True
-            rect = _user32_window_rect(hwnd)
-            if not rect or not self._rect_intersects_overlay(rect):
-                return True
-            candidates.append(int(hwnd))
-            return True
-
-        enum_proc = _WNDENUMPROC(_enum_callback)
-        try:
-            _USER32.EnumWindows(enum_proc, 0)
-        except Exception:
+        candidates = self._enumerate_overlay_candidate_windows(overlay_hwnd)
+        if candidates is None:
             return None
         for hwnd in candidates:
             if not self._fallback_is_candidate_window(hwnd):
@@ -7169,45 +7442,6 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             return focused
         finally:
             self._detach_from_target_thread(attach_pair)
-
-    def _attach_to_target_thread(self, hwnd: int) -> Optional[Tuple[int, int]]:
-        if _USER32 is None or hwnd == 0:
-            return None
-        target_thread = self._window_thread_id(hwnd)
-        if not target_thread:
-            return None
-        try:
-            current_thread = int(_USER32.GetCurrentThreadId())
-        except Exception:
-            current_thread = 0
-        if not current_thread or current_thread == target_thread:
-            return None
-        try:
-            attached = bool(_USER32.AttachThreadInput(current_thread, target_thread, True))
-        except Exception:
-            attached = False
-        return (current_thread, target_thread) if attached else None
-
-    def _detach_from_target_thread(self, pair: Optional[Tuple[int, int]]) -> None:
-        if _USER32 is None or not pair:
-            return
-        src, dst = pair
-        if not src or not dst or src == dst:
-            return
-        try:
-            _USER32.AttachThreadInput(src, dst, False)
-        except Exception:
-            pass
-
-    def _window_thread_id(self, hwnd: int) -> int:
-        if _USER32 is None or hwnd == 0:
-            return 0
-        pid = wintypes.DWORD()
-        try:
-            thread_id = int(_USER32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(pid)))
-        except Exception:
-            thread_id = 0
-        return thread_id
 
     def _is_target_window_valid(self, hwnd: int) -> bool:
         if win32gui is None:
@@ -8433,7 +8667,7 @@ class TTSManager(QObject):
 
 
 # ---------- 点名/计时 ----------
-class CountdownSettingsDialog(QDialog):
+class CountdownSettingsDialog(_EnsureOnScreenMixin, QDialog):
     """设置倒计时分钟和秒数的小窗口。"""
 
     def __init__(self, parent: Optional[QWidget], minutes: int, seconds: int) -> None:
@@ -8480,11 +8714,6 @@ class CountdownSettingsDialog(QDialog):
 
     def _accept(self) -> None:
         self.result = (self.minutes_spin.value(), self.seconds_spin.value()); self.accept()
-
-    def showEvent(self, event) -> None:  # type: ignore[override]
-        super().showEvent(event)
-        ensure_widget_within_screen(self)
-
 
 class ClickableFrame(QFrame):
     clicked = pyqtSignal()
@@ -11976,7 +12205,7 @@ class RollCallTimerWindow(QWidget):
 
 
 # ---------- 关于 ----------
-class AboutDialog(QDialog):
+class AboutDialog(_EnsureOnScreenMixin, QDialog):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("关于")
@@ -12011,11 +12240,6 @@ class AboutDialog(QDialog):
             QDesktopServices.openUrl(QUrl(url))
         except Exception:
             pass
-
-    def showEvent(self, event) -> None:  # type: ignore[override]
-        super().showEvent(event)
-        ensure_widget_within_screen(self)
-
 
 # ---------- 数据 ----------
 _ENCRYPTED_MAGIC = b"CTS1"
@@ -12387,7 +12611,7 @@ def load_student_data(parent: Optional[QWidget]) -> Optional[StudentWorkbook]:
 
 
 # ---------- 启动器 ----------
-class LauncherBubble(QWidget):
+class LauncherBubble(_EnsureOnScreenMixin, QWidget):
     """启动器缩小时显示的悬浮圆球，负责发出恢复指令。"""
 
     restore_requested = pyqtSignal()
@@ -12494,11 +12718,6 @@ class LauncherBubble(QWidget):
                 self.position_changed.emit(self.pos())
             self._dragging = False
         super().mouseReleaseEvent(event)
-
-    def showEvent(self, event) -> None:  # type: ignore[override]
-        super().showEvent(event)
-        ensure_widget_within_screen(self)
-
 
 class LauncherWindow(QWidget):
     def __init__(self, settings_manager: SettingsManager, student_workbook: Optional[StudentWorkbook]) -> None:

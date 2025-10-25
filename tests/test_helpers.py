@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import dataclasses
 import enum
 import math
 import contextlib
@@ -38,6 +39,7 @@ def _load_helper_module() -> types.ModuleType:
             "Iterable": Iterable,
             "Set": Set,
             "Mapping": Mapping,
+            "dataclass": dataclasses.dataclass,
             "Enum": enum.Enum,
             "math": math,
             "singledispatch": singledispatch,
@@ -303,6 +305,32 @@ def test_presentation_category_handles_wps_hosted_screenclass() -> None:
     assert _compute_category("screenclass", "", "wps.exe") == "wps_ppt"
 
 
+def test_presentation_category_accepts_non_string_hints(tmp_path: Path) -> None:
+    path = tmp_path / "WPP.EXE"
+    path.write_text("dummy")
+    assert (
+        _compute_category(b"KwppShowFrameClass", memoryview(b"kwpsframeclass"), path)
+        == "wps_ppt"
+    )
+    assert _compute_category(bytearray(), None, None) == "other"
+
+
+def test_prefix_keyword_classifier_normalizes_tokens() -> None:
+    classifier = helpers._PresentationWindowMixin._PrefixKeywordClassifier(  # type: ignore[attr-defined]
+        prefixes=[" WPP", "Wpp", "kwp"],
+        keywords=["Show", "SHOW"],
+        excludes=["Beta", "BETA"],
+        canonical=["KwppsFrame"],
+    )
+    assert classifier.prefixes == ("wpp", "kwp")
+    assert classifier.keywords == ("show",)
+    assert classifier.excludes == ("beta",)
+    assert "kwppsframe" in classifier.canonical
+    assert classifier.has_signature("KWPPSFRAME") is True
+    assert classifier.has_signature(" wppBetaWindow ") is False
+    assert classifier.has_signature("wpp main show window") is True
+
+
 class _MixinHarness(helpers._PresentationWindowMixin):  # type: ignore[attr-defined]
     def _overlay_widget(self):  # pragma: no cover - interface requirement
         return None
@@ -316,3 +344,62 @@ def test_is_wps_writer_process_requires_writer_hints() -> None:
         harness._is_wps_writer_process("wps.exe", "screenclass", "kwppshowframeclass")
         is False
     )
+
+
+def test_is_wps_presentation_process_detects_ms_screenclass() -> None:
+    harness = _MixinHarness()
+    assert harness._is_wps_presentation_process("wps.exe", "screenclass") is True
+
+
+def test_summarize_wps_process_hints_collects_flags() -> None:
+    harness = _MixinHarness()
+    normalized = harness._normalized_class_hints(
+        "KwppShowFrameClass", "kwpsframeclass", "pptviewwndclass"
+    )
+    hints = harness._summarize_wps_process_hints(normalized)
+    assert hints.classes == normalized
+    assert hints.has_slideshow is True
+    assert hints.has_wps_presentation_signature is True
+    assert hints.has_ms_presentation_signature is True
+    assert hints.has_writer_signature is True
+
+
+def test_summarize_wps_process_hints_ignores_predicate_errors() -> None:
+    class _FlakyHarness(_MixinHarness):
+        def _class_has_wps_presentation_signature(self, class_name: str) -> bool:
+            if "boom" in class_name:
+                raise RuntimeError("predicate failure")
+            return super()._class_has_wps_presentation_signature(class_name)
+
+    harness = _FlakyHarness()
+    normalized = harness._normalized_class_hints("BoomWindow", "kwpsframeclass")
+    hints = harness._summarize_wps_process_hints(normalized)
+    assert hints.classes == normalized
+    assert hints.has_wps_presentation_signature is False
+    assert hints.has_writer_signature is True
+
+
+def test_summarize_wps_process_hints_logs_with_fallback_logger() -> None:
+    class _FlakyHarness(_MixinHarness):
+        def _class_has_wps_presentation_signature(self, class_name: str) -> bool:
+            if "boom" in class_name:
+                raise RuntimeError("predicate failure")
+            return super()._class_has_wps_presentation_signature(class_name)
+
+    harness = _FlakyHarness()
+    normalized = harness._normalized_class_hints("BoomWindow", "kwpsframeclass")
+    original_logger = getattr(helpers, "logger", None)
+    try:
+        helpers.logger = object()  # type: ignore[assignment]
+        hints = harness._summarize_wps_process_hints(normalized)
+    finally:
+        if original_logger is None:
+            try:
+                del helpers.logger
+            except AttributeError:
+                pass
+        else:
+            helpers.logger = original_logger
+    assert hints.classes == normalized
+    assert hints.has_wps_presentation_signature is False
+    assert hints.has_writer_signature is True
