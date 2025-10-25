@@ -237,7 +237,14 @@ def _stub_is_wps_presentation_process(process_name: str, *classes: str) -> bool:
     if "wpspresentation" in lowered:
         return True
     if lowered.startswith("wps"):
-        return any(_stub_has_wps_presentation_signature(cls) for cls in classes if cls)
+        for cls in classes:
+            if not cls:
+                continue
+            lowered_cls = cls.lower()
+            if lowered_cls in {"screenclass", "kwppshowframeclass", "kwppshowframe", "kwppshowwndclass"}:
+                return True
+            if _stub_has_wps_presentation_signature(cls):
+                return True
     return False
 
 
@@ -247,11 +254,19 @@ def _stub_is_wps_writer_process(process_name: str, *classes: str) -> bool:
         return False
     if _stub_is_wps_presentation_process(process_name, *classes):
         return False
+    if "wpswriter" in lowered:
+        return True
     if any(_stub_has_wps_writer_signature(cls) for cls in classes if cls):
         return True
-    if lowered.startswith("wps"):
-        return True
-    return "wpswriter" in lowered
+    if not lowered.startswith("wps"):
+        return False
+    for cls in classes:
+        if not cls:
+            continue
+        lowered_cls = cls.lower()
+        if lowered_cls in {"screenclass", "kwppshowframeclass", "kwppshowframe", "kwppshowwndclass"}:
+            return False
+    return False
 
 
 def _compute_category(class_name: str, top_class: str, process_name: str) -> str:
@@ -282,3 +297,22 @@ def test_presentation_category_identifies_wps_writer() -> None:
 
 def test_presentation_category_detects_ms_powerpoint() -> None:
     assert _compute_category("screenclass", "", "powerpnt.exe") == "ms_ppt"
+
+
+def test_presentation_category_handles_wps_hosted_screenclass() -> None:
+    assert _compute_category("screenclass", "", "wps.exe") == "wps_ppt"
+
+
+class _MixinHarness(helpers._PresentationWindowMixin):  # type: ignore[attr-defined]
+    def _overlay_widget(self):  # pragma: no cover - interface requirement
+        return None
+
+
+def test_is_wps_writer_process_requires_writer_hints() -> None:
+    harness = _MixinHarness()
+    assert harness._is_wps_writer_process("wpswriter.exe", "") is True
+    assert harness._is_wps_writer_process("wps.exe", "kwpsframeclass") is True
+    assert (
+        harness._is_wps_writer_process("wps.exe", "screenclass", "kwppshowframeclass")
+        is False
+    )

@@ -3784,12 +3784,14 @@ class _PresentationWindowMixin:
             return False
         if self._is_wps_presentation_process(normalized, *classes):
             return False
-        if any(self._class_has_wps_writer_signature(cls) for cls in classes if cls):
-            return True
-        if normalized.startswith("wps"):
-            return True
         if "wpswriter" in normalized:
             return True
+        if any(self._class_has_wps_writer_signature(cls) for cls in classes if cls):
+            return True
+        if not normalized.startswith("wps"):
+            return False
+        if any(self._class_indicates_slideshow(cls) for cls in classes if cls):
+            return False
         return False
 
     def _class_has_wps_writer_signature(self, class_name: str) -> bool:
@@ -6722,9 +6724,21 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         effective_target = target_hwnd or self._resolve_control_target()
         if not target_hwnd and effective_target:
             target_hwnd = effective_target
-        wps_override = self._find_wps_slideshow_target()
+        target_category = (
+            self._presentation_target_category(target_hwnd)
+            if target_hwnd
+            else ""
+        )
+        allow_wps_override = (
+            not target_hwnd
+            or target_category in {"", "other", "wps_ppt"}
+            or self._is_wps_slideshow_target(target_hwnd)
+        )
+        wps_override: Optional[int] = None
+        if allow_wps_override:
+            wps_override = self._find_wps_slideshow_target()
         ms_override: Optional[int] = None
-        if not wps_override:
+        if not wps_override and (not target_hwnd or target_category in {"", "other", "ms_ppt"}):
             try:
                 ms_override = self._find_ms_slideshow_target()
             except Exception:
@@ -6732,9 +6746,11 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         if wps_override:
             target_hwnd = wps_override
             effective_target = wps_override
+            target_category = "wps_ppt"
         elif ms_override:
             target_hwnd = ms_override
             effective_target = ms_override
+            target_category = "ms_ppt"
         target_class = self._presentation_window_class(target_hwnd) if target_hwnd else ""
         if effective_target and not self._presentation_control_allowed(effective_target):
             if originating_key is not None:
@@ -6762,9 +6778,13 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             return
         is_word_target = self._is_word_like_class(target_class)
         category = (
-            self._presentation_target_category(effective_target)
-            if effective_target
-            else "other"
+            target_category
+            if target_category
+            else (
+                self._presentation_target_category(effective_target)
+                if effective_target
+                else "other"
+            )
         )
         top_for_process = _user32_top_level_hwnd(effective_target) if effective_target else 0
         process_name = ""
