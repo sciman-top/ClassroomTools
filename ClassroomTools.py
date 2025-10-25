@@ -42,6 +42,7 @@ from typing import (
     Tuple,
     Union,
     Literal,
+    FrozenSet,
 )
 
 logger = logging.getLogger(__name__)
@@ -176,6 +177,26 @@ def _coerce_bool_from_str(value: str) -> object:
     if math.isnan(number):
         return _BooleanParseResult.UNRESOLVED
     return bool(number)
+
+
+def _normalize_class_token(value: Any) -> str:
+    """Normalize potential class-name hints to lowercase tokens."""
+
+    if not value:
+        return ""
+    if isinstance(value, str):
+        text = value
+    elif isinstance(value, (bytes, bytearray, memoryview)):
+        try:
+            text = bytes(value).decode("utf-8", "ignore")
+        except Exception:
+            return ""
+    else:
+        try:
+            text = str(value)
+        except Exception:
+            return ""
+    return text.strip().casefold()
 
 
 def parse_bool(value: Any, default: bool = False) -> bool:
@@ -3634,16 +3655,7 @@ class _PresentationWindowMixin:
 
         @staticmethod
         def _normalize(value: Any) -> str:
-            if not value:
-                return ""
-            if isinstance(value, str):
-                text = value
-            else:
-                try:
-                    text = str(value)
-                except Exception:
-                    return ""
-            return text.strip().casefold()
+            return _normalize_class_token(value)
 
         def has_signature(self, class_name: Any) -> bool:
             normalized = self._normalize(class_name)
@@ -3662,82 +3674,104 @@ class _PresentationWindowMixin:
                 return any(keyword in normalized for keyword in self.keywords)
             return False
 
-    _WPS_FRAME_CLASSES: Set[str] = frozenset(
-        {"kwpsframeclass", "kwpsmainframe", "wpsframeclass", "wpsmainframe"}
+    class _ClassTokens:
+        __slots__ = ()
+
+        @staticmethod
+        def freeze(*groups: Any) -> FrozenSet[str]:
+            tokens: Set[str] = set()
+            normalizer = _normalize_class_token
+            for group in groups:
+                if isinstance(group, (str, bytes)) or not hasattr(group, "__iter__"):
+                    normalized = normalizer(group)
+                    if normalized:
+                        tokens.add(normalized)
+                    continue
+                for value in group:
+                    normalized = normalizer(value)
+                    if normalized:
+                        tokens.add(normalized)
+            return frozenset(tokens)
+
+    _WPS_FRAME_CLASSES: FrozenSet[str] = _ClassTokens.freeze(
+        "kwpsframeclass", "kwpsmainframe", "wpsframeclass", "wpsmainframe"
     )
-    _WPS_DOC_VIEW_CLASSES: Set[str] = frozenset({"kwpsdocview", "wpsdocview"})
-    _WPS_VIEW_CLASSES: Set[str] = frozenset(
-        {"kwpsviewclass", "wpsviewclass", "kwpspageview", "wpspageview"}
+    _WPS_DOC_VIEW_CLASSES: FrozenSet[str] = _ClassTokens.freeze(
+        "kwpsdocview", "wpsdocview"
     )
-    _WORD_SHELL_CLASSES: Set[str] = frozenset(
-        {"opusapp", "nuidocumentwindow", "netuihwnd", "documentwindow", "mdiclient"}
+    _WPS_VIEW_CLASSES: FrozenSet[str] = _ClassTokens.freeze(
+        "kwpsviewclass", "wpsviewclass", "kwpspageview", "wpspageview"
     )
-    _WORD_CONTENT_CORE_CLASSES: Set[str] = frozenset(
-        {"worddocument", "paneclassdc", "_wwg", "_wwb"}
+    _WORD_SHELL_CLASSES: FrozenSet[str] = _ClassTokens.freeze(
+        "opusapp", "nuidocumentwindow", "netuihwnd", "documentwindow", "mdiclient"
     )
-    _WORD_HOST_CLASSES: Set[str] = frozenset(
-        set(_WORD_SHELL_CLASSES).union(_WPS_FRAME_CLASSES)
+    _WORD_CONTENT_CORE_CLASSES: FrozenSet[str] = _ClassTokens.freeze(
+        "worddocument", "paneclassdc", "_wwg", "_wwb"
     )
-    _WORD_CONTENT_CLASSES: Set[str] = frozenset(
-        set(_WORD_CONTENT_CORE_CLASSES)
-        .union(_WPS_DOC_VIEW_CLASSES)
-        .union(_WPS_VIEW_CLASSES)
+    _WORD_HOST_CLASSES: FrozenSet[str] = _ClassTokens.freeze(
+        _WORD_SHELL_CLASSES, _WPS_FRAME_CLASSES
     )
-    _WORD_WINDOW_CLASSES: Set[str] = frozenset(
-        set(_WORD_HOST_CLASSES).union(_WORD_CONTENT_CORE_CLASSES)
+    _WORD_CONTENT_CLASSES: FrozenSet[str] = _ClassTokens.freeze(
+        _WORD_CONTENT_CORE_CLASSES, _WPS_DOC_VIEW_CLASSES, _WPS_VIEW_CLASSES
     )
-    _KNOWN_PRESENTATION_CLASSES: Set[str] = {
-        "screenclass",
-        "pptframeclass",
-        "pptviewwndclass",
-        "powerpntframeclass",
-        "powerpointframeclass",
-        "acrobatsdiwindow",
-        "kwppframeclass",
-        "kwppmainframe",
-        "nuidocumentwindow",
-        "netuihwnd",
-        "mdiclient",
-        "documentwindow",
-        "_wwg",
-        "_wwb",
-        "worddocument",
-        "paneclassdc",
-    }
-    _KNOWN_PRESENTATION_CLASSES.update(_WORD_HOST_CLASSES)
-    _KNOWN_PRESENTATION_CLASSES.update(_WPS_DOC_VIEW_CLASSES)
+    _WORD_WINDOW_CLASSES: FrozenSet[str] = _ClassTokens.freeze(
+        _WORD_HOST_CLASSES, _WORD_CONTENT_CORE_CLASSES
+    )
+    _KNOWN_PRESENTATION_CLASSES: FrozenSet[str] = _ClassTokens.freeze(
+        (
+            "screenclass",
+            "pptframeclass",
+            "pptviewwndclass",
+            "powerpntframeclass",
+            "powerpointframeclass",
+            "acrobatsdiwindow",
+            "kwppframeclass",
+            "kwppmainframe",
+            "nuidocumentwindow",
+            "netuihwnd",
+            "mdiclient",
+            "documentwindow",
+            "_wwg",
+            "_wwb",
+            "worddocument",
+            "paneclassdc",
+        ),
+        _WORD_HOST_CLASSES,
+        _WPS_DOC_VIEW_CLASSES,
+    )
     _KNOWN_PRESENTATION_PREFIXES: Tuple[str, ...] = (
         ("kwpp", "kwps", "wpsframe", "wpsmain") if win32gui is not None else tuple()
     )
-    _SLIDESHOW_PRIORITY_CLASSES: Set[str] = {"screenclass"}
-    _SLIDESHOW_SECONDARY_CLASSES: Set[str] = {
+    _SLIDESHOW_PRIORITY_CLASSES: FrozenSet[str] = _ClassTokens.freeze("screenclass")
+    _SLIDESHOW_SECONDARY_CLASSES: FrozenSet[str] = _ClassTokens.freeze(
         "pptviewwndclass",
         "kwppshowframeclass",
         "kwppshowframe",
         "kwppshowwndclass",
         "kwpsshowframe",
-    }
-    _WPS_SLIDESHOW_CLASSES: Set[str] = {
+    )
+    _WPS_SLIDESHOW_CLASSES: FrozenSet[str] = _ClassTokens.freeze(
         "kwppshowframeclass",
         "kwppshowframe",
         "kwppshowwndclass",
         "kwpsshowframe",
         "wpsshowframe",
-    }
-    _PRESENTATION_EDITOR_CLASSES: Set[str] = frozenset(
-        {
+    )
+    _PRESENTATION_EDITOR_CLASSES: FrozenSet[str] = _ClassTokens.freeze(
+        (
             "pptframeclass",
             "powerpntframeclass",
             "powerpointframeclass",
             "kwppframeclass",
             "kwppmainframe",
-        }
-    ).union(_WPS_FRAME_CLASSES)
+        ),
+        _WPS_FRAME_CLASSES,
+    )
     _WPS_WRITER_CLASSIFIER = _PrefixKeywordClassifier(
         prefixes=("kwps", "wps"),
         keywords=("frame", "view", "doc", "page"),
         excludes=("show", "slideshow"),
-        canonical=_WPS_DOC_VIEW_CLASSES.union(_WPS_FRAME_CLASSES),
+        canonical=_ClassTokens.freeze(_WPS_DOC_VIEW_CLASSES, _WPS_FRAME_CLASSES),
     )
 
     @classmethod
@@ -4062,6 +4096,15 @@ class _PresentationWindowMixin:
                         exc_info=True,
                     )
                 return False
+
+    def _toolbar_widget(self) -> Optional[QWidget]:
+        return self._overlay_child_widget("toolbar")
+
+    def _photo_overlay_widget(self) -> Optional[QWidget]:
+        return self._overlay_child_widget("_photo_overlay")
+
+    def _overlay_hwnd(self) -> int:
+        return self._widget_hwnd(self._overlay_widget())
 
     def _toolbar_widget(self) -> Optional[QWidget]:
         return self._overlay_child_widget("toolbar")

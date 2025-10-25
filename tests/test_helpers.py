@@ -54,6 +54,7 @@ def _load_helper_module() -> types.ModuleType:
         "_FALSE_STRINGS",
         "_BooleanParseResult",
         "_coerce_bool",
+        "_normalize_class_token",
         "parse_bool",
         "_ensure_directory",
         "_ensure_writable_directory",
@@ -329,6 +330,20 @@ def test_prefix_keyword_classifier_normalizes_tokens() -> None:
     assert classifier.has_signature("KWPPSFRAME") is True
     assert classifier.has_signature(" wppBetaWindow ") is False
     assert classifier.has_signature("wpp main show window") is True
+
+
+def test_class_tokens_freeze_normalizes_inputs() -> None:
+    tokens = helpers._PresentationWindowMixin._ClassTokens.freeze(  # type: ignore[attr-defined]
+        [" KWPPShowFrameClass "],
+        {"KwpsDocView", "kwpsdocview"},
+        b"WPSMainFrame",
+        None,
+    )
+    assert tokens == {
+        "kwppshowframeclass",
+        "kwpsdocview",
+        "wpsmainframe",
+    }
 
 
 class _MixinHarness(helpers._PresentationWindowMixin):  # type: ignore[attr-defined]
