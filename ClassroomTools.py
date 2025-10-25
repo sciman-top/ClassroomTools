@@ -3846,6 +3846,8 @@ class _PresentationWindowMixin:
             return True
         if any(self._class_has_wps_presentation_signature(cls) for cls in normalized_classes):
             return True
+        if any(self._class_has_ms_presentation_signature(cls) for cls in normalized_classes):
+            return True
         return False
 
     def _is_wps_writer_process(self, process_name: str, *classes: str) -> bool:
@@ -3946,21 +3948,6 @@ class _PresentationWindowMixin:
         except Exception:
             thread_id = 0
         return thread_id
-
-    def _toolbar_widget(self) -> Optional[QWidget]:
-        return self._overlay_child_widget("toolbar")
-
-    def _photo_overlay_widget(self) -> Optional[QWidget]:
-        return self._overlay_child_widget("_photo_overlay")
-
-    def _overlay_hwnd(self) -> int:
-        return self._widget_hwnd(self._overlay_widget())
-
-    def _toolbar_hwnd(self) -> int:
-        return self._widget_hwnd(self._toolbar_widget())
-
-    def _photo_overlay_hwnd(self) -> int:
-        return self._widget_hwnd(self._photo_overlay_widget())
 
     def _toolbar_widget(self) -> Optional[QWidget]:
         return self._overlay_child_widget("toolbar")

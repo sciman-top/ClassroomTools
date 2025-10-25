@@ -342,3 +342,8 @@ def test_is_wps_writer_process_requires_writer_hints() -> None:
         harness._is_wps_writer_process("wps.exe", "screenclass", "kwppshowframeclass")
         is False
     )
+
+
+def test_is_wps_presentation_process_detects_ms_screenclass() -> None:
+    harness = _MixinHarness()
+    assert harness._is_wps_presentation_process("wps.exe", "screenclass") is True
