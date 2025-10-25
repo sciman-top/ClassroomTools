@@ -3544,20 +3544,6 @@ class _PresentationWindowMixin:
     _WPS_WRITER_PREFIXES: Tuple[str, ...] = ("kwps", "wps")
     _WPS_WRITER_KEYWORDS: Tuple[str, ...] = ("frame", "view", "doc", "page")
     _WPS_WRITER_EXCLUDE_KEYWORDS: Tuple[str, ...] = ("show", "slideshow")
-    _CATEGORY_PRIORITY: Mapping[str, int] = {
-        "wps_ppt": 400,
-        "ms_ppt": 300,
-        "ms_word": 200,
-        "wps_word": 100,
-        "other": 0,
-    }
-
-    def _store_category_target(self, category: str, hwnd: Optional[int]) -> None:
-        if not category or category == "other" or not hwnd:
-            return
-        cache = getattr(self, "_category_target_cache", None)
-        if isinstance(cache, dict):
-            cache[category] = int(hwnd)
 
     def _overlay_widget(self) -> Optional[QWidget]:
         raise NotImplementedError
@@ -5061,14 +5047,9 @@ class _PresentationForwarder(_PresentationWindowMixin):
             return True
         return size_match
 
-    def _detect_presentation_window(
-        self,
-        preferred_category: Optional[str] = None,
-    ) -> Optional[int]:
+    def _detect_presentation_window(self) -> Optional[int]:
         if win32gui is None:
-            return self._fallback_detect_presentation_window_user32(
-                preferred_category=self._preferred_control_category()
-            )
+            return self._fallback_detect_presentation_window_user32()
         overlay_hwnd = int(self.overlay.winId()) if self.overlay.winId() else 0
         try:
             foreground = win32gui.GetForegroundWindow()
@@ -5218,7 +5199,6 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         paint_settings = self.settings_manager.load_settings().get("Paint", {})
         self._presentation_control_flags: Dict[str, bool] = {}
         self._update_presentation_control_flags(paint_settings)
-        self._category_target_cache: Dict[str, int] = {}
         style_value = paint_settings.get("brush_style", _DEFAULT_PEN_STYLE.value)
         try:
             self.pen_style = PenStyle(style_value)
@@ -5827,115 +5807,33 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         keywords = ("ppt", "powerpnt", "powerpoint", "screenclass")
         return any(keyword in class_name for keyword in keywords)
 
-    def _preferred_control_category(self) -> Optional[str]:
-        hwnd = getattr(self, "_last_target_hwnd", None)
-        if hwnd:
-            try:
-                return self._presentation_target_category(hwnd)
-            except Exception:
-                return None
-        return None
-
-    def _prioritize_control_candidates(
-        self,
-        handles: Iterable[int],
-        preferred_category: Optional[str] = None,
-    ) -> List[int]:
-        resolved_preference = preferred_category or self._preferred_control_category()
-        preferred_entries: List[Tuple[int, int, int]] = []
-        fallback_entries: List[Tuple[int, int, int]] = []
-        seen: Set[int] = set()
-        for index, hwnd in enumerate(handles):
-            if not hwnd or hwnd in seen:
-                continue
-            seen.add(hwnd)
-            try:
-                category = self._presentation_target_category(hwnd)
-            except Exception:
-                continue
-            if not self._presentation_control_allowed(hwnd, log=False):
-                continue
-            base_priority = int(self._CATEGORY_PRIORITY.get(category, 0)) * 100
-            score = base_priority
-            if resolved_preference and category == resolved_preference:
-                score += 100_000
-            try:
-                class_name = self._presentation_window_class(hwnd)
-            except Exception:
-                class_name = ""
-            top_hwnd = _user32_top_level_hwnd(hwnd)
-            top_class = self._presentation_window_class(top_hwnd) if top_hwnd else ""
-            if category == "wps_ppt":
-                is_slideshow = False
-                try:
-                    is_slideshow = self._is_wps_slideshow_class(class_name) or (
-                        bool(top_class) and self._is_wps_slideshow_class(top_class)
-                    )
-                except Exception:
-                    is_slideshow = False
-                if is_slideshow:
-                    score += 10_000
-                else:
-                    score -= 5_000
-            elif category == "ms_ppt":
-                is_slideshow = False
-                try:
-                    is_slideshow = self._is_ms_slideshow_target(hwnd)
-                except Exception:
-                    is_slideshow = False
-                if is_slideshow:
-                    score += 5_000
-            entry = (score, -index, hwnd)
-            if resolved_preference and category == resolved_preference:
-                preferred_entries.append(entry)
-            else:
-                fallback_entries.append(entry)
-        preferred_entries.sort(reverse=True)
-        fallback_entries.sort(reverse=True)
-        ordered = [hwnd for _, _, hwnd in preferred_entries]
-        ordered.extend(hwnd for _, _, hwnd in fallback_entries)
-        return ordered
-
     def _presentation_target_category(self, hwnd: Optional[int]) -> str:
         if not hwnd:
             return "other"
         class_name = self._presentation_window_class(hwnd)
         top_hwnd = _user32_top_level_hwnd(hwnd)
         top_class = self._presentation_window_class(top_hwnd) if top_hwnd else ""
-        category = "other"
-        store_hwnd = hwnd
-        if self._is_wps_slideshow_target(hwnd):
-            category = "wps_ppt"
-        elif top_hwnd and self._is_wps_slideshow_target(top_hwnd):
-            category = "wps_ppt"
-            store_hwnd = top_hwnd
-        elif self._class_has_wps_presentation_signature(class_name) or self._class_has_wps_presentation_signature(top_class):
-            category = "wps_ppt"
-        elif self._class_has_wps_writer_signature(class_name) or self._class_has_wps_writer_signature(top_class):
-            category = "wps_word"
-        elif self._is_wps_slideshow_class(class_name) or self._is_wps_slideshow_class(top_class):
-            category = "wps_ppt"
-        elif self._is_word_like_class(class_name) or self._is_word_like_class(top_class):
-            category = "ms_word"
+        if self._class_has_wps_presentation_signature(class_name) or self._class_has_wps_presentation_signature(top_class):
+            return "wps_ppt"
+        if self._class_has_wps_writer_signature(class_name) or self._class_has_wps_writer_signature(top_class):
+            return "wps_word"
+        if self._is_wps_slideshow_class(class_name) or self._is_wps_slideshow_class(top_class):
+            return "wps_ppt"
+        if self._is_word_like_class(class_name) or self._is_word_like_class(top_class):
+            return "ms_word"
         process_name = self._window_process_name(top_hwnd or hwnd)
         if process_name:
             if process_name.startswith("wpp"):
-                category = "wps_ppt"
-                store_hwnd = top_hwnd or hwnd
-            elif process_name.startswith("wps"):
-                category = "wps_word"
-            elif "powerpnt" in process_name:
-                category = "ms_ppt"
-                store_hwnd = top_hwnd or hwnd
-            elif "winword" in process_name:
-                category = "ms_word"
-        if category == "other":
-            if self._class_has_ms_presentation_signature(class_name) or self._class_has_ms_presentation_signature(top_class):
-                category = "ms_ppt"
-                store_hwnd = top_hwnd or hwnd
-        if category != "other":
-            self._store_category_target(category, store_hwnd)
-        return category
+                return "wps_ppt"
+            if process_name.startswith("wps"):
+                return "wps_word"
+            if "powerpnt" in process_name:
+                return "ms_ppt"
+            if "winword" in process_name:
+                return "ms_word"
+        if self._class_has_ms_presentation_signature(class_name) or self._class_has_ms_presentation_signature(top_class):
+            return "ms_ppt"
+        return "other"
 
     def _is_presentation_category_allowed(self, category: str) -> bool:
         if not category or category == "other":
@@ -5996,12 +5894,7 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             if callable(detector):
                 sources.append(detector)  # type: ignore[arg-type]
         sources.append(self._resolve_presentation_target)
-        sources.append(
-            functools.partial(
-                self._fallback_detect_presentation_window_user32,
-                preferred_category="wps_ppt",
-            )
-        )
+        sources.append(self._fallback_detect_presentation_window_user32)
         if _USER32 is not None:
             sources.append(lambda: _user32_get_foreground_window())
         for getter in sources:
@@ -6049,12 +5942,7 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             if callable(detector):
                 sources.append(detector)  # type: ignore[arg-type]
         sources.append(self._resolve_presentation_target)
-        sources.append(
-            functools.partial(
-                self._fallback_detect_presentation_window_user32,
-                preferred_category="ms_ppt",
-            )
-        )
+        sources.append(self._fallback_detect_presentation_window_user32)
         if _USER32 is not None:
             sources.append(lambda: _user32_get_foreground_window())
         for getter in sources:
@@ -6229,54 +6117,21 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             except Exception:
                 pass
 
-    def _get_cached_category_target(self, category: Optional[str]) -> Optional[int]:
-        if not category or category == "other":
-            return None
-        cache = getattr(self, "_category_target_cache", None)
-        if not isinstance(cache, dict):
-            return None
-        hwnd = cache.get(category)
-        if not hwnd:
-            return None
-        if not self._presentation_control_allowed(hwnd, log=False):
-            cache.pop(category, None)
-            return None
-        if not self._is_target_window_valid(hwnd):
-            cache.pop(category, None)
-            return None
-        return hwnd
-
-    def _resolve_control_target(self, preferred_category: Optional[str] = None) -> Optional[int]:
+    def _resolve_control_target(self) -> Optional[int]:
         target = self._current_navigation_target()
-        if target:
-            if not self._presentation_control_allowed(target, log=False):
-                target = None
-            elif preferred_category:
-                current_category = self._presentation_target_category(target)
-                if current_category != preferred_category:
-                    target = None
+        if target and not self._presentation_control_allowed(target, log=False):
+            target = None
         if target:
             return target
-        cached = self._get_cached_category_target(preferred_category)
-        if cached:
-            return cached
         if self._forwarder is not None:
             try:
                 candidate = self._forwarder.get_presentation_target()
             except Exception:
                 candidate = None
             if candidate and not self._presentation_control_allowed(candidate, log=False):
-                candidate = None
-            if candidate and preferred_category:
-                candidate_category = self._presentation_target_category(candidate)
-                if candidate_category != preferred_category:
-                    candidate = None
-            if candidate:
-                return candidate
-        preferred = preferred_category or self._preferred_control_category()
-        fallback = self._fallback_detect_presentation_window_user32(
-            preferred_category=preferred
-        )
+                return None
+            return candidate
+        fallback = self._fallback_detect_presentation_window_user32()
         if fallback and self._presentation_control_allowed(fallback, log=False):
             return fallback
         return None
@@ -6393,36 +6248,7 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         effective_target = target_hwnd or self._resolve_control_target()
         if not target_hwnd and effective_target:
             target_hwnd = effective_target
-        base_target = target_hwnd or effective_target
-        base_category = (
-            self._presentation_target_category(base_target)
-            if base_target
-            else "other"
-        )
-        if base_category in {"ms_word", "wps_word"}:
-            preferred_target = self._resolve_control_target(preferred_category=base_category)
-            if preferred_target:
-                target_hwnd = preferred_target
-                effective_target = preferred_target
-                base_target = preferred_target
-                base_category = self._presentation_target_category(preferred_target)
-        allow_wps_override = base_category not in {"ms_word", "wps_word"}
-        if not allow_wps_override and _USER32 is not None:
-            try:
-                foreground = _user32_get_foreground_window()
-            except Exception:
-                foreground = 0
-            if foreground:
-                candidates = (
-                    self._normalize_presentation_target(foreground),
-                    foreground,
-                    _user32_top_level_hwnd(foreground),
-                )
-                for candidate in candidates:
-                    if candidate and self._is_wps_slideshow_target(candidate):
-                        allow_wps_override = True
-                        break
-        wps_override = self._find_wps_slideshow_target() if allow_wps_override else None
+        wps_override = self._find_wps_slideshow_target()
         ms_override: Optional[int] = None
         if not wps_override:
             try:
@@ -6432,22 +6258,9 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         if wps_override:
             target_hwnd = wps_override
             effective_target = wps_override
-            try:
-                if self._presentation_control_allowed(wps_override, log=False):
-                    self._last_target_hwnd = wps_override
-            except Exception:
-                pass
-            self._store_category_target("wps_ppt", wps_override)
-            forwarder = getattr(self, "_forwarder", None)
-            if forwarder is not None:
-                try:
-                    forwarder._last_target_hwnd = wps_override  # type: ignore[attr-defined]
-                except Exception:
-                    pass
         elif ms_override:
             target_hwnd = ms_override
             effective_target = ms_override
-            self._store_category_target("ms_ppt", ms_override)
         target_class = self._presentation_window_class(target_hwnd) if target_hwnd else ""
         if effective_target and not self._presentation_control_allowed(effective_target):
             if originating_key is not None:
@@ -6504,9 +6317,7 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                 suppress_focus_restore=True,
                 persist=persist_hold,
             )
-            self._focus_presentation_window_fallback(
-                preferred_category="ms_ppt"
-            )
+            self._focus_presentation_window_fallback()
             if effective_target:
                 try:
                     self._last_target_hwnd = effective_target
@@ -6529,9 +6340,7 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                 suppress_focus_restore=True,
                 persist=persist_hold,
             )
-            self._focus_presentation_window_fallback(
-                preferred_category=category
-            )
+            self._focus_presentation_window_fallback()
             if effective_target:
                 try:
                     self._last_target_hwnd = effective_target
@@ -6590,10 +6399,7 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                     for candidate in candidates:
                         if not candidate:
                             continue
-                        success = self._dispatch_virtual_key(
-                            candidate,
-                            preferred_category=category,
-                        )
+                        success = self._dispatch_virtual_key(candidate)
                         if success:
                             current_target = self._current_navigation_target()
                             current_class = (
@@ -6633,12 +6439,7 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                 for candidate in doc_candidates:
                     if not candidate:
                         continue
-                    if self._dispatch_virtual_key(
-                        candidate,
-                        preferred_category="wps_word"
-                        if category == "wps_word"
-                        else "ms_word",
-                    ):
+                    if self._dispatch_virtual_key(candidate):
                         success = True
                         break
             self._pending_tool_restore = None
@@ -6677,35 +6478,9 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         try:
             handled = False
             target_hwnd = self._resolve_control_target()
-            target_category = (
-                self._presentation_target_category(target_hwnd)
-                if target_hwnd
-                else "other"
-            )
-            if target_category in {"ms_word", "wps_word"}:
-                preferred_hwnd = self._resolve_control_target(preferred_category=target_category)
-                if preferred_hwnd:
-                    target_hwnd = preferred_hwnd
-                    target_category = self._presentation_target_category(target_hwnd)
-            if target_category not in {"ms_word", "wps_word"}:
-                slideshow_target = self._find_wps_slideshow_target()
-                if slideshow_target and slideshow_target != target_hwnd:
-                    target_hwnd = slideshow_target
-                    target_category = "wps_ppt"
-                    try:
-                        if self._presentation_control_allowed(slideshow_target, log=False):
-                            self._last_target_hwnd = slideshow_target
-                    except Exception:
-                        pass
-                    forwarder = getattr(self, "_forwarder", None)
-                    if forwarder is not None:
-                        try:
-                            forwarder._last_target_hwnd = slideshow_target  # type: ignore[attr-defined]
-                        except Exception:
-                            pass
             if (
                 target_hwnd
-                and target_category in {"ms_word", "wps_word"}
+                and self._presentation_target_category(target_hwnd) in {"ms_word", "wps_word"}
                 and not self.whiteboard_active
                 and self.mode != "cursor"
             ):
@@ -6719,7 +6494,6 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                     self._last_target_hwnd = target_hwnd
                 except Exception:
                     pass
-                self._store_category_target(target_category, target_hwnd)
                 forwarder = getattr(self, "_forwarder", None)
                 if forwarder is not None:
                     try:
@@ -6731,7 +6505,7 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                     "wheel_blocked",
                     delta=delta,
                     target=hex(target_hwnd),
-                    category=target_category,
+                    category=self._presentation_target_category(target_hwnd),
                 )
                 return False
             if self._forwarder is not None:
@@ -6756,10 +6530,7 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                     handled = False
             if handled:
                 return True
-            preferred = target_category if target_category != "other" else None
-            focused = self._focus_presentation_window_fallback(
-                preferred_category=preferred
-            )
+            focused = self._focus_presentation_window_fallback()
             fallback = self._fallback_send_wheel(delta)
             if not fallback and not focused:
                 return False
@@ -6797,7 +6568,7 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         forwarder = getattr(self, "_forwarder", None)
         if forwarder is None or win32con is None:
             return False
-        self._focus_presentation_window_fallback(preferred_category="ms_ppt")
+        self._focus_presentation_window_fallback()
         try:
             down_param = forwarder._build_basic_key_lparam(vk_code, is_press=True)
             up_param = forwarder._build_basic_key_lparam(vk_code, is_press=False)
@@ -6897,20 +6668,13 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
     def _release_navigation_hold(self) -> None:
         self._deactivate_navigation_hold(restore=True)
 
-    def _dispatch_virtual_key(
-        self,
-        vk_code: int,
-        *,
-        preferred_category: Optional[str] = None,
-    ) -> bool:
+    def _dispatch_virtual_key(self, vk_code: int) -> bool:
         if vk_code == 0 or self.whiteboard_active:
             return False
         success = False
         suppress_focus_restore = False
         override_dispatch_suppress = bool(getattr(self, "_dispatch_suppress_override", False))
-        wps_override: Optional[int] = None
-        if preferred_category in (None, "wps_ppt"):
-            wps_override = self._find_wps_slideshow_target()
+        wps_override = self._find_wps_slideshow_target()
         if wps_override:
             suppress_focus_restore = True
             forwarder = getattr(self, "_forwarder", None)
@@ -6973,9 +6737,7 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                 if not success:
                     self._forwarder.clear_cached_target()
         if not success:
-            self._focus_presentation_window_fallback(
-                preferred_category=preferred_category or self._preferred_control_category()
-            )
+            self._focus_presentation_window_fallback()
             success = self._fallback_send_virtual_key(vk_code)
         if success:
             resolved_target = self._current_navigation_target() or self._resolve_control_target()
@@ -7229,25 +6991,11 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             return True
         return size_match
 
-    def _fallback_detect_presentation_window_user32(
-        self,
-        preferred_category: Optional[str] = None,
-    ) -> Optional[int]:
+    def _fallback_detect_presentation_window_user32(self) -> Optional[int]:
         if _USER32 is None:
             return None
         overlay_hwnd = int(self.winId()) if self.winId() else 0
-        preferred = preferred_category if preferred_category else self._preferred_control_category()
-        ordered_candidates: List[int] = []
         foreground = _user32_get_foreground_window()
-
-        def _record_candidate(candidate: Optional[int]) -> None:
-            if not candidate:
-                return
-            if not self._fallback_is_target_window_valid(candidate):
-                return
-            if candidate not in ordered_candidates:
-                ordered_candidates.append(candidate)
-
         if (
             foreground
             and foreground != overlay_hwnd
@@ -7255,12 +7003,19 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             and self._fallback_is_candidate_window(foreground)
         ):
             normalized = self._normalize_presentation_target(foreground)
-            _record_candidate(normalized)
-            _record_candidate(foreground)
+            ordered: Tuple[int, ...] = tuple(
+                hwnd
+                for hwnd in (
+                    normalized if normalized and self._fallback_is_target_window_valid(normalized) else None,
+                    foreground if self._fallback_is_target_window_valid(foreground) else None,
+                )
+                if hwnd
+            )
+            for candidate in ordered:
+                if self._presentation_control_allowed(candidate, log=False):
+                    return candidate
         if _WNDENUMPROC is None:
-            prioritized = self._prioritize_control_candidates(ordered_candidates, preferred)
-            return prioritized[0] if prioritized else None
-
+            return None
         candidates: List[int] = []
 
         def _enum_callback(hwnd: int, _l_param: int) -> int:
@@ -7285,10 +7040,18 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             if not self._fallback_is_candidate_window(hwnd):
                 continue
             normalized = self._normalize_presentation_target(hwnd)
-            _record_candidate(normalized)
-            _record_candidate(hwnd)
-        prioritized = self._prioritize_control_candidates(ordered_candidates, preferred)
-        return prioritized[0] if prioritized else None
+            ordered: Tuple[int, ...] = tuple(
+                handle
+                for handle in (
+                    normalized if normalized and self._fallback_is_target_window_valid(normalized) else None,
+                    hwnd if self._fallback_is_target_window_valid(hwnd) else None,
+                )
+                if handle
+            )
+            for candidate in ordered:
+                if self._presentation_control_allowed(candidate, log=False):
+                    return candidate
+        return None
 
     def _presentation_window_class(self, hwnd: int) -> str:
         if hwnd == 0:
@@ -7362,44 +7125,18 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         class_name = self._presentation_window_class(hwnd)
         return not self._is_preferred_presentation_class(class_name)
 
-    def _focus_presentation_window_fallback(
-        self,
-        preferred_category: Optional[str] = None,
-    ) -> bool:
+    def _focus_presentation_window_fallback(self) -> bool:
         if _USER32 is None:
             return False
-        hwnd = self._resolve_presentation_target(preferred_category=preferred_category)
+        hwnd = self._resolve_presentation_target()
         if not hwnd:
-            candidate = self._fallback_detect_presentation_window_user32(
-                preferred_category=preferred_category
-            )
+            candidate = self._fallback_detect_presentation_window_user32()
             if candidate and self._fallback_is_target_window_valid(candidate):
                 hwnd = candidate
         if not hwnd or not self._fallback_is_target_window_valid(hwnd):
             return False
         if not self._presentation_control_allowed(hwnd, log=False):
             return False
-        resolved_category = self._presentation_target_category(hwnd)
-        self._store_category_target(resolved_category, hwnd)
-        if preferred_category and resolved_category != preferred_category:
-            alternate = self._fallback_detect_presentation_window_user32(
-                preferred_category=preferred_category
-            )
-            if (
-                alternate
-                and alternate != hwnd
-                and self._fallback_is_target_window_valid(alternate)
-                and self._presentation_control_allowed(alternate, log=False)
-            ):
-                alt_category = self._presentation_target_category(alternate)
-                if alt_category == preferred_category:
-                    hwnd = alternate
-                    resolved_category = alt_category
-                    self._store_category_target(resolved_category, hwnd)
-                else:
-                    return False
-            else:
-                return False
         class_name = self._presentation_window_class(hwnd)
         top_level = _user32_top_level_hwnd(hwnd)
         attach_pair = self._attach_to_target_thread(top_level or hwnd)
@@ -7411,7 +7148,6 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                 or self._is_wps_slideshow_class(self._presentation_window_class(top_level))
             ):
                 self._last_target_hwnd = hwnd
-                self._store_category_target(resolved_category, hwnd)
                 return True
             focused = False
             if top_level and top_level != hwnd:
@@ -7424,7 +7160,6 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                     focused = _user32_focus_window(top_level)
             if focused:
                 self._last_target_hwnd = hwnd
-                self._store_category_target(resolved_category, hwnd)
             return focused
         finally:
             self._detach_from_target_thread(attach_pair)
@@ -7500,8 +7235,17 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             and self._is_candidate_presentation_window(foreground)
         ):
             normalized = self._normalize_presentation_target(foreground)
-            _record_candidate(normalized)
-            _record_candidate(foreground)
+            candidates: Tuple[int, ...] = tuple(
+                hwnd
+                for hwnd in (
+                    normalized if normalized and self._is_target_window_valid(normalized) else None,
+                    foreground if self._is_target_window_valid(foreground) else None,
+                )
+                if hwnd
+            )
+            for candidate in candidates:
+                if self._presentation_control_allowed(candidate, log=False):
+                    return candidate
         candidates: List[int] = []
 
         def _enum_callback(hwnd: int, result: List[int]) -> bool:
@@ -7528,15 +7272,20 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             if not self._is_candidate_presentation_window(hwnd):
                 continue
             normalized = self._normalize_presentation_target(hwnd)
-            _record_candidate(normalized)
-            _record_candidate(hwnd)
-        prioritized = self._prioritize_control_candidates(ordered_candidates, preferred)
-        return prioritized[0] if prioritized else None
+            ordered: Tuple[int, ...] = tuple(
+                handle
+                for handle in (
+                    normalized if normalized and self._is_target_window_valid(normalized) else None,
+                    hwnd if self._is_target_window_valid(hwnd) else None,
+                )
+                if handle
+            )
+            for candidate in ordered:
+                if self._presentation_control_allowed(candidate, log=False):
+                    return candidate
+        return None
 
-    def _resolve_presentation_target(
-        self,
-        preferred_category: Optional[str] = None,
-    ) -> Optional[int]:
+    def _resolve_presentation_target(self) -> Optional[int]:
         if win32gui is None:
             hwnd = self._last_target_hwnd
             if hwnd and not self._presentation_control_allowed(hwnd, log=False):
@@ -7548,9 +7297,7 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                     self._last_target_hwnd = normalized
                     return normalized
                 if self._should_refresh_cached_presentation_target(hwnd):
-                    refreshed = self._fallback_detect_presentation_window_user32(
-                        preferred_category=preferred_category
-                    )
+                    refreshed = self._fallback_detect_presentation_window_user32()
                     if (
                         refreshed
                         and refreshed != hwnd
@@ -7569,9 +7316,7 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                         self._last_target_hwnd = None
                         return None
                 return hwnd
-            hwnd = self._fallback_detect_presentation_window_user32(
-                preferred_category=preferred_category
-            )
+            hwnd = self._fallback_detect_presentation_window_user32()
             normalized = self._normalize_presentation_target(hwnd) if hwnd else None
             target = normalized or hwnd
             if target and self._fallback_is_target_window_valid(target):
@@ -7761,9 +7506,6 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         self.control_wps_ppt = resolved["wps_ppt"]
         self.control_wps_word = resolved["wps_word"]
         if changed:
-            cache = getattr(self, "_category_target_cache", None)
-            if isinstance(cache, dict):
-                cache.clear()
             forwarder = getattr(self, "_forwarder", None)
             if forwarder is not None:
                 try:
@@ -8014,7 +7756,7 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         if category in {"ms_word", "wps_word"}:
             if self.whiteboard_active:
                 return False
-            return True
+            return self.mode != "cursor"
         return True
 
     def keyPressEvent(self, e: QKeyEvent) -> None:
@@ -8027,14 +7769,6 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             if not target or not self._presentation_control_allowed(target):
                 super().keyPressEvent(e)
                 return
-            category = self._presentation_target_category(target)
-            if category in {"ms_word", "wps_word"}:
-                preferred_target = self._resolve_control_target(preferred_category=category)
-                if preferred_target:
-                    target = preferred_target
-                    if not self._presentation_control_allowed(target):
-                        super().keyPressEvent(e)
-                        return
             is_auto = e.isAutoRepeat()
             if not is_auto:
                 self._active_navigation_keys.add(key)
