@@ -41,6 +41,7 @@ from typing import (
     Set,
     Tuple,
     Union,
+    Literal,
 )
 
 logger = logging.getLogger(__name__)
@@ -3829,43 +3830,67 @@ class _PresentationWindowMixin:
                 normalized.append(hint)
         return tuple(normalized)
 
-    def _is_wps_presentation_process(self, process_name: str, *classes: str) -> bool:
-        name = (process_name or "").strip().lower()
-        if not name:
-            return False
-        if name.startswith(("wpp", "wppt")):
-            return True
-        if "wpspresentation" in name:
-            return True
-        if not name.startswith("wps"):
-            return False
+    def _normalize_process_name(self, value: Any) -> str:
+        if value is None:
+            return ""
+        try:
+            if isinstance(value, bytes):
+                value = value.decode("utf-8", "ignore")
+            else:
+                value = str(value)
+        except Exception:
+            return ""
+        return value.strip().casefold()
+
+    def _normalized_process_context(
+        self, process_name: Any, classes: Iterable[Any]
+    ) -> Tuple[str, Tuple[str, ...]]:
+        normalized_name = self._normalize_process_name(process_name)
         normalized_classes = self._normalized_class_hints(*classes)
-        if not normalized_classes:
-            return False
-        if any(self._is_wps_slideshow_class(cls) for cls in normalized_classes):
-            return True
-        if any(self._class_has_wps_presentation_signature(cls) for cls in normalized_classes):
-            return True
-        if any(self._class_has_ms_presentation_signature(cls) for cls in normalized_classes):
-            return True
-        return False
+        return normalized_name, normalized_classes
+
+    def _classify_wps_process(
+        self, process_name: Any, *classes: Any
+    ) -> Literal["presentation", "writer", "other"]:
+        name, normalized_classes = self._normalized_process_context(process_name, classes)
+        if not name:
+            return "other"
+        if name.startswith(("wpp", "wppt")) or "wpspresentation" in name:
+            return "presentation"
+
+        has_writer_signature = any(
+            self._class_has_wps_writer_signature(cls) for cls in normalized_classes
+        )
+
+        if name.startswith("wps"):
+            has_slideshow = any(
+                self._is_wps_slideshow_class(cls) for cls in normalized_classes
+            )
+            if has_slideshow:
+                return "presentation"
+            if any(
+                self._class_has_wps_presentation_signature(cls)
+                for cls in normalized_classes
+            ):
+                return "presentation"
+            if any(
+                self._class_has_ms_presentation_signature(cls)
+                for cls in normalized_classes
+            ):
+                return "presentation"
+            if "wpswriter" in name or has_writer_signature:
+                return "writer"
+            return "other"
+
+        if has_writer_signature:
+            return "writer"
+        return "other"
+
+    def _is_wps_presentation_process(self, process_name: str, *classes: str) -> bool:
+        return self._classify_wps_process(process_name, *classes) == "presentation"
 
     def _is_wps_writer_process(self, process_name: str, *classes: str) -> bool:
-        name = (process_name or "").strip().lower()
-        if not name:
-            return False
-        if self._is_wps_presentation_process(process_name, *classes):
-            return False
-        if "wpswriter" in name:
-            return True
-        normalized_classes = self._normalized_class_hints(*classes)
-        if any(self._class_has_wps_writer_signature(cls) for cls in normalized_classes):
-            return True
-        if not name.startswith("wps"):
-            return False
-        if any(self._is_wps_slideshow_class(cls) for cls in normalized_classes):
-            return False
-        return False
+        return self._classify_wps_process(process_name, *classes) == "writer"
 
     def _window_thread_id(self, hwnd: int) -> int:
         if _USER32 is None or hwnd == 0:
