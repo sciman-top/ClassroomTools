@@ -1466,21 +1466,17 @@ class SettingsManager:
 
         self._settings_cache = {section: values.copy() for section, values in snapshot.items()}
 
-    def get_launcher_settings(self) -> "LauncherSettings":
-        """Return the persisted launcher window configuration as a typed object."""
+    def get_launcher_state(self) -> Tuple["LauncherSettings", "StartupSettings"]:
+        """Return launcher geometry and startup flags in a single pass."""
 
         settings = self.load_settings()
         launcher_defaults = self.defaults.get("Launcher", {})
-        launcher_section = settings.get("Launcher", {})
-        return LauncherSettings.from_mapping(launcher_section, launcher_defaults)
-
-    def get_startup_settings(self) -> "StartupSettings":
-        """Return startup configuration flags."""
-
-        settings = self.load_settings()
         startup_defaults = self.defaults.get("Startup", {})
+        launcher_section = settings.get("Launcher", {})
         startup_section = settings.get("Startup", {})
-        return StartupSettings.from_mapping(startup_section, startup_defaults)
+        launcher_settings = LauncherSettings.from_mapping(launcher_section, launcher_defaults)
+        startup_settings = StartupSettings.from_mapping(startup_section, startup_defaults)
+        return launcher_settings, startup_settings
 
     def update_launcher_settings(
         self,
@@ -12300,8 +12296,7 @@ class LauncherWindow(QWidget):
         self._ensure_min_height = self.height()
 
     def _apply_saved_state(self) -> None:
-        launcher_settings = self.settings_manager.get_launcher_settings()
-        startup_settings = self.settings_manager.get_startup_settings()
+        launcher_settings, startup_settings = self.settings_manager.get_launcher_state()
 
         position = QPoint(launcher_settings.position)
         self.move(position)
