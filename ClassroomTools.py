@@ -6727,16 +6727,24 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             return False
         if not press:
             return False
-        try:
-            forwarder._last_target_hwnd = hwnd
-        except Exception:
-            pass
-        if not release:
+        release_ok = bool(release)
+        if not release_ok:
+            release_ok = self._attempt_wps_keyup_recovery(forwarder, hwnd, vk_code)
+        if not release_ok:
             self._log_navigation_debug(
                 "wps_keyup_failed",
                 target=hex(hwnd),
                 vk_code=vk_code,
             )
+            return False
+        try:
+            self._last_target_hwnd = hwnd
+        except Exception:
+            pass
+        try:
+            forwarder._last_target_hwnd = hwnd
+        except Exception:
+            pass
         return True
 
     def _attempt_wps_keyup_recovery(
