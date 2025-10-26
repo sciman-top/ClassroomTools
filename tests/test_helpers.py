@@ -365,13 +365,8 @@ def test_resolve_student_resource_paths_target_preferred_directory(
     bundle_dir.mkdir()
     bundled_plain = bundle_dir / "students.xlsx"
     bundled_plain.write_text("plain")
-    bundled_enc = bundle_dir / "students.xlsx.enc"
-    bundled_enc.write_text("enc")
-
     class _Locator:
         def candidates(self, relative_path: str) -> Tuple[str, ...]:
-            if relative_path.endswith(".enc"):
-                return (str(bundled_enc),)
             return (str(bundled_plain),)
 
     locator = _Locator()
@@ -388,9 +383,7 @@ def test_resolve_student_resource_paths_target_preferred_directory(
     resources = helpers._resolve_student_resource_paths()  # type: ignore[attr-defined]
 
     assert Path(resources.plain).parent == preferred_dir
-    assert Path(resources.encrypted).parent == preferred_dir
     assert any(Path(candidate) == bundled_plain for candidate in resources.plain_candidates)
-    assert any(Path(candidate) == bundled_enc for candidate in resources.encrypted_candidates)
 
 
 _WPS_WRITER_CLASSES = {

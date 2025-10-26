@@ -21,8 +21,6 @@ import tempfile
 import threading
 import time
 import traceback
-import hashlib
-import hmac
 import functools
 from collections import OrderedDict, deque
 from functools import singledispatch
@@ -599,9 +597,55 @@ def _resolve_writable_resource(
 @dataclass(frozen=True)
 class _StudentResourcePaths:
     plain: str
-    encrypted: str
     plain_candidates: Tuple[str, ...]
-    encrypted_candidates: Tuple[str, ...]
+
+
+def _preferred_student_resource_directory() -> str:
+    """Return the user-visible directory for student roster files."""
+
+    candidates: List[str] = []
+    seen: Set[str] = set()
+
+    def _append(path: Optional[str]) -> None:
+        if not path:
+            return
+        normalized = os.path.normpath(os.path.abspath(path))
+        marker = os.path.normcase(normalized)
+        if marker in seen:
+            return
+        seen.add(marker)
+        candidates.append(normalized)
+
+    _append(os.environ.get("NUITKA_ONEFILE_PARENT"))
+
+    if getattr(sys, "frozen", False):
+        with contextlib.suppress(Exception):
+            _append(os.path.dirname(os.path.abspath(getattr(sys, "executable", ""))))
+
+    with contextlib.suppress(Exception):
+        _append(os.path.dirname(os.path.abspath(sys.argv[0])))
+
+    if _INITIAL_CWD:
+        _append(_INITIAL_CWD)
+
+    with contextlib.suppress(Exception):
+        _append(os.getcwd())
+
+    module_dir = os.path.dirname(os.path.abspath(__file__))
+    _append(module_dir)
+
+    fallback_app_dir = _preferred_app_directory()
+    if fallback_app_dir:
+        _append(fallback_app_dir)
+
+    for candidate in candidates:
+        if _ensure_directory(candidate):
+            return candidate
+
+    if not _ensure_directory(module_dir):
+        module_dir = os.path.abspath(os.getcwd())
+        _ensure_directory(module_dir)
+    return module_dir
 
 
 def _preferred_student_resource_directory() -> str:
@@ -666,22 +710,9 @@ def _resolve_student_resource_paths() -> _StudentResourcePaths:
         preferred_primary=preferred_plain,
     )
 
-    preferred_encrypted = os.path.join(base_dir, "students.xlsx.enc")
-    legacy_encrypted = os.path.abspath("students.xlsx.enc")
-    encrypted_group = _resolve_writable_resource(
-        "students.xlsx.enc",
-        fallback_name="students.xlsx.enc",
-        extra_candidates=(legacy_encrypted,),
-        is_dir=False,
-        copy_from_candidates=True,
-        preferred_primary=preferred_encrypted,
-    )
-
     return _StudentResourcePaths(
         plain=plain_group.primary,
-        encrypted=encrypted_group.primary,
         plain_candidates=plain_group.candidates,
-        encrypted_candidates=encrypted_group.candidates,
     )
 
 
@@ -1065,19 +1096,6 @@ if sys.platform == "win32":
 else:
     WINREG_AVAILABLE = False
 
-
-_SESSION_STUDENT_PASSWORD: Optional[str] = None
-_SESSION_STUDENT_FILE_ENCRYPTED: bool = False
-
-
-def _set_session_student_encryption(encrypted: bool, password: Optional[str]) -> None:
-    global _SESSION_STUDENT_PASSWORD, _SESSION_STUDENT_FILE_ENCRYPTED
-    _SESSION_STUDENT_FILE_ENCRYPTED = bool(encrypted)
-    _SESSION_STUDENT_PASSWORD = password if encrypted else None
-
-
-def _get_session_student_encryption() -> tuple[bool, Optional[str]]:
-    return _SESSION_STUDENT_FILE_ENCRYPTED, _SESSION_STUDENT_PASSWORD
 
 
 # ---------- 缓存 ----------
@@ -1676,215 +1694,6 @@ class QuietQuestionDialog(QDialog):
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
         self._ok_button.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
-
-
-class PasswordPromptDialog(QDialog):
-    """统一样式的密码输入窗口，确保按钮始终可见且尺寸一致。"""
-
-    def __init__(self, parent: Optional[QWidget], title: str, prompt: str) -> None:
-        super().__init__(parent)
-        self.setWindowTitle(title)
-        self.setModal(True)
-        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
-        self._captured_text: str = ""
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 18, 24, 18)
-        layout.setSpacing(12)
-
-        label = QLabel(prompt, self)
-        label.setWordWrap(True)
-        label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        layout.addWidget(label)
-
-        self.line_edit = QLineEdit(self)
-        self.line_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.line_edit.setMinimumWidth(220)
-        layout.addWidget(self.line_edit)
-
-        self.error_label = QLabel("", self)
-        self.error_label.setWordWrap(True)
-        self.error_label.setObjectName("passwordPromptErrorLabel")
-        self.error_label.setStyleSheet(
-            "#passwordPromptErrorLabel { color: #d93025; font-size: 12px; margin-top: 4px; }"
-        )
-        self.error_label.hide()
-        layout.addWidget(self.error_label)
-
-        button_box = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
-            Qt.Orientation.Horizontal,
-            self,
-        )
-        button_box.accepted.connect(self.accept)
-        button_box.rejected.connect(self.reject)
-        style_dialog_buttons(
-            button_box,
-            {
-                QDialogButtonBox.StandardButton.Ok: ButtonStyles.PRIMARY,
-                QDialogButtonBox.StandardButton.Cancel: ButtonStyles.TOOLBAR,
-            },
-            extra_padding=12,
-            minimum_height=34,
-            uniform_width=True,
-        )
-        layout.addWidget(button_box)
-
-        self.line_edit.returnPressed.connect(self.accept)
-        self.line_edit.textChanged.connect(
-            lambda _text: _hide_label_if_visible(self.error_label)
-        )
-
-    @classmethod
-    def get_password(
-        cls,
-        parent: Optional[QWidget],
-        title: str,
-        prompt: str,
-        *,
-        allow_empty: bool = True,
-    ) -> tuple[str, bool]:
-        dialog = cls(parent, title, prompt)
-        dialog._allow_empty = allow_empty  # type: ignore[attr-defined]
-        accepted = dialog.exec() == QDialog.DialogCode.Accepted
-        value = dialog._captured_text if accepted else ""
-        return value, accepted
-
-    def showEvent(self, event) -> None:  # type: ignore[override]
-        super().showEvent(event)
-        self.line_edit.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
-
-    def accept(self) -> None:  # type: ignore[override]
-        text = self.line_edit.text()
-        if not getattr(self, "_allow_empty", True) and not text.strip():
-            self._show_error("密码不能为空，请重新输入。")
-            return
-        self._captured_text = text
-        super().accept()
-
-    def reject(self) -> None:  # type: ignore[override]
-        self._captured_text = ""
-        super().reject()
-
-    def _show_error(self, message: str) -> None:
-        self.error_label.setText(message)
-        self.error_label.show()
-        self.line_edit.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
-
-class PasswordSetupDialog(QDialog):
-    """一次性采集两次输入的新密码，避免外部循环引发界面阻塞。"""
-
-    def __init__(self, parent: Optional[QWidget], title: str, prompt: str, confirm_prompt: str) -> None:
-        super().__init__(parent)
-        self.setWindowTitle(title)
-        self.setModal(True)
-        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
-        self._password: str = ""
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 18, 24, 18)
-        layout.setSpacing(12)
-
-        prompt_label = QLabel(prompt, self)
-        prompt_label.setWordWrap(True)
-        prompt_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        layout.addWidget(prompt_label)
-
-        self.password_edit = QLineEdit(self)
-        self.password_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.password_edit.setMinimumWidth(220)
-        layout.addWidget(self.password_edit)
-
-        confirm_label = QLabel(confirm_prompt, self)
-        confirm_label.setWordWrap(True)
-        confirm_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        layout.addWidget(confirm_label)
-
-        self.confirm_edit = QLineEdit(self)
-        self.confirm_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.confirm_edit.setMinimumWidth(220)
-        layout.addWidget(self.confirm_edit)
-
-        self.error_label = QLabel("", self)
-        self.error_label.setWordWrap(True)
-        self.error_label.setObjectName("passwordSetupErrorLabel")
-        self.error_label.setStyleSheet(
-            "#passwordSetupErrorLabel { color: #d93025; font-size: 12px; margin-top: 4px; }"
-        )
-        self.error_label.hide()
-        layout.addWidget(self.error_label)
-
-        button_box = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
-            Qt.Orientation.Horizontal,
-            self,
-        )
-        button_box.accepted.connect(self.accept)
-        button_box.rejected.connect(self.reject)
-        style_dialog_buttons(
-            button_box,
-            {
-                QDialogButtonBox.StandardButton.Ok: ButtonStyles.PRIMARY,
-                QDialogButtonBox.StandardButton.Cancel: ButtonStyles.TOOLBAR,
-            },
-            extra_padding=12,
-            minimum_height=34,
-            uniform_width=True,
-        )
-        layout.addWidget(button_box)
-
-        self.password_edit.returnPressed.connect(self._focus_confirm)
-        self.confirm_edit.returnPressed.connect(self.accept)
-        self.password_edit.textChanged.connect(
-            lambda _text: _hide_label_if_visible(self.error_label)
-        )
-        self.confirm_edit.textChanged.connect(
-            lambda _text: _hide_label_if_visible(self.error_label)
-        )
-
-    @classmethod
-    def get_new_password(
-        cls,
-        parent: Optional[QWidget],
-        title: str,
-        prompt: str,
-        confirm_prompt: str,
-    ) -> tuple[str, bool]:
-        dialog = cls(parent, title, prompt, confirm_prompt)
-        accepted = dialog.exec() == QDialog.DialogCode.Accepted
-        value = dialog._password if accepted else ""
-        return value, accepted
-
-    def showEvent(self, event) -> None:  # type: ignore[override]
-        super().showEvent(event)
-        self.password_edit.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
-
-    def accept(self) -> None:  # type: ignore[override]
-        password = self.password_edit.text().strip()
-        confirm = self.confirm_edit.text().strip()
-        if not password:
-            self._show_error("密码不能为空，请重新输入。", focus_widget=self.password_edit)
-            return
-        if password != confirm:
-            self._show_error("两次输入的密码不一致，请重新设置。", focus_widget=self.confirm_edit)
-            return
-        self._password = password
-        super().accept()
-
-    def reject(self) -> None:  # type: ignore[override]
-        self._password = ""
-        super().reject()
-
-    def _show_error(self, message: str, *, focus_widget: Optional[QWidget] = None) -> None:
-        self.error_label.setText(message)
-        self.error_label.show()
-        target = focus_widget or self.password_edit
-        target.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
-
-    def _focus_confirm(self) -> None:
-        self.confirm_edit.setFocus(Qt.FocusReason.TabFocusReason)
 
 
 def ask_quiet_confirmation(parent: Optional[QWidget], text: str, title: str = "确认") -> bool:
@@ -10198,8 +10007,6 @@ class RollCallTimerWindow(QWidget):
 
     STUDENT_FILE = _STUDENT_RESOURCES.plain
     STUDENT_FILE_CANDIDATES = _STUDENT_RESOURCES.plain_candidates
-    ENCRYPTED_STUDENT_FILE = _STUDENT_RESOURCES.encrypted
-    ENCRYPTED_STUDENT_FILE_CANDIDATES = _STUDENT_RESOURCES.encrypted_candidates
     MIN_FONT_SIZE = 5
     MAX_FONT_SIZE = 220
 
@@ -10223,7 +10030,6 @@ class RollCallTimerWindow(QWidget):
         self.setWindowFlags(flags)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.settings_manager = settings_manager
-        self._encrypted_file_path = self.ENCRYPTED_STUDENT_FILE
         self.student_workbook: Optional[StudentWorkbook] = student_workbook
         base_dataframe: Optional[PandasDataFrame] = None
         if PANDAS_READY and self.student_workbook is not None:
@@ -10235,9 +10041,6 @@ class RollCallTimerWindow(QWidget):
             base_dataframe = pd.DataFrame(columns=["学号", "姓名", "分组", "成绩"])
         self.student_data = base_dataframe
         self._student_data_pending_load = False
-        encrypted_state, encrypted_password = _get_session_student_encryption()
-        self._student_file_encrypted = bool(encrypted_state)
-        self._student_password = encrypted_password
         if defer_password_prompt:
             base_empty = True
             if PANDAS_READY and isinstance(self.student_data, pd.DataFrame):
@@ -10246,8 +10049,7 @@ class RollCallTimerWindow(QWidget):
                 base_empty = False
             if base_empty:
                 has_plain = _any_existing_path(self.STUDENT_FILE_CANDIDATES) is not None
-                has_encrypted = _any_existing_path(self.ENCRYPTED_STUDENT_FILE_CANDIDATES) is not None
-                if has_plain or has_encrypted:
+                if has_plain:
                     self._student_data_pending_load = True
                     if self.student_data is None and PANDAS_READY:
                         self.student_data = pd.DataFrame(columns=["学号", "姓名", "分组", "成绩"])
@@ -10316,16 +10118,6 @@ class RollCallTimerWindow(QWidget):
 
         order_value = str(s.get("scoreboard_order", "rank")).strip().lower()
         self.scoreboard_order = order_value if order_value in {"rank", "id"} else "rank"
-        saved_encrypted = str_to_bool(s.get("students_encrypted", bool_to_str(self._student_file_encrypted)), self._student_file_encrypted)
-        plain_exists = _any_existing_path(self.STUDENT_FILE_CANDIDATES) is not None
-        encrypted_exists = _any_existing_path(self.ENCRYPTED_STUDENT_FILE_CANDIDATES) is not None
-        disk_encrypted = encrypted_exists and not plain_exists
-        if disk_encrypted:
-            self._student_file_encrypted = True
-        elif not saved_encrypted:
-            self._student_file_encrypted = False
-            self._student_password = None
-
         self.last_id_font_size = max(self.MIN_FONT_SIZE, _get_int("id_font_size", 48))
         self.last_name_font_size = max(self.MIN_FONT_SIZE, _get_int("name_font_size", 60))
         self.last_timer_font_size = max(self.MIN_FONT_SIZE, _get_int("timer_font_size", 56))
@@ -10378,7 +10170,6 @@ class RollCallTimerWindow(QWidget):
         self.update_mode_ui(force_timer_reset=self.mode == "timer")
         self.on_group_change(initial=True)
         self.display_current_student()
-        self._update_encryption_button()
 
     def _build_ui(self) -> None:
         self.setStyleSheet("background-color: #f4f5f7;")
@@ -10460,10 +10251,6 @@ class RollCallTimerWindow(QWidget):
         self.showcase_button = QPushButton("展示"); _setup_secondary_button(self.showcase_button)
         self.showcase_button.clicked.connect(self.show_scoreboard)
         control_layout.addWidget(self.showcase_button)
-
-        self.encrypt_button = QPushButton(""); _setup_secondary_button(self.encrypt_button)
-        self.encrypt_button.clicked.connect(self._on_encrypt_button_clicked)
-        control_layout.addWidget(self.encrypt_button)
 
         top.addWidget(control_bar, 0, Qt.AlignmentFlag.AlignLeft)
         top.addStretch(1)
@@ -10570,61 +10357,6 @@ class RollCallTimerWindow(QWidget):
 
         self.roll_call_frame.clicked.connect(self.roll_student)
         self.id_label.installEventFilter(self); self.name_label.installEventFilter(self)
-
-    def _update_encryption_button(self) -> None:
-        if not hasattr(self, "encrypt_button"):
-            return
-        plain_exists = _any_existing_path(self.STUDENT_FILE_CANDIDATES) is not None
-        encrypted_exists = _any_existing_path(self.ENCRYPTED_STUDENT_FILE_CANDIDATES) is not None
-        disk_encrypted = encrypted_exists and not plain_exists
-        if disk_encrypted and not self._student_file_encrypted:
-            self._student_file_encrypted = True
-        elif not disk_encrypted and self._student_file_encrypted and not encrypted_exists:
-            self._student_file_encrypted = False
-            self._student_password = None
-        self.encrypt_button.setText("解密" if self._student_file_encrypted else "加密")
-        if self._student_file_encrypted:
-            self.encrypt_button.setToolTip("当前学生数据已加密，点击输入密码以解密或更新。")
-        else:
-            self.encrypt_button.setToolTip("点击为 students.xlsx 设置密码并生成加密文件。")
-
-    def _on_encrypt_button_clicked(self) -> None:
-        if self._student_file_encrypted:
-            self._handle_decrypt_student_file()
-        else:
-            self._handle_encrypt_student_file()
-
-    def _prompt_new_encryption_password(self) -> Optional[str]:
-        password, ok = PasswordSetupDialog.get_new_password(
-            self,
-            "设置加密密码",
-            "请输入新的加密密码：",
-            "请再次输入密码以确认：",
-        )
-        if not ok or not password:
-            show_quiet_information(self, "未能成功设置密码，已取消加密操作。")
-            return None
-        return password
-
-    def _prompt_existing_encryption_password(self, title: str) -> Optional[str]:
-        attempts = 0
-        while attempts < 3:
-            password, ok = PasswordPromptDialog.get_password(
-                self,
-                title,
-                "请输入当前的加密密码：",
-                allow_empty=False,
-            )
-            if not ok:
-                return None
-            password = password.strip()
-            if not password:
-                show_quiet_information(self, "密码不能为空，请重新输入。")
-                attempts += 1
-                continue
-            return password
-        show_quiet_information(self, "密码输入次数过多，操作已取消。")
-        return None
 
     def _set_student_dataframe(self, df: Optional[PandasDataFrame], *, propagate: bool = True) -> None:
         if not PANDAS_READY:
@@ -11082,114 +10814,12 @@ class RollCallTimerWindow(QWidget):
             return False
         self._student_data_pending_load = False
         self._apply_student_workbook(workbook, propagate=True)
-        encrypted_state, encrypted_password = _get_session_student_encryption()
-        self._student_file_encrypted = bool(encrypted_state)
-        self._student_password = encrypted_password
         saved = self.settings_manager.load_settings().get("RollCallTimer", {})
         self._restore_group_state(saved)
-        self._update_encryption_button()
         self._update_class_button_label()
         self.display_current_student()
         self._schedule_save()
         return True
-
-    def _handle_encrypt_student_file(self) -> None:
-        if not PANDAS_READY:
-            show_quiet_information(self, "当前环境缺少 pandas，无法执行加密。")
-            return
-        password = self._prompt_new_encryption_password()
-        if not password:
-            return
-        if not self._ensure_student_data_ready():
-            return
-        if self.student_workbook is None:
-            if self.student_data is None or not isinstance(self.student_data, pd.DataFrame):
-                show_quiet_information(self, "没有可加密的学生数据。")
-                return
-            try:
-                snapshot = self.student_data.copy()
-            except Exception:
-                snapshot = pd.DataFrame(self.student_data)
-            class_name = self.current_class_name or "班级1"
-            self.current_class_name = class_name
-            self.student_workbook = StudentWorkbook(
-                OrderedDict({class_name: snapshot}),
-                active_class=class_name,
-            )
-        else:
-            self._snapshot_current_class()
-        try:
-            data = self.student_workbook.as_dict()
-            _save_student_workbook(
-                data,
-                self.STUDENT_FILE,
-                self._encrypted_file_path,
-                encrypted=True,
-                password=password,
-                plain_candidates=self.STUDENT_FILE_CANDIDATES,
-                encrypted_candidates=self.ENCRYPTED_STUDENT_FILE_CANDIDATES,
-            )
-            _set_session_student_encryption(True, password)
-            self._student_file_encrypted = True
-            self._student_password = password
-            self._update_encryption_button()
-            self._propagate_student_dataframe()
-            self._update_class_button_label()
-            show_quiet_information(self, "已生成加密文件 students.xlsx.enc，并移除明文数据。")
-            self._schedule_save()
-        except Exception as exc:
-            show_quiet_information(self, f"加密失败：{exc}")
-
-    def _handle_decrypt_student_file(self) -> None:
-        encrypted_path = self._encrypted_file_path
-        if not os.path.exists(encrypted_path):
-            show_quiet_information(self, "未找到加密文件，无法解密。")
-            self._student_file_encrypted = False
-            self._update_encryption_button()
-            return
-        password = self._prompt_existing_encryption_password("解密学生数据")
-        if not password:
-            return
-        try:
-            with open(encrypted_path, "rb") as fh:
-                payload = fh.read()
-            plain_bytes = _decrypt_student_bytes(password, payload)
-        except Exception as exc:
-            show_quiet_information(self, f"解密失败：{exc}")
-            return
-        try:
-            buffer = io.BytesIO(plain_bytes)
-            raw_data = pd.read_excel(buffer, sheet_name=None)
-            workbook = StudentWorkbook(OrderedDict(raw_data), active_class="")
-        except Exception as exc:
-            show_quiet_information(self, f"读取解密后的学生数据失败：{exc}")
-            return
-        try:
-            _save_student_workbook(
-                workbook.as_dict(),
-                self.STUDENT_FILE,
-                self._encrypted_file_path,
-                encrypted=False,
-                password=None,
-                plain_candidates=self.STUDENT_FILE_CANDIDATES,
-                encrypted_candidates=self.ENCRYPTED_STUDENT_FILE_CANDIDATES,
-            )
-        except Exception as exc:
-            show_quiet_information(self, f"写入学生数据失败：{exc}")
-            return
-        self._student_file_encrypted = False
-        self._student_password = None
-        _set_session_student_encryption(False, None)
-        self._apply_decrypted_student_data(workbook)
-        self._update_encryption_button()
-        show_quiet_information(self, "已成功解密学生数据并恢复 students.xlsx。")
-        self._schedule_save()
-
-    def _apply_decrypted_student_data(self, workbook: StudentWorkbook) -> None:
-        if not PANDAS_READY:
-            return
-        self._apply_student_workbook(workbook, propagate=True)
-        self.display_current_student()
 
     def _propagate_student_dataframe(self) -> None:
         parent = self.parent()
@@ -11651,11 +11281,7 @@ class RollCallTimerWindow(QWidget):
                 _save_student_workbook(
                     data,
                     self.STUDENT_FILE,
-                    self._encrypted_file_path,
-                    encrypted=self._student_file_encrypted,
-                    password=self._student_password,
                     plain_candidates=self.STUDENT_FILE_CANDIDATES,
-                    encrypted_candidates=self.ENCRYPTED_STUDENT_FILE_CANDIDATES,
                 )
             self._score_persist_failed = False
             self._update_class_button_label()
@@ -11707,8 +11333,6 @@ class RollCallTimerWindow(QWidget):
                 self._schedule_save()
             self.schedule_font_update()
             self._hide_student_photo(force=True)
-        if hasattr(self, "encrypt_button"):
-            self.encrypt_button.setVisible(is_roll)
         if hasattr(self, "reset_button"):
             self.reset_button.setVisible(is_roll)
         self.updateGeometry()
@@ -12544,9 +12168,6 @@ class RollCallTimerWindow(QWidget):
             can_select = is_roll and (has_workbook or self._student_data_pending_load)
             self.class_button.setVisible(is_roll)
             self.class_button.setEnabled(can_select)
-        if hasattr(self, "encrypt_button"):
-            self.encrypt_button.setVisible(is_roll)
-            self.encrypt_button.setEnabled(is_roll and has_data)
         if hasattr(self, "reset_button"):
             self.reset_button.setEnabled(is_roll and has_data)
 
@@ -12665,7 +12286,6 @@ class RollCallTimerWindow(QWidget):
         sec["name_font_size"] = str(self.last_name_font_size)
         sec["timer_font_size"] = str(self.last_timer_font_size)
         sec["scoreboard_order"] = self.scoreboard_order
-        sec["students_encrypted"] = bool_to_str(self._student_file_encrypted)
         self._prune_orphan_class_states()
         if not self._student_data_pending_load:
             self._store_active_class_state()
@@ -12753,49 +12373,6 @@ class AboutDialog(_EnsureOnScreenMixin, QDialog):
             pass
 
 # ---------- 数据 ----------
-_ENCRYPTED_MAGIC = b"CTS1"
-
-
-def _derive_stream_keys(password: str, salt: bytes) -> tuple[bytes, bytes]:
-    material = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 120000, dklen=64)
-    return material[:32], material[32:]
-
-
-def _generate_keystream(stream_key: bytes, length: int) -> bytes:
-    output = bytearray()
-    counter = 0
-    while len(output) < length:
-        block = hashlib.sha256(stream_key + counter.to_bytes(8, "big")).digest()
-        output.extend(block)
-        counter += 1
-    return bytes(output[:length])
-
-
-def _encrypt_student_bytes(password: str, data: bytes) -> bytes:
-    if not password:
-        raise ValueError("缺少加密密码")
-    salt = os.urandom(16)
-    stream_key, mac_key = _derive_stream_keys(password, salt)
-    keystream = _generate_keystream(stream_key, len(data))
-    cipher = bytes(b ^ k for b, k in zip(data, keystream))
-    tag = hmac.new(mac_key, cipher, hashlib.sha256).digest()
-    return _ENCRYPTED_MAGIC + salt + tag + cipher
-
-
-def _decrypt_student_bytes(password: str, blob: bytes) -> bytes:
-    if not blob.startswith(_ENCRYPTED_MAGIC) or len(blob) <= len(_ENCRYPTED_MAGIC) + 48:
-        raise ValueError("文件格式无效")
-    salt = blob[len(_ENCRYPTED_MAGIC): len(_ENCRYPTED_MAGIC) + 16]
-    tag = blob[len(_ENCRYPTED_MAGIC) + 16: len(_ENCRYPTED_MAGIC) + 48]
-    cipher = blob[len(_ENCRYPTED_MAGIC) + 48:]
-    stream_key, mac_key = _derive_stream_keys(password, salt)
-    expected_tag = hmac.new(mac_key, cipher, hashlib.sha256).digest()
-    if not hmac.compare_digest(expected_tag, tag):
-        raise ValueError("密码错误或文件已损坏")
-    keystream = _generate_keystream(stream_key, len(cipher))
-    return bytes(b ^ k for b, k in zip(cipher, keystream))
-
-
 def _normalize_text(value: object) -> str:
     if PANDAS_READY:
         if pd.isna(value):
@@ -13027,25 +12604,12 @@ def _export_student_workbook_bytes(data: Mapping[str, PandasDataFrame]) -> bytes
 def _save_student_workbook(
     data: Mapping[str, PandasDataFrame],
     file_path: str,
-    encrypted_file_path: str,
     *,
-    encrypted: bool,
-    password: Optional[str],
     plain_candidates: Optional[Iterable[str]] = None,
-    encrypted_candidates: Optional[Iterable[str]] = None,
 ) -> None:
     plain_pool = _candidate_path_pool(file_path, plain_candidates)
-    encrypted_pool = _candidate_path_pool(encrypted_file_path, encrypted_candidates)
-    if encrypted:
-        if not password:
-            raise ValueError("缺少加密密码")
-        _write_encrypted_student_workbook(encrypted_file_path, data, password)
-        _remove_file_candidates(plain_pool)
-        _replicate_file_to_candidates(encrypted_file_path, encrypted_pool)
-    else:
-        _write_student_workbook(file_path, data)
-        _remove_file_candidates(encrypted_pool)
-        _replicate_file_to_candidates(file_path, plain_pool)
+    _write_student_workbook(file_path, data)
+    _replicate_file_to_candidates(file_path, plain_pool)
 
 
 def load_student_data(parent: Optional[QWidget]) -> Optional[StudentWorkbook]:
@@ -13058,51 +12622,18 @@ def load_student_data(parent: Optional[QWidget]) -> Optional[StudentWorkbook]:
     resources = _STUDENT_RESOURCES
     file_path = resources.plain
     existing_plain = _any_existing_path(resources.plain_candidates)
-    existing_encrypted = _any_existing_path(resources.encrypted_candidates)
+
+    encrypted_candidates = (
+        os.path.join(os.path.dirname(file_path), "students.xlsx.enc"),
+        os.path.abspath("students.xlsx.enc"),
+    )
+    existing_encrypted = _any_existing_path(encrypted_candidates)
 
     if existing_plain is None and existing_encrypted is not None:
-        attempts = 0
-        encrypted_source = existing_encrypted
-        while attempts < 3:
-            password, ok = PasswordPromptDialog.get_password(
-                parent,
-                "解密学生数据",
-                "检测到已加密的学生名单，请输入密码：",
-                allow_empty=False,
-            )
-            if not ok:
-                QMessageBox.information(parent, "提示", "已取消加载加密的学生名单。")
-                return None
-            password = password.strip()
-            if not password:
-                QMessageBox.warning(parent, "提示", "密码不能为空，请重新输入。")
-                attempts += 1
-                continue
-            try:
-                with open(encrypted_source, "rb") as fh:
-                    payload = fh.read()
-                plain_bytes = _decrypt_student_bytes(password, payload)
-                buffer = io.BytesIO(plain_bytes)
-                raw_data = pd.read_excel(buffer, sheet_name=None)
-                workbook = StudentWorkbook(OrderedDict(raw_data), active_class="")
-                _set_session_student_encryption(True, password)
-                try:
-                    _save_student_workbook(
-                        workbook.as_dict(),
-                        file_path,
-                        resources.encrypted,
-                        encrypted=False,
-                        password=None,
-                        plain_candidates=resources.plain_candidates,
-                        encrypted_candidates=resources.encrypted_candidates,
-                    )
-                except Exception:
-                    logger.debug("Failed to persist decrypted workbook to %s", file_path, exc_info=True)
-                return workbook
-            except Exception as exc:
-                attempts += 1
-                QMessageBox.warning(parent, "提示", f"解密失败：{exc}")
-        QMessageBox.critical(parent, "错误", "多次输入密码失败，无法加载学生名单。")
+        show_quiet_information(
+            parent,
+            "检测到旧版加密名单 students.xlsx.enc，但当前版本已取消加密功能，请先手动解密后再试。",
+        )
         return None
 
     if existing_plain is None:
@@ -13114,14 +12645,9 @@ def load_student_data(parent: Optional[QWidget]) -> Optional[StudentWorkbook]:
             _save_student_workbook(
                 workbook.as_dict(),
                 file_path,
-                resources.encrypted,
-                encrypted=False,
-                password=None,
                 plain_candidates=resources.plain_candidates,
-                encrypted_candidates=resources.encrypted_candidates,
             )
             show_quiet_information(parent, f"未找到学生名单，已为您创建模板文件：{file_path}")
-            _set_session_student_encryption(False, None)
             existing_plain = file_path
         except Exception as exc:
             QMessageBox.critical(parent, "错误", f"创建模板文件失败：{exc}")
@@ -13134,15 +12660,10 @@ def load_student_data(parent: Optional[QWidget]) -> Optional[StudentWorkbook]:
         _save_student_workbook(
             workbook.as_dict(),
             file_path,
-            resources.encrypted,
-            encrypted=False,
-            password=None,
             plain_candidates=resources.plain_candidates,
-            encrypted_candidates=resources.encrypted_candidates,
         )
-        _set_session_student_encryption(False, None)
-        if _any_existing_path(resources.encrypted_candidates):
-            show_quiet_information(parent, "检测到同时存在加密文件，将优先使用明文 students.xlsx。")
+        if existing_encrypted is not None:
+            show_quiet_information(parent, "检测到 students.xlsx.enc，本版本将忽略该文件。")
         return workbook
     except Exception as exc:
         QMessageBox.critical(parent, "错误", f"无法加载学生名单，请检查文件格式。\n错误：{exc}")
@@ -13737,9 +13258,7 @@ class ApplicationContext:
     def create(cls) -> "ApplicationContext":
         settings_manager = SettingsManager()
         workbook: Optional[StudentWorkbook] = None
-        encrypted_path = getattr(RollCallTimerWindow, "ENCRYPTED_STUDENT_FILE", "")
-        encrypted_exists = bool(encrypted_path and os.path.exists(encrypted_path))
-        if PANDAS_AVAILABLE and not encrypted_exists:
+        if PANDAS_AVAILABLE:
             workbook = load_student_data(None)
         return cls(settings_manager=settings_manager, student_workbook=workbook)
 

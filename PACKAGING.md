@@ -26,7 +26,7 @@
          df.to_excel(writer, sheet_name="班级1", index=False)
      PY
      ```
-     若使用加密名单，请在构建前解密为 `students.xlsx` 或调整命令改为 `students.xlsx.enc`。
+    若旧版曾生成 `students.xlsx.enc`，请先手动解密为 `students.xlsx` 再执行打包；当前版本不再内置加密/解密流程。
    - `icon.ico`：请从品牌素材库中获取 256×256 ICO 文件并放置于项目根目录。
 
 > 所有资源需与 `ClassroomTools.py` 位于同一目录，以便 Nuitka `--include-data-file` 参数引用。
