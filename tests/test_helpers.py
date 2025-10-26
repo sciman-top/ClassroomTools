@@ -576,3 +576,26 @@ def test_summarize_wps_process_hints_accepts_unbound_predicates() -> None:
     normalized = harness._normalized_class_hints("KwppShowFrameClass")
     hints = harness._summarize_wps_process_hints(normalized)
     assert hints.has_slideshow is True
+
+
+def test_summarize_wps_process_hints_respects_wrapped_overrides() -> None:
+    class _WrappedHarness(_MixinHarness):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls: List[str] = []
+
+        @functools.wraps(
+            helpers._PresentationWindowMixin._class_has_wps_presentation_signature  # type: ignore[attr-defined]
+        )
+        def _class_has_wps_presentation_signature(self, class_name: str) -> bool:
+            self.calls.append(class_name)
+            return False
+
+    harness = _WrappedHarness()
+    normalized = harness._normalized_class_hints("KwppShowFrameClass")
+    hints = harness._summarize_wps_process_hints(normalized)
+    assert hints.has_wps_presentation_signature is False
+    assert harness.calls == ["kwppshowframeclass"]
+    hints = harness._summarize_wps_process_hints(normalized)
+    assert hints.has_wps_presentation_signature is False
+    assert harness.calls == ["kwppshowframeclass"]
