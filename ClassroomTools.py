@@ -648,54 +648,6 @@ def _preferred_student_resource_directory() -> str:
     return module_dir
 
 
-def _preferred_student_resource_directory() -> str:
-    """Return the user-visible directory for student roster files."""
-
-    candidates: List[str] = []
-    seen: Set[str] = set()
-
-    def _append(path: Optional[str]) -> None:
-        if not path:
-            return
-        normalized = os.path.normpath(os.path.abspath(path))
-        marker = os.path.normcase(normalized)
-        if marker in seen:
-            return
-        seen.add(marker)
-        candidates.append(normalized)
-
-    _append(os.environ.get("NUITKA_ONEFILE_PARENT"))
-
-    if getattr(sys, "frozen", False):
-        with contextlib.suppress(Exception):
-            _append(os.path.dirname(os.path.abspath(getattr(sys, "executable", ""))))
-
-    with contextlib.suppress(Exception):
-        _append(os.path.dirname(os.path.abspath(sys.argv[0])))
-
-    if _INITIAL_CWD:
-        _append(_INITIAL_CWD)
-
-    with contextlib.suppress(Exception):
-        _append(os.getcwd())
-
-    module_dir = os.path.dirname(os.path.abspath(__file__))
-    _append(module_dir)
-
-    fallback_app_dir = _preferred_app_directory()
-    if fallback_app_dir:
-        _append(fallback_app_dir)
-
-    for candidate in candidates:
-        if _ensure_directory(candidate):
-            return candidate
-
-    if not _ensure_directory(module_dir):
-        module_dir = os.path.abspath(os.getcwd())
-        _ensure_directory(module_dir)
-    return module_dir
-
-
 @functools.lru_cache(maxsize=1)
 def _resolve_student_resource_paths() -> _StudentResourcePaths:
     base_dir = _preferred_student_resource_directory()
@@ -4347,11 +4299,27 @@ class _PresentationWindowMixin:
     def _widget_hwnd(self, widget: Optional[QWidget]) -> int:
         if widget is None:
             return 0
+        pid = wintypes.DWORD()
         try:
-            wid = widget.winId()
+            thread_id = int(_USER32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(pid)))
         except Exception:
-            return 0
-        return int(wid) if wid else 0
+            thread_id = 0
+        return thread_id
+
+    def _toolbar_widget(self) -> Optional[QWidget]:
+        return self._overlay_child_widget("toolbar")
+
+    def _photo_overlay_widget(self) -> Optional[QWidget]:
+        return self._overlay_child_widget("_photo_overlay")
+
+    def _overlay_hwnd(self) -> int:
+        return self._widget_hwnd(self._overlay_widget())
+
+    def _toolbar_hwnd(self) -> int:
+        return self._widget_hwnd(self._toolbar_widget())
+
+    def _photo_overlay_hwnd(self) -> int:
+        return self._widget_hwnd(self._photo_overlay_widget())
 
     def _toolbar_widget(self) -> Optional[QWidget]:
         return self._overlay_child_widget("toolbar")
@@ -12554,25 +12522,6 @@ def _write_student_workbook(file_path: str, data: Mapping[str, PandasDataFrame])
     finally:
         with contextlib.suppress(FileNotFoundError):
             os.remove(tmp_path)
-
-
-def _write_encrypted_student_workbook(file_path: str, data: Mapping[str, PandasDataFrame], password: str) -> None:
-    payload = _export_student_workbook_bytes(data)
-    encrypted = _encrypt_student_bytes(password, payload)
-    target_dir = os.path.dirname(os.path.abspath(file_path))
-    if target_dir and not _ensure_directory(target_dir):
-        target_dir = os.getcwd()
-    tmp_dir = target_dir or "."
-    fd, tmp_path = tempfile.mkstemp(suffix=".enc", dir=tmp_dir)
-    try:
-        with os.fdopen(fd, "wb") as tmp_file:
-            tmp_file.write(encrypted)
-        os.replace(tmp_path, file_path)
-    finally:
-        with contextlib.suppress(FileNotFoundError):
-            os.remove(tmp_path)
-
-
 def _export_student_workbook_bytes(data: Mapping[str, PandasDataFrame]) -> bytes:
     normalized: "OrderedDict[str, PandasDataFrame]" = OrderedDict()
     for idx, (name, df) in enumerate(data.items(), start=1):
