@@ -6094,35 +6094,48 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         self.temp_canvas = QPixmap(self.size()); self.temp_canvas.fill(Qt.GlobalColor.transparent)
 
     # ---- ͼ��ͼ����� ----
-    def _ensure_brush_painter(self) -> QPainter:
-        painter = self._brush_painter
+    def _ensure_canvas_painter(
+        self,
+        attr_name: str,
+        mode: Union[
+            QPainter.CompositionMode,
+            Callable[[], QPainter.CompositionMode],
+        ],
+    ) -> QPainter:
+        painter: Optional[QPainter] = getattr(self, attr_name, None)
+        composition_mode = mode() if callable(mode) else mode
         if painter is None:
             painter = QPainter(self.canvas)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            painter.setCompositionMode(self._brush_composition_mode)
-            self._brush_painter = painter
+            painter.setCompositionMode(composition_mode)
+            setattr(self, attr_name, painter)
         else:
-            painter.setCompositionMode(self._brush_composition_mode)
+            painter.setCompositionMode(composition_mode)
         return painter
+
+    def _release_canvas_painter(self, attr_name: str) -> None:
+        painter: Optional[QPainter] = getattr(self, attr_name, None)
+        if painter is not None:
+            painter.end()
+            setattr(self, attr_name, None)
+
+    def _ensure_brush_painter(self) -> QPainter:
+        return self._ensure_canvas_painter(
+            "_brush_painter",
+            lambda: self._brush_composition_mode,
+        )
 
     def _release_brush_painter(self) -> None:
-        if self._brush_painter is not None:
-            self._brush_painter.end()
-            self._brush_painter = None
+        self._release_canvas_painter("_brush_painter")
 
     def _ensure_eraser_painter(self) -> QPainter:
-        painter = self._eraser_painter
-        if painter is None:
-            painter = QPainter(self.canvas)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
-            self._eraser_painter = painter
-        return painter
+        return self._ensure_canvas_painter(
+            "_eraser_painter",
+            QPainter.CompositionMode.CompositionMode_Clear,
+        )
 
     def _release_eraser_painter(self) -> None:
-        if self._eraser_painter is not None:
-            self._eraser_painter.end()
-            self._eraser_painter = None
+        self._release_canvas_painter("_eraser_painter")
 
     def _release_canvas_painters(self) -> None:
         self._release_brush_painter()
