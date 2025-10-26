@@ -13262,63 +13262,6 @@ def main() -> None:
     sys.exit(app.exec())
 
 
-# Nuitka 打包指令（请与 PACKAGING.md 保持一致）：
-# 单文件：
-#   python -m nuitka ClassroomTools.py ^
-#     --onefile ^
-#     --remove-output ^
-#     --assume-yes-for-downloads ^
-#     --jobs=%NUMBER_OF_PROCESSORS% ^
-#     --lto=no ^
-#     --enable-plugin=pyqt6 ^
-#     --include-qt-plugins=sensible ^
-#     --enable-plugin=numpy ^
-#     --include-package=pyttsx3.drivers ^
-#     --include-module=pyttsx3,pyttsx3.drivers.sapi5,pythoncom,win32api,win32con,win32gui,win32clipboard,win32com.client,win32com.server ^
-#     --include-package=comtypes ^
-#     --include-package=comtypes.gen ^
-#     --include-package=win32com ^
-#     --include-package-data=openpyxl ^
-#     --noinclude-data-files=openpyxl/tests/* ^
-#     --nofollow-import-to=numpy.tests ^
-#     --include-data-file=students.xlsx=students.xlsx ^
-#     --include-data-file=settings.ini=settings.ini ^
-#     --include-data-file=icon.ico=icon.ico ^
-#     --windows-console-mode=disable ^
-#     --windows-icon-from-ico=icon.ico ^
-#     --windows-file-version=4.0.0.0 ^
-#     --windows-product-version=4.0.0.0 ^
-#     --windows-company-name="sciman逸居" ^
-#     --windows-product-name="课堂工具" ^
-#     --windows-file-description="课堂教学辅助工具"
-# 独立目录：
-#   python -m nuitka ClassroomTools.py ^
-#     --standalone ^
-#     --output-dir=dist ^
-#     --remove-output ^
-#     --assume-yes-for-downloads ^
-#     --jobs=%NUMBER_OF_PROCESSORS% ^
-#     --lto=no ^
-#     --enable-plugin=pyqt6 ^
-#     --include-qt-plugins=sensible ^
-#     --enable-plugin=numpy ^
-#     --include-package=pyttsx3.drivers ^
-#     --include-module=pyttsx3,pyttsx3.drivers.sapi5,pythoncom,win32api,win32con,win32gui,win32clipboard,win32com.client,win32com.server ^
-#     --include-package=comtypes ^
-#     --include-package=comtypes.gen ^
-#     --include-package=win32com ^
-#     --include-package-data=openpyxl ^
-#     --noinclude-data-files=openpyxl/tests/* ^
-#     --nofollow-import-to=numpy.tests ^
-#     --include-data-file=students.xlsx=students.xlsx ^
-#     --include-data-file=settings.ini=settings.ini ^
-#     --include-data-file=icon.ico=icon.ico ^
-#     --windows-console-mode=disable ^
-#     --windows-icon-from-ico=icon.ico ^
-#     --windows-file-version=4.0.0.0 ^
-#     --windows-product-version=4.0.0.0 ^
-#     --windows-company-name="sciman逸居" ^
-#     --windows-product-name="课堂工具" ^
-#     --windows-file-description="课堂教学辅助工具"
+
 if __name__ == "__main__":
     main()
