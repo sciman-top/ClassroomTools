@@ -86,6 +86,8 @@ def _load_helper_module() -> types.ModuleType:
         "_iter_unique_paths",
         "_normalize_path_marker",
         "_candidate_path_pool",
+        "_temporary_directory_roots",
+        "_is_probably_temporary_path",
         "_remove_file_candidates",
         "_replicate_file_to_candidates",
         "_mirror_resource_to_primary",
@@ -384,6 +386,48 @@ def test_resolve_student_resource_paths_target_preferred_directory(
 
     assert Path(resources.plain).parent == preferred_dir
     assert any(Path(candidate) == bundled_plain for candidate in resources.plain_candidates)
+
+
+def test_is_probably_temporary_path_detects_environment_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    temp_root = tmp_path / "nuikta"
+    temp_root.mkdir()
+    monkeypatch.setenv("NUITKA_ONEFILE_TEMP", str(temp_root))
+    helpers._temporary_directory_roots.cache_clear()  # type: ignore[attr-defined]
+
+    candidate = temp_root / "students.xlsx"
+
+    assert helpers._is_probably_temporary_path(str(candidate)) is True  # type: ignore[attr-defined]
+
+
+def test_preferred_student_directory_skips_temporary_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    temp_root = tmp_path / "temp"
+    temp_root.mkdir()
+    real_root = tmp_path / "real"
+    real_root.mkdir()
+
+    def _fake_collect_roots() -> List[str]:
+        return [str(temp_root), str(real_root)]
+
+    monkeypatch.setenv("TEMP", str(temp_root))
+    helpers._temporary_directory_roots.cache_clear()  # type: ignore[attr-defined]
+
+    def _fake_temp_roots() -> Tuple[str, ...]:
+        marker = helpers._normalize_path_marker(str(temp_root))  # type: ignore[attr-defined]
+        return (marker,) if marker else tuple()
+
+    monkeypatch.setattr(helpers, "_temporary_directory_roots", _fake_temp_roots, raising=False)  # type: ignore[attr-defined]
+    monkeypatch.setattr(helpers, "_collect_resource_roots", _fake_collect_roots, raising=False)  # type: ignore[attr-defined]
+
+    assert helpers._is_probably_temporary_path(str(temp_root)) is True  # type: ignore[attr-defined]
+    assert helpers._is_probably_temporary_path(str(real_root)) is False  # type: ignore[attr-defined]
+
+    selected = helpers._preferred_student_resource_directory()  # type: ignore[attr-defined]
+
+    assert Path(selected) == real_root
 
 
 _WPS_WRITER_CLASSES = {

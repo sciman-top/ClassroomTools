@@ -459,6 +459,43 @@ def _normalize_path_marker(path: Optional[str]) -> Optional[str]:
     return os.path.normcase(normalized)
 
 
+@functools.lru_cache(maxsize=1)
+def _temporary_directory_roots() -> Tuple[str, ...]:
+    """Return a tuple of normalised temporary directory roots."""
+
+    roots: List[str] = []
+    seen: Set[str] = set()
+
+    def _append(value: Optional[str]) -> None:
+        marker = _normalize_path_marker(value)
+        if not marker or marker in seen:
+            return
+        seen.add(marker)
+        roots.append(marker)
+
+    for name in ("NUITKA_ONEFILE_TEMP", "TEMP", "TMP", "TMPDIR", "TEMPDIR"):
+        _append(os.environ.get(name))
+
+    try:
+        _append(tempfile.gettempdir())
+    except Exception:  # pragma: no cover - defensive guard against exotic envs
+        pass
+
+    return tuple(roots)
+
+
+def _is_probably_temporary_path(path: Optional[str]) -> bool:
+    """Heuristically determine whether *path* resides in a temporary directory."""
+
+    marker = _normalize_path_marker(path)
+    if not marker:
+        return False
+    for root in _temporary_directory_roots():
+        if marker == root or marker.startswith(root + os.sep):
+            return True
+    return False
+
+
 def _candidate_path_pool(primary: str, extra: Optional[Iterable[str]]) -> Tuple[str, ...]:
     combined: List[str] = [primary]
     if extra is not None:
@@ -604,15 +641,22 @@ def _preferred_student_resource_directory() -> str:
     """Return the user-visible directory for student roster files."""
 
     module_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = list(_collect_resource_roots())
 
-    for candidate in _collect_resource_roots():
-        if _ensure_directory(candidate):
-            return candidate
+    for candidate in candidates:
+        if _is_probably_temporary_path(candidate):
+            continue
+        if _ensure_writable_directory(candidate):
+            return os.path.normpath(os.path.abspath(candidate))
+
+    for candidate in candidates:
+        if _ensure_writable_directory(candidate):
+            return os.path.normpath(os.path.abspath(candidate))
 
     fallback = _preferred_app_directory()
-    if not _ensure_directory(fallback):
+    if not _ensure_writable_directory(fallback):
         fallback = module_dir
-        if not _ensure_directory(fallback):
+        if not _ensure_writable_directory(fallback):
             fallback = os.path.abspath(os.getcwd())
             _ensure_directory(fallback)
     return os.path.normpath(os.path.abspath(fallback))
@@ -4194,668 +4238,6 @@ class _PresentationWindowMixin:
     def _is_wps_writer_process(self, process_name: str, *classes: str) -> bool:
         return self._classify_wps_process(process_name, *classes) == "writer"
 
-# ---------- 叠加层（画笔/白板） ----------
-
-    def _enumerate_overlay_candidate_windows(self, overlay_hwnd: int) -> Optional[List[int]]:
-        if _USER32 is None or _WNDENUMPROC is None:
-            return None
-        candidates: List[int] = []
-
-class _PresentationWindowMixin:
-    @dataclass(frozen=True, slots=True)
-    class _WPSProcessHints:
-        classes: Tuple[str, ...]
-        has_slideshow: bool
-        has_wps_presentation_signature: bool
-        has_ms_presentation_signature: bool
-        has_writer_signature: bool
-
-    @dataclass(slots=True)
-    class _WPSHintFlagState:
-        """Mutable container that tracks which WPS hint flags were satisfied."""
-
-        flags: Dict[str, bool]
-        remaining: int
-
-        @classmethod
-        def from_delegates(
-            cls,
-            delegates: Tuple[Tuple[str, Callable[[str], bool]], ...],
-        ) -> "_PresentationWindowMixin._WPSHintFlagState":
-            flags = {flag_name: False for flag_name, _ in delegates}
-            return cls(flags, len(flags))
-
-        def mark_flag(self, flag_name: str) -> None:
-            if flag_name not in self.flags or self.flags[flag_name]:
-                return
-            self.flags[flag_name] = True
-            self.remaining = max(0, self.remaining - 1)
-
-        def evaluate_class(
-            self,
-            class_name: str,
-            delegates: Tuple[Tuple[str, Callable[[str], bool]], ...],
-        ) -> bool:
-            for flag_name, predicate in delegates:
-                if self.flags.get(flag_name):
-                    continue
-                if predicate(class_name):
-                    self.mark_flag(flag_name)
-                    if self.remaining == 0:
-                        return True
-            return self.remaining == 0
-
-        def to_process_hints(
-            self,
-            owner: "_PresentationWindowMixin",
-            classes: Tuple[str, ...],
-        ) -> "_PresentationWindowMixin._WPSProcessHints":
-            return owner._WPSProcessHints(
-                classes=classes,
-                has_slideshow=self.flags.get("has_slideshow", False),
-                has_wps_presentation_signature=self.flags.get(
-                    "has_wps_presentation_signature", False
-                ),
-                has_ms_presentation_signature=self.flags.get(
-                    "has_ms_presentation_signature", False
-                ),
-                has_writer_signature=self.flags.get("has_writer_signature", False),
-            )
-
-        @property
-        def is_complete(self) -> bool:
-            return self.remaining == 0
-
-    @dataclass(slots=True)
-    class _WPSPredicateManager:
-        """Helper that prepares and evaluates cached WPS hint predicates."""
-
-        owner: "_PresentationWindowMixin"
-        debug: Optional[Callable[..., None]]
-        specs: Tuple["_PresentationWindowMixin._PredicateSpec", ...]
-        _delegates: Optional[Tuple[Tuple[str, Callable[[str], bool]], ...]] = None
-
-        def _resolve_delegates(
-            self,
-        ) -> Tuple[Tuple[str, Callable[[str], bool]], ...]:
-            if not self.specs:
-                return tuple()
-
-            cache = self.owner._resolve_wps_predicate_cache()
-            cache_key = self.owner._build_wps_delegate_cache_key(self.debug, self.specs)
-            cached = cache.get(cache_key)
-            if cached is not None:
-                return cached
-
-            seen_flags: Set[str] = set()
-            duplicate_flags: Set[str] = set()
-            missing_flags = 0
-            delegates: List[Tuple[str, Callable[[str], bool]]] = []
-
-            for spec in self.specs:
-                flag_name = spec.flag_name
-                if not flag_name:
-                    missing_flags += 1
-                    continue
-                if flag_name in seen_flags:
-                    duplicate_flags.add(flag_name)
-                    continue
-
-                seen_flags.add(flag_name)
-                delegates.append(
-                    (
-                        flag_name,
-                        self.owner._memoize_wps_spec(spec, self.debug),
-                    )
-                )
-
-            if duplicate_flags:
-                self.owner._emit_wps_debug(
-                    self.debug,
-                    "Duplicate WPS predicate flags ignored: %s",  # pragma: no cover - debug logging
-                    ", ".join(sorted(duplicate_flags)),
-                )
-            if missing_flags:
-                self.owner._emit_wps_debug(
-                    self.debug,
-                    "WPS predicate specs missing flag names: %d",  # pragma: no cover - debug logging
-                    missing_flags,
-                )
-
-            prepared = tuple(delegates)
-            cache[cache_key] = prepared
-            return prepared
-
-        def delegates(self) -> Tuple[Tuple[str, Callable[[str], bool]], ...]:
-            if self._delegates is None:
-                self._delegates = self._resolve_delegates()
-            return self._delegates
-
-        def summarize(
-            self, classes: Tuple[str, ...]
-        ) -> "_PresentationWindowMixin._WPSProcessHints":
-            if not classes:
-                return self.owner._empty_wps_process_hints(classes)
-
-            delegates = self.delegates()
-            if not delegates:
-                return self.owner._empty_wps_process_hints(classes)
-
-            state = self.owner._WPSHintFlagState.from_delegates(delegates)
-            if not state.flags:
-                return self.owner._empty_wps_process_hints(classes)
-
-            unique_classes = tuple(dict.fromkeys(classes))
-            for class_name in unique_classes:
-                if state.evaluate_class(class_name, delegates):
-                    break
-
-            return state.to_process_hints(self.owner, classes)
-
-    class _PrefixKeywordClassifier:
-        __slots__ = ("prefixes", "keywords", "excludes", "canonical")
-
-        def __init__(
-            self,
-            *,
-            prefixes: Iterable[str],
-            keywords: Iterable[str],
-            excludes: Iterable[str] = (),
-            canonical: Iterable[str] = (),
-        ) -> None:
-            normalizer = self._normalize
-
-            def _normalize_sequence(values: Iterable[str]) -> Tuple[str, ...]:
-                seen: Set[str] = set()
-                normalized: List[str] = []
-                for value in values:
-                    candidate = normalizer(value)
-                    if not candidate or candidate in seen:
-                        continue
-                    seen.add(candidate)
-                    normalized.append(candidate)
-                return tuple(normalized)
-
-            self.prefixes = _normalize_sequence(prefixes)
-            self.keywords = _normalize_sequence(keywords)
-            self.excludes = _normalize_sequence(excludes)
-            self.canonical = frozenset(_normalize_sequence(canonical))
-
-        @staticmethod
-        def _normalize(value: Any) -> str:
-            return _normalize_class_token(value)
-
-        def _matches(self, normalized: str) -> bool:
-            if not normalized:
-                return False
-            if normalized in self.canonical:
-                return True
-            if not self.prefixes:
-                return False
-            has_prefix = any(normalized.startswith(prefix) for prefix in self.prefixes)
-            if not has_prefix:
-                return False
-            if self.excludes and any(token in normalized for token in self.excludes):
-                return False
-            if self.keywords:
-                return any(keyword in normalized for keyword in self.keywords)
-            return False
-
-        def has_signature(self, class_name: Any) -> bool:
-            normalized = self._normalize(class_name)
-            return self._matches(normalized)
-
-        def has_normalized_signature(self, class_name: Any) -> bool:
-            if not isinstance(class_name, str):
-                normalized = self._normalize(class_name)
-            else:
-                normalized = class_name.strip().casefold()
-            return self._matches(normalized)
-
-    class _ClassTokens:
-        __slots__ = ()
-
-        @staticmethod
-        def freeze(*groups: Any) -> FrozenSet[str]:
-            tokens: Set[str] = set()
-            normalizer = _normalize_class_token
-            for group in groups:
-                if isinstance(group, (str, bytes)) or not hasattr(group, "__iter__"):
-                    normalized = normalizer(group)
-                    if normalized:
-                        tokens.add(normalized)
-                    continue
-                for value in group:
-                    normalized = normalizer(value)
-                    if normalized:
-                        tokens.add(normalized)
-            return frozenset(tokens)
-
-    @staticmethod
-    def _unwrap_predicate_callable(value: Callable[..., Any]) -> Callable[..., Any]:
-        """Return the underlying function for bound methods without unwrapping decorators."""
-
-        func: Any = getattr(value, "__func__", value)
-        return cast(Callable[..., Any], func)
-
-    @dataclass(frozen=True, slots=True)
-    class _PredicateSpec:
-        flag_name: str
-        predicate: Callable[[Any], bool]
-        normalized_predicate: Optional[Callable[[str], bool]]
-        base_impl: Callable[[Any], bool]
-
-        def normalized_delegate(self) -> Optional[Callable[[str], bool]]:
-            """Return the normalized predicate when the base implementation is used."""
-
-            if self.normalized_predicate is None:
-                return None
-
-            predicate_impl = _PresentationWindowMixin._unwrap_predicate_callable(
-                self.predicate
-            )
-            base_impl = _PresentationWindowMixin._unwrap_predicate_callable(
-                self.base_impl
-            )
-            if predicate_impl is base_impl:
-                return self.normalized_predicate
-            return None
-
-    _WPS_FRAME_CLASSES: FrozenSet[str] = _ClassTokens.freeze(
-        "kwpsframeclass", "kwpsmainframe", "wpsframeclass", "wpsmainframe"
-    )
-    _WPS_DOC_VIEW_CLASSES: FrozenSet[str] = _ClassTokens.freeze(
-        "kwpsdocview", "wpsdocview"
-    )
-    _WPS_VIEW_CLASSES: FrozenSet[str] = _ClassTokens.freeze(
-        "kwpsviewclass", "wpsviewclass", "kwpspageview", "wpspageview"
-    )
-    _WORD_SHELL_CLASSES: FrozenSet[str] = _ClassTokens.freeze(
-        "opusapp", "nuidocumentwindow", "netuihwnd", "documentwindow", "mdiclient"
-    )
-    _WORD_CONTENT_CORE_CLASSES: FrozenSet[str] = _ClassTokens.freeze(
-        "worddocument", "paneclassdc", "_wwg", "_wwb"
-    )
-    _WORD_HOST_CLASSES: FrozenSet[str] = _ClassTokens.freeze(
-        _WORD_SHELL_CLASSES, _WPS_FRAME_CLASSES
-    )
-    _WORD_CONTENT_CLASSES: FrozenSet[str] = _ClassTokens.freeze(
-        _WORD_CONTENT_CORE_CLASSES, _WPS_DOC_VIEW_CLASSES, _WPS_VIEW_CLASSES
-    )
-    _WORD_WINDOW_CLASSES: FrozenSet[str] = _ClassTokens.freeze(
-        _WORD_HOST_CLASSES, _WORD_CONTENT_CORE_CLASSES
-    )
-    _KNOWN_PRESENTATION_CLASSES: FrozenSet[str] = _ClassTokens.freeze(
-        (
-            "screenclass",
-            "pptframeclass",
-            "pptviewwndclass",
-            "powerpntframeclass",
-            "powerpointframeclass",
-            "acrobatsdiwindow",
-            "kwppframeclass",
-            "kwppmainframe",
-            "nuidocumentwindow",
-            "netuihwnd",
-            "mdiclient",
-            "documentwindow",
-            "_wwg",
-            "_wwb",
-            "worddocument",
-            "paneclassdc",
-        ),
-        _WORD_HOST_CLASSES,
-        _WPS_DOC_VIEW_CLASSES,
-    )
-    _KNOWN_PRESENTATION_PREFIXES: Tuple[str, ...] = (
-        ("kwpp", "kwps", "wpsframe", "wpsmain") if win32gui is not None else tuple()
-    )
-    _SLIDESHOW_PRIORITY_CLASSES: FrozenSet[str] = _ClassTokens.freeze("screenclass")
-    _SLIDESHOW_SECONDARY_CLASSES: FrozenSet[str] = _ClassTokens.freeze(
-        "pptviewwndclass",
-        "kwppshowframeclass",
-        "kwppshowframe",
-        "kwppshowwndclass",
-        "kwpsshowframe",
-    )
-    _WPS_SLIDESHOW_CLASSES: FrozenSet[str] = _ClassTokens.freeze(
-        "kwppshowframeclass",
-        "kwppshowframe",
-        "kwppshowwndclass",
-        "kwpsshowframe",
-        "wpsshowframe",
-    )
-    _PRESENTATION_EDITOR_CLASSES: FrozenSet[str] = _ClassTokens.freeze(
-        (
-            "pptframeclass",
-            "powerpntframeclass",
-            "powerpointframeclass",
-            "kwppframeclass",
-            "kwppmainframe",
-        ),
-        _WPS_FRAME_CLASSES,
-    )
-    _WPS_WRITER_CLASSIFIER = _PrefixKeywordClassifier(
-        prefixes=("kwps", "wps"),
-        keywords=("frame", "view", "doc", "page"),
-        excludes=("show", "slideshow"),
-        canonical=_ClassTokens.freeze(_WPS_DOC_VIEW_CLASSES, _WPS_FRAME_CLASSES),
-    )
-
-    @classmethod
-    def _normalize_class_hint(cls, value: Any) -> str:
-        return cls._PrefixKeywordClassifier._normalize(value)
-
-    @staticmethod
-    def _resolve_debug_logger() -> Optional[Callable[..., None]]:
-        """Return a callable debug logger suitable for predicate diagnostics."""
-
-        logger_ref = globals().get("logger")
-        debug = getattr(logger_ref, "debug", None)
-        if callable(debug):
-            return debug
-
-        logging_module = globals().get("logging")
-        if logging_module is None:  # pragma: no cover - helper extraction fallback
-            import logging as logging_module  # type: ignore[import-not-found]
-
-        fallback_logger = logging_module.getLogger(__name__)
-        debug = getattr(fallback_logger, "debug", None)
-        if callable(debug):
-            return debug
-        return None
-
-    def _wps_hint_predicate_specs(self) -> Tuple["_PredicateSpec", ...]:
-        cls = _PresentationWindowMixin
-        return (
-            self._PredicateSpec(
-                "has_slideshow",
-                self._is_wps_slideshow_class,
-                self._normalized_is_wps_slideshow_class,
-                cls._is_wps_slideshow_class,
-            ),
-            self._PredicateSpec(
-                "has_wps_presentation_signature",
-                self._class_has_wps_presentation_signature,
-                self._normalized_has_wps_presentation_signature,
-                cls._class_has_wps_presentation_signature,
-            ),
-            self._PredicateSpec(
-                "has_ms_presentation_signature",
-                self._class_has_ms_presentation_signature,
-                self._normalized_has_ms_presentation_signature,
-                cls._class_has_ms_presentation_signature,
-            ),
-            self._PredicateSpec(
-                "has_writer_signature",
-                self._class_has_wps_writer_signature,
-                self._normalized_has_wps_writer_signature,
-                cls._class_has_wps_writer_signature,
-            ),
-        )
-
-    def _normalized_is_wps_slideshow_class(self, normalized: str) -> bool:
-        if not normalized:
-            return False
-        if normalized in self._WPS_SLIDESHOW_CLASSES:
-            return True
-        return normalized.startswith("kwppshow")
-
-    def _evaluate_normalized_class(
-        self,
-        class_name: Any,
-        normalized_predicate: Callable[[str], bool],
-    ) -> bool:
-        normalized = self._normalize_class_hint(class_name)
-        if not normalized:
-            return False
-        return bool(normalized_predicate(normalized))
-
-    def _is_wps_slideshow_class(self, class_name: str) -> bool:
-        return self._evaluate_normalized_class(
-            class_name, self._normalized_is_wps_slideshow_class
-        )
-
-    def _is_word_like_class(self, class_name: str) -> bool:
-        normalized = self._normalize_class_hint(class_name)
-        if not normalized:
-            return False
-        if normalized in self._WORD_WINDOW_CLASSES:
-            return True
-        if normalized in self._WORD_CONTENT_CLASSES:
-            return True
-        if normalized in self._WORD_HOST_CLASSES:
-            return True
-        if normalized.startswith("_ww"):
-            return True
-        if "word" in normalized:
-            return True
-        return self._WPS_WRITER_CLASSIFIER.has_signature(normalized)
-
-    def _class_has_wps_writer_signature(self, class_name: str) -> bool:
-        return self._WPS_WRITER_CLASSIFIER.has_signature(class_name)
-
-    def _normalized_has_wps_writer_signature(self, normalized: str) -> bool:
-        if not normalized:
-            return False
-        return self._WPS_WRITER_CLASSIFIER.has_normalized_signature(normalized)
-
-    def _normalized_has_wps_presentation_signature(self, normalized: str) -> bool:
-        if not normalized:
-            return False
-        if self._normalized_is_wps_slideshow_class(normalized):
-            return True
-        if normalized.startswith("kwpp") or "kwpp" in normalized:
-            return True
-        if normalized.startswith("wpp") and "wps" not in normalized:
-            return True
-        if normalized.startswith("wpsshow") or "wpsshow" in normalized:
-            return True
-        return False
-
-    def _class_has_wps_presentation_signature(self, class_name: str) -> bool:
-        return self._evaluate_normalized_class(
-            class_name, self._normalized_has_wps_presentation_signature
-        )
-
-    def _normalized_has_ms_presentation_signature(self, normalized: str) -> bool:
-        if not normalized:
-            return False
-        if self._normalized_has_wps_presentation_signature(normalized):
-            return False
-        if normalized in self._SLIDESHOW_PRIORITY_CLASSES:
-            return True
-        if normalized in self._SLIDESHOW_SECONDARY_CLASSES:
-            return True
-        if normalized in self._PRESENTATION_EDITOR_CLASSES:
-            if normalized.startswith("kwpp") or normalized.startswith("kwps"):
-                return False
-            if normalized.startswith("wps"):
-                return False
-            return True
-        keywords = ("ppt", "powerpnt", "powerpoint", "screenclass")
-        return any(keyword in normalized for keyword in keywords)
-
-    def _class_has_ms_presentation_signature(self, class_name: str) -> bool:
-        return self._evaluate_normalized_class(
-            class_name, self._normalized_has_ms_presentation_signature
-        )
-
-    def _normalized_class_hints(self, *classes: Any) -> Tuple[str, ...]:
-        normalized: List[str] = []
-        for value in classes:
-            hint = self._normalize_class_hint(value)
-            if hint:
-                normalized.append(hint)
-        return tuple(normalized)
-
-    def _normalize_process_name(self, value: Any) -> str:
-        return _normalize_text_token(value, empty_on_falsy=False)
-
-    def _normalized_process_context(
-        self, process_name: Any, classes: Iterable[Any]
-    ) -> Tuple[str, Tuple[str, ...]]:
-        normalized_name = self._normalize_process_name(process_name)
-        normalized_classes = self._normalized_class_hints(*classes)
-        return normalized_name, normalized_classes
-
-    def _empty_wps_process_hints(
-        self, classes: Tuple[str, ...]
-    ) -> "_PresentationWindowMixin._WPSProcessHints":
-        return self._WPSProcessHints(classes, False, False, False, False)
-
-    @staticmethod
-    def _emit_wps_debug(
-        debug: Optional[Callable[..., None]],
-        message: str,
-        *args: Any,
-        **kwargs: Any,
-    ) -> None:
-        if callable(debug):
-            debug(message, *args, **kwargs)
-
-    def _log_wps_predicate_failure(
-        self, debug: Optional[Callable[..., None]]
-    ) -> None:
-        self._emit_wps_debug(
-            debug,
-            "WPS process hint predicate failed",  # pragma: no cover - debug logging
-            exc_info=True,
-        )
-
-    def _memoize_wps_spec(
-        self,
-        spec: "_PresentationWindowMixin._PredicateSpec",
-        debug: Optional[Callable[..., None]],
-    ) -> Callable[[str], bool]:
-        normalized_impl = spec.normalized_delegate()
-        delegate: Callable[[Any], bool]
-        if normalized_impl is None:
-            delegate = spec.predicate
-        else:
-            delegate = normalized_impl
-
-        @functools.lru_cache(maxsize=None)
-        def _call(class_name: str) -> bool:
-            try:
-                return bool(delegate(class_name))
-            except Exception:
-                self._log_wps_predicate_failure(debug)
-                return False
-
-        return _call
-
-    def _resolve_wps_predicate_cache(self) -> Dict[
-        Tuple[Any, ...], Tuple[Tuple[str, Callable[[str], bool]], ...]
-    ]:
-        cache = getattr(self, "_cached_wps_predicate_delegates", None)
-        if cache is None:
-            cache = {}
-            setattr(self, "_cached_wps_predicate_delegates", cache)
-        return cast(
-            Dict[Tuple[Any, ...], Tuple[Tuple[str, Callable[[str], bool]], ...]],
-            cache,
-        )
-
-    def _debug_delegate_cache_key(
-        self, debug: Optional[Callable[..., None]]
-    ) -> Tuple[Any, Any]:
-        if not callable(debug):
-            return (None, None)
-        owner = getattr(debug, "__self__", None)
-        return (
-            owner,
-            self._unwrap_predicate_callable(debug),
-        )
-
-    def _build_wps_delegate_cache_key(
-        self,
-        debug: Optional[Callable[..., None]],
-        predicate_specs: Tuple["_PresentationWindowMixin._PredicateSpec", ...],
-    ) -> Tuple[Any, ...]:
-        debug_key = self._debug_delegate_cache_key(debug)
-        spec_keys: List[Tuple[Any, Any, Any, Any]] = []
-        for spec in predicate_specs:
-            predicate_impl = self._unwrap_predicate_callable(spec.predicate)
-            if spec.normalized_predicate is None:
-                normalized_impl: Optional[Callable[..., Any]] = None
-            else:
-                normalized_impl = self._unwrap_predicate_callable(
-                    spec.normalized_predicate
-                )
-            base_impl = self._unwrap_predicate_callable(spec.base_impl)
-            spec_keys.append(
-                (
-                    spec.flag_name,
-                    predicate_impl,
-                    normalized_impl,
-                    base_impl,
-                )
-            )
-        return (debug_key, tuple(spec_keys))
-
-    def _prepare_wps_predicate_delegates(
-        self,
-        predicate_specs: Iterable["_PresentationWindowMixin._PredicateSpec"],
-        debug: Optional[Callable[..., None]],
-    ) -> Tuple[Tuple[str, Callable[[str], bool]], ...]:
-        manager = self._WPSPredicateManager(
-            owner=self,
-            debug=debug,
-            specs=tuple(predicate_specs),
-        )
-        return manager.delegates()
-
-    def _summarize_wps_process_hints(
-        self, normalized_classes: Iterable[str]
-    ) -> "_PresentationWindowMixin._WPSProcessHints":
-        classes = tuple(normalized_classes)
-        empty_hints = self._empty_wps_process_hints(classes)
-        if not classes:
-            return empty_hints
-
-        manager = self._WPSPredicateManager(
-            owner=self,
-            debug=self._resolve_debug_logger(),
-            specs=self._wps_hint_predicate_specs(),
-        )
-        return manager.summarize(classes)
-
-    def _classify_wps_process(
-        self, process_name: Any, *classes: Any
-    ) -> Literal["presentation", "writer", "other"]:
-        name, normalized_classes = self._normalized_process_context(process_name, classes)
-        if not name:
-            return "other"
-        if name.startswith(("wpp", "wppt")) or "wpspresentation" in name:
-            return "presentation"
-
-        hints = self._summarize_wps_process_hints(normalized_classes)
-
-        presentation_detected = any(
-            (
-                hints.has_slideshow,
-                hints.has_wps_presentation_signature,
-                hints.has_ms_presentation_signature,
-            )
-        )
-        writer_detected = hints.has_writer_signature
-
-        if name.startswith("wps"):
-            if presentation_detected:
-                return "presentation"
-            if writer_detected or "wpswriter" in name:
-                return "writer"
-            return "other"
-
-        return "writer" if writer_detected else "other"
-
-    def _is_wps_presentation_process(self, process_name: str, *classes: str) -> bool:
-        return self._classify_wps_process(process_name, *classes) == "presentation"
-
-    def _is_wps_writer_process(self, process_name: str, *classes: str) -> bool:
-        return self._classify_wps_process(process_name, *classes) == "writer"
-
     def _window_thread_id(self, hwnd: int) -> int:
         if _USER32 is None or hwnd == 0:
             return 0
@@ -4940,6 +4322,15 @@ class _PresentationWindowMixin:
         except Exception:
             thread_id = 0
         return thread_id
+
+    def _toolbar_widget(self) -> Optional[QWidget]:
+        return self._overlay_child_widget("toolbar")
+
+    def _photo_overlay_widget(self) -> Optional[QWidget]:
+        return self._overlay_child_widget("_photo_overlay")
+
+    def _overlay_hwnd(self) -> int:
+        return self._widget_hwnd(self._overlay_widget())
 
     def _toolbar_widget(self) -> Optional[QWidget]:
         return self._overlay_child_widget("toolbar")
@@ -13187,7 +12578,15 @@ def _save_student_workbook(
 ) -> None:
     plain_pool = _candidate_path_pool(file_path, plain_candidates)
     _write_student_workbook(file_path, data)
-    _replicate_file_to_candidates(file_path, plain_pool)
+    preferred_targets = [
+        candidate for candidate in plain_pool if not _is_probably_temporary_path(candidate)
+    ]
+    _replicate_file_to_candidates(file_path, preferred_targets)
+    transient_targets = [
+        candidate for candidate in plain_pool if _is_probably_temporary_path(candidate)
+    ]
+    if transient_targets:
+        _remove_file_candidates(transient_targets, skip=file_path)
 
 
 def load_student_data(parent: Optional[QWidget]) -> Optional[StudentWorkbook]:
