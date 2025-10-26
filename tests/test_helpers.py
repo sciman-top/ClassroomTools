@@ -61,6 +61,7 @@ def _load_helper_module() -> types.ModuleType:
         "_BooleanParseResult",
         "_coerce_bool",
         "_casefold_cached",
+        "_coerce_to_text",
         "_normalize_text_token",
         "_normalize_class_token",
         "parse_bool",
@@ -179,6 +180,27 @@ def test_normalize_class_token_handles_varied_inputs() -> None:
             raise RuntimeError("boom")
 
     assert helpers._normalize_class_token(_Explosive()) == ""
+
+
+def test_coerce_to_text_handles_common_inputs() -> None:
+    assert helpers._coerce_to_text("value") == "value"
+    assert helpers._coerce_to_text(b"value") == "value"
+    assert helpers._coerce_to_text(bytearray(b"valu\xe9")) == "valu"
+    assert helpers._coerce_to_text(memoryview(b"value")) == "value"
+
+
+def test_coerce_to_text_rejects_missing_or_invalid_values() -> None:
+    class _Explosive:
+        def __str__(self) -> str:
+            raise RuntimeError("boom")
+
+    class _Stringy:
+        def __str__(self) -> str:
+            return "converted"
+
+    assert helpers._coerce_to_text(None) is None
+    assert helpers._coerce_to_text(_Explosive()) is None
+    assert helpers._coerce_to_text(_Stringy()) == "converted"
 
 
 def test_choose_writable_target_falls_back_when_parent_is_file(tmp_path: Path) -> None:
