@@ -648,6 +648,54 @@ def _preferred_student_resource_directory() -> str:
     return module_dir
 
 
+def _preferred_student_resource_directory() -> str:
+    """Return the user-visible directory for student roster files."""
+
+    candidates: List[str] = []
+    seen: Set[str] = set()
+
+    def _append(path: Optional[str]) -> None:
+        if not path:
+            return
+        normalized = os.path.normpath(os.path.abspath(path))
+        marker = os.path.normcase(normalized)
+        if marker in seen:
+            return
+        seen.add(marker)
+        candidates.append(normalized)
+
+    _append(os.environ.get("NUITKA_ONEFILE_PARENT"))
+
+    if getattr(sys, "frozen", False):
+        with contextlib.suppress(Exception):
+            _append(os.path.dirname(os.path.abspath(getattr(sys, "executable", ""))))
+
+    with contextlib.suppress(Exception):
+        _append(os.path.dirname(os.path.abspath(sys.argv[0])))
+
+    if _INITIAL_CWD:
+        _append(_INITIAL_CWD)
+
+    with contextlib.suppress(Exception):
+        _append(os.getcwd())
+
+    module_dir = os.path.dirname(os.path.abspath(__file__))
+    _append(module_dir)
+
+    fallback_app_dir = _preferred_app_directory()
+    if fallback_app_dir:
+        _append(fallback_app_dir)
+
+    for candidate in candidates:
+        if _ensure_directory(candidate):
+            return candidate
+
+    if not _ensure_directory(module_dir):
+        module_dir = os.path.abspath(os.getcwd())
+        _ensure_directory(module_dir)
+    return module_dir
+
+
 @functools.lru_cache(maxsize=1)
 def _resolve_student_resource_paths() -> _StudentResourcePaths:
     base_dir = _preferred_student_resource_directory()
@@ -4288,8 +4336,9 @@ class _PresentationWindowMixin:
             return None
         return candidates
 
-    def _overlay_widget(self) -> Optional[QWidget]:
-        raise NotImplementedError
+    @classmethod
+    def _normalize_class_hint(cls, value: Any) -> str:
+        return cls._PrefixKeywordClassifier._normalize(value)
 
     def _overlay_child_widget(self, attribute: str) -> Optional[QWidget]:
         overlay = self._overlay_widget()
