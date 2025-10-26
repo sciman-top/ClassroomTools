@@ -4332,8 +4332,8 @@ class _PresentationWindowMixin:
             return None
         return candidates
 
-    def _overlay_widget(self) -> Optional[QWidget]:
-        raise NotImplementedError
+    def _overlay_hwnd(self) -> int:
+        return self._widget_hwnd(self._overlay_widget())
 
     def _overlay_child_widget(self, attribute: str) -> Optional[QWidget]:
         overlay = self._overlay_widget()
