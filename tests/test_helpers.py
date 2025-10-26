@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import ast
+import configparser
 import dataclasses
 import enum
 import functools
 import logging
 import math
+import io
 import contextlib
 import os
 import shutil
@@ -54,6 +56,8 @@ def _load_helper_module() -> types.ModuleType:
             "math": math,
             "singledispatch": singledispatch,
             "shutil": shutil,
+            "configparser": configparser,
+            "io": io,
             "win32gui": None,
             "_user32_top_level_hwnd": lambda hwnd: 0,
             "logger": logging.getLogger("ctools_helpers"),
@@ -95,6 +99,7 @@ def _load_helper_module() -> types.ModuleType:
         "str_to_bool",
         "_compute_presentation_category",
         "_PresentationWindowMixin",
+        "SettingsManager",
     }
     def _should_include_function(node: ast.FunctionDef) -> bool:
         if node.name in targets:
@@ -907,6 +912,28 @@ def test_summarize_wps_process_hints_respects_wrapped_overrides() -> None:
     hints = harness._summarize_wps_process_hints(normalized)
     assert hints.has_wps_presentation_signature is False
     assert harness.calls == ["kwppshowframeclass"]
-    hints = harness._summarize_wps_process_hints(normalized)
-    assert hints.has_wps_presentation_signature is False
-    assert harness.calls == ["kwppshowframeclass"]
+
+
+def test_settings_manager_logs_mirror_write_failures(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    manager = helpers.SettingsManager(str(tmp_path / "settings.ini"))
+    mirror_path = tmp_path / "mirror" / "settings.ini"
+    manager._mirror_targets.add(str(mirror_path))
+
+    original_write = manager._write_atomic
+
+    def fake_write(path: str, data: str) -> None:
+        if Path(path) == mirror_path:
+            raise OSError("denied")
+        original_write(path, data)
+
+    manager._write_atomic = fake_write  # type: ignore[assignment]
+
+    caplog.set_level(logging.WARNING, logger="ctools_helpers")
+    manager.save_settings(manager.get_defaults())
+
+    assert any(
+        "无法写入备用配置文件" in record.getMessage() and str(mirror_path) in record.getMessage()
+        for record in caplog.records
+    )

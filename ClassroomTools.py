@@ -1982,7 +1982,7 @@ class SettingsManager:
             except Exception:
                 failed.append(path)
         if failed and self.filename not in failed:
-            print(f"无法写入备用配置文件: {failed}")
+            logger.warning("无法写入备用配置文件: %s", failed)
 
         self._settings_cache = {section: values.copy() for section, values in snapshot.items()}
 
@@ -4332,8 +4332,10 @@ class _PresentationWindowMixin:
             return None
         return candidates
 
-    def _overlay_hwnd(self) -> int:
-        return self._widget_hwnd(self._overlay_widget())
+    def _enumerate_overlay_candidate_windows(self, overlay_hwnd: int) -> Optional[List[int]]:
+        if _USER32 is None or _WNDENUMPROC is None:
+            return None
+        candidates: List[int] = []
 
     def _overlay_child_widget(self, attribute: str) -> Optional[QWidget]:
         overlay = self._overlay_widget()
