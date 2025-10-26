@@ -4527,8 +4527,9 @@ class _PresentationWindowMixin:
             return None
         return candidates
 
-    def _overlay_widget(self) -> Optional[QWidget]:
-        raise NotImplementedError
+    @classmethod
+    def _normalize_class_hint(cls, value: Any) -> str:
+        return cls._PrefixKeywordClassifier._normalize(value)
 
     def _overlay_child_widget(self, attribute: str) -> Optional[QWidget]:
         overlay = self._overlay_widget()
