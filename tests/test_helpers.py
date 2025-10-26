@@ -86,6 +86,7 @@ def _load_helper_module() -> types.ModuleType:
         "_iter_unique_paths",
         "_normalize_path_marker",
         "_candidate_path_pool",
+        "_partition_temporary_candidates",
         "_temporary_directory_roots",
         "_is_probably_temporary_path",
         "_remove_file_candidates",
@@ -296,6 +297,25 @@ def test_collect_resource_roots_includes_onefile_parent(tmp_path: Path, monkeypa
     assert Path(exe_dir) in normalized
 
 
+def test_collect_resource_roots_deduplicates_case_insensitive(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NUITKA_ONEFILE_PARENT", "C\\\\DATA")
+    monkeypatch.setattr(helpers, "_INITIAL_CWD", "c\\\\Data", raising=False)  # type: ignore[attr-defined]
+    monkeypatch.setattr(helpers, "_preferred_app_directory", lambda: "C\\\\data", raising=False)  # type: ignore[attr-defined]
+    monkeypatch.setattr(helpers.os, "getcwd", lambda: "c\\\\DATA", raising=False)
+    monkeypatch.setattr(helpers.sys, "argv", ["C\\\\Data\\\\ClassroomTools.exe"])
+    monkeypatch.setattr(helpers.sys, "frozen", False, raising=False)
+    monkeypatch.setattr(helpers.os.path, "abspath", lambda path: str(path))
+    monkeypatch.setattr(helpers.os.path, "normpath", lambda path: str(path))
+    monkeypatch.setattr(helpers.os.path, "normcase", lambda path: str(path).lower())
+    monkeypatch.setattr(helpers, "_ensure_directory", lambda path: True, raising=False)  # type: ignore[attr-defined]
+    helpers._get_resource_locator.cache_clear()  # type: ignore[attr-defined]
+
+    roots = helpers._collect_resource_roots()  # type: ignore[attr-defined]
+
+    lowered = [root.lower() for root in roots]
+    assert lowered.count("c\\\\data") == 1
+
+
 def test_resolve_writable_resource_prefers_existing_candidate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -386,6 +406,29 @@ def test_resolve_student_resource_paths_target_preferred_directory(
 
     assert Path(resources.plain).parent == preferred_dir
     assert any(Path(candidate) == bundled_plain for candidate in resources.plain_candidates)
+
+
+def test_partition_temporary_candidates_reuses_classification(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: List[str] = []
+
+    def _fake_is_temp(path: str) -> bool:
+        calls.append(path)
+        return path.endswith("temp\\students.xlsx")
+
+    monkeypatch.setattr(helpers, "_is_probably_temporary_path", _fake_is_temp, raising=False)  # type: ignore[attr-defined]
+
+    pool = (
+        "C\\students.xlsx",
+        "C\\temp\\students.xlsx",
+        "C\\students.xlsx",
+    )
+
+    persistent, transient = helpers._partition_temporary_candidates(pool)  # type: ignore[attr-defined]
+
+    assert persistent == ("C\\students.xlsx", "C\\students.xlsx")
+    assert transient == ("C\\temp\\students.xlsx",)
+    assert calls.count("C\\students.xlsx") == 1
+    assert calls.count("C\\temp\\students.xlsx") == 1
 
 
 def test_is_probably_temporary_path_detects_environment_roots(

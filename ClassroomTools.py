@@ -297,15 +297,19 @@ def _collect_resource_roots() -> List[str]:
     """Return an ordered list of candidate directories containing bundled resources."""
 
     roots: List[str] = []
-    seen: Set[str] = set()
+    seen_markers: Set[str] = set()
 
     def _append(path: Optional[str]) -> None:
         if not path:
             return
-        normalized = os.path.normpath(os.path.abspath(path))
-        if normalized in seen:
+        try:
+            normalized = os.path.normpath(os.path.abspath(path))
+        except Exception:
             return
-        seen.add(normalized)
+        marker = os.path.normcase(normalized)
+        if marker in seen_markers:
+            return
+        seen_markers.add(marker)
         roots.append(normalized)
 
     _append(os.environ.get("NUITKA_ONEFILE_PARENT"))
@@ -502,6 +506,32 @@ def _candidate_path_pool(primary: str, extra: Optional[Iterable[str]]) -> Tuple[
         for candidate in extra:
             combined.append(candidate)
     return tuple(_iter_unique_paths(combined))
+
+
+def _partition_temporary_candidates(
+    paths: Iterable[str],
+) -> Tuple[Tuple[str, ...], Tuple[str, ...]]:
+    """Split *paths* into persistent and temporary candidates."""
+
+    persistent: List[str] = []
+    transient: List[str] = []
+    cache: Dict[str, bool] = {}
+
+    for path in paths:
+        marker = _normalize_path_marker(path)
+        if marker is None:
+            persistent.append(path)
+            continue
+        cached = cache.get(marker)
+        if cached is None:
+            cached = _is_probably_temporary_path(path)
+            cache[marker] = cached
+        if cached:
+            transient.append(path)
+        else:
+            persistent.append(path)
+
+    return tuple(persistent), tuple(transient)
 
 
 def _remove_file_candidates(paths: Iterable[str], *, skip: Optional[str] = None) -> None:
@@ -4302,12 +4332,8 @@ class _PresentationWindowMixin:
             return None
         return candidates
 
-        enum_proc = _WNDENUMPROC(_enum_callback)
-        try:
-            _USER32.EnumWindows(enum_proc, 0)
-        except Exception:
-            return None
-        return candidates
+    def _overlay_hwnd(self) -> int:
+        return self._widget_hwnd(self._overlay_widget())
 
     def _overlay_child_widget(self, attribute: str) -> Optional[QWidget]:
         overlay = self._overlay_widget()
@@ -4316,30 +4342,11 @@ class _PresentationWindowMixin:
     def _widget_hwnd(self, widget: Optional[QWidget]) -> int:
         if widget is None:
             return 0
-        pid = wintypes.DWORD()
         try:
-            thread_id = int(_USER32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(pid)))
+            wid = widget.winId()
         except Exception:
-            thread_id = 0
-        return thread_id
-
-    def _toolbar_widget(self) -> Optional[QWidget]:
-        return self._overlay_child_widget("toolbar")
-
-    def _photo_overlay_widget(self) -> Optional[QWidget]:
-        return self._overlay_child_widget("_photo_overlay")
-
-    def _overlay_hwnd(self) -> int:
-        return self._widget_hwnd(self._overlay_widget())
-
-    def _toolbar_widget(self) -> Optional[QWidget]:
-        return self._overlay_child_widget("toolbar")
-
-    def _photo_overlay_widget(self) -> Optional[QWidget]:
-        return self._overlay_child_widget("_photo_overlay")
-
-    def _overlay_hwnd(self) -> int:
-        return self._widget_hwnd(self._overlay_widget())
+            return 0
+        return int(wid) if wid else 0
 
     def _toolbar_widget(self) -> Optional[QWidget]:
         return self._overlay_child_widget("toolbar")
@@ -12578,13 +12585,8 @@ def _save_student_workbook(
 ) -> None:
     plain_pool = _candidate_path_pool(file_path, plain_candidates)
     _write_student_workbook(file_path, data)
-    preferred_targets = [
-        candidate for candidate in plain_pool if not _is_probably_temporary_path(candidate)
-    ]
+    preferred_targets, transient_targets = _partition_temporary_candidates(plain_pool)
     _replicate_file_to_candidates(file_path, preferred_targets)
-    transient_targets = [
-        candidate for candidate in plain_pool if _is_probably_temporary_path(candidate)
-    ]
     if transient_targets:
         _remove_file_candidates(transient_targets, skip=file_path)
 
