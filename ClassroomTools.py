@@ -519,6 +519,7 @@ def _resolve_writable_resource(
     ensure_primary_exists: bool = False,
     copy_from_candidates: bool = True,
     prefer_extra_candidates: bool = False,
+    preferred_primary: Optional[str] = None,
 ) -> _ResolvedPathGroup:
     normalized_rel = str(relative_path).strip().replace("\\", "/")
     locator = _get_resource_locator()
@@ -536,6 +537,10 @@ def _resolve_writable_resource(
         candidate_list.append(normalized)
 
     locator_candidates = locator.candidates(normalized_rel)
+    preferred_marker: Optional[str] = None
+    if preferred_primary:
+        preferred_marker = os.path.normcase(os.path.normpath(os.path.abspath(preferred_primary)))
+        _append(preferred_primary)
     if prefer_extra_candidates:
         for extra in extra_candidates:
             _append(extra)
@@ -568,10 +573,19 @@ def _resolve_writable_resource(
         else:
             ordered_candidates.append(candidate)
     prioritized_candidates = tuple(existing_candidates + ordered_candidates) if existing_candidates else tuple(candidate_list)
-    primary = _choose_writable_target(prioritized_candidates, is_dir=is_dir, fallback_name=fallback)
-    unique_candidates = (primary,) + tuple(
-        candidate for candidate in candidate_list if os.path.normcase(candidate) != os.path.normcase(primary)
-    )
+    primary: Optional[str] = None
+
+    if preferred_marker:
+        target = next((candidate for candidate in candidate_list if os.path.normcase(candidate) == preferred_marker), None)
+        if target:
+            directory = target if is_dir else os.path.dirname(target)
+            if _ensure_writable_directory(directory or os.getcwd()):
+                primary = target
+
+    if primary is None:
+        primary = _choose_writable_target(prioritized_candidates, is_dir=is_dir, fallback_name=fallback)
+
+    unique_candidates = tuple(_iter_unique_paths((primary, *candidate_list)))
 
     if is_dir:
         if ensure_primary_exists:
@@ -590,8 +604,58 @@ class _StudentResourcePaths:
     encrypted_candidates: Tuple[str, ...]
 
 
+def _preferred_student_resource_directory() -> str:
+    """Return the user-visible directory for student roster files."""
+
+    candidates: List[str] = []
+    seen: Set[str] = set()
+
+    def _append(path: Optional[str]) -> None:
+        if not path:
+            return
+        normalized = os.path.normpath(os.path.abspath(path))
+        marker = os.path.normcase(normalized)
+        if marker in seen:
+            return
+        seen.add(marker)
+        candidates.append(normalized)
+
+    _append(os.environ.get("NUITKA_ONEFILE_PARENT"))
+
+    if getattr(sys, "frozen", False):
+        with contextlib.suppress(Exception):
+            _append(os.path.dirname(os.path.abspath(getattr(sys, "executable", ""))))
+
+    with contextlib.suppress(Exception):
+        _append(os.path.dirname(os.path.abspath(sys.argv[0])))
+
+    if _INITIAL_CWD:
+        _append(_INITIAL_CWD)
+
+    with contextlib.suppress(Exception):
+        _append(os.getcwd())
+
+    module_dir = os.path.dirname(os.path.abspath(__file__))
+    _append(module_dir)
+
+    fallback_app_dir = _preferred_app_directory()
+    if fallback_app_dir:
+        _append(fallback_app_dir)
+
+    for candidate in candidates:
+        if _ensure_directory(candidate):
+            return candidate
+
+    if not _ensure_directory(module_dir):
+        module_dir = os.path.abspath(os.getcwd())
+        _ensure_directory(module_dir)
+    return module_dir
+
+
 @functools.lru_cache(maxsize=1)
 def _resolve_student_resource_paths() -> _StudentResourcePaths:
+    base_dir = _preferred_student_resource_directory()
+    preferred_plain = os.path.join(base_dir, "students.xlsx")
     legacy_plain = os.path.abspath("students.xlsx")
     plain_group = _resolve_writable_resource(
         "students.xlsx",
@@ -599,17 +663,18 @@ def _resolve_student_resource_paths() -> _StudentResourcePaths:
         extra_candidates=(legacy_plain,),
         is_dir=False,
         copy_from_candidates=True,
+        preferred_primary=preferred_plain,
     )
 
-    preferred_encrypted = os.path.join(os.path.dirname(plain_group.primary), "students.xlsx.enc")
+    preferred_encrypted = os.path.join(base_dir, "students.xlsx.enc")
     legacy_encrypted = os.path.abspath("students.xlsx.enc")
     encrypted_group = _resolve_writable_resource(
         "students.xlsx.enc",
         fallback_name="students.xlsx.enc",
-        extra_candidates=(preferred_encrypted, legacy_encrypted),
+        extra_candidates=(legacy_encrypted,),
         is_dir=False,
         copy_from_candidates=True,
-        prefer_extra_candidates=True,
+        preferred_primary=preferred_encrypted,
     )
 
     return _StudentResourcePaths(

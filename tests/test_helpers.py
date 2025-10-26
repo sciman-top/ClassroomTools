@@ -77,14 +77,18 @@ def _load_helper_module() -> types.ModuleType:
         "_collect_resource_roots",
         "_ResourceLocator",
         "_ResolvedPathGroup",
+        "_StudentResourcePaths",
         "_get_resource_locator",
         "_resolve_writable_resource",
+        "_preferred_student_resource_directory",
+        "_resolve_student_resource_paths",
         "_choose_writable_target",
         "_iter_unique_paths",
         "_normalize_path_marker",
         "_candidate_path_pool",
         "_remove_file_candidates",
         "_replicate_file_to_candidates",
+        "_mirror_resource_to_primary",
         "str_to_bool",
         "_compute_presentation_category",
         "_PresentationWindowMixin",
@@ -317,6 +321,76 @@ def test_resolve_writable_resource_prefers_existing_candidate(
     )
 
     assert group.primary == str(existing)
+
+
+def test_resolve_writable_resource_respects_preferred_primary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    bundled = bundle_dir / "students.xlsx"
+    bundled.write_text("bundle")
+    preferred_dir = tmp_path / "launcher"
+    preferred_dir.mkdir()
+    preferred = preferred_dir / "students.xlsx"
+
+    class _Locator:
+        def __init__(self, values: Tuple[str, ...]) -> None:
+            self._values = values
+
+        def candidates(self, relative_path: str) -> Tuple[str, ...]:
+            return self._values
+
+    locator = _Locator((str(bundled),))
+    monkeypatch.setattr(helpers, "_get_resource_locator", lambda: locator, raising=False)  # type: ignore[attr-defined]
+    helpers._resolve_writable_resource.cache_clear()  # type: ignore[attr-defined]
+
+    group = helpers._resolve_writable_resource(  # type: ignore[attr-defined]
+        "students.xlsx",
+        is_dir=False,
+        copy_from_candidates=False,
+        preferred_primary=str(preferred),
+    )
+
+    assert Path(group.primary) == preferred
+    assert Path(group.candidates[0]) == preferred
+
+
+def test_resolve_student_resource_paths_target_preferred_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    preferred_dir = tmp_path / "app"
+    preferred_dir.mkdir()
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    bundled_plain = bundle_dir / "students.xlsx"
+    bundled_plain.write_text("plain")
+    bundled_enc = bundle_dir / "students.xlsx.enc"
+    bundled_enc.write_text("enc")
+
+    class _Locator:
+        def candidates(self, relative_path: str) -> Tuple[str, ...]:
+            if relative_path.endswith(".enc"):
+                return (str(bundled_enc),)
+            return (str(bundled_plain),)
+
+    locator = _Locator()
+    monkeypatch.setattr(helpers, "_get_resource_locator", lambda: locator, raising=False)  # type: ignore[attr-defined]
+    monkeypatch.setattr(
+        helpers,
+        "_preferred_student_resource_directory",
+        lambda: str(preferred_dir),
+        raising=False,
+    )  # type: ignore[attr-defined]
+    helpers._resolve_writable_resource.cache_clear()  # type: ignore[attr-defined]
+    helpers._resolve_student_resource_paths.cache_clear()  # type: ignore[attr-defined]
+
+    resources = helpers._resolve_student_resource_paths()  # type: ignore[attr-defined]
+
+    assert Path(resources.plain).parent == preferred_dir
+    assert Path(resources.encrypted).parent == preferred_dir
+    assert any(Path(candidate) == bundled_plain for candidate in resources.plain_candidates)
+    assert any(Path(candidate) == bundled_enc for candidate in resources.encrypted_candidates)
 
 
 _WPS_WRITER_CLASSES = {
