@@ -14,6 +14,8 @@ import shutil
 import sys
 import tempfile
 import types
+
+import pytest
 from functools import singledispatch
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, Tuple, cast
@@ -72,6 +74,11 @@ def _load_helper_module() -> types.ModuleType:
         "_ensure_directory",
         "_ensure_writable_directory",
         "_preferred_app_directory",
+        "_collect_resource_roots",
+        "_ResourceLocator",
+        "_ResolvedPathGroup",
+        "_get_resource_locator",
+        "_resolve_writable_resource",
         "_choose_writable_target",
         "_iter_unique_paths",
         "_normalize_path_marker",
@@ -252,6 +259,64 @@ def test_replicate_file_to_candidates_creates_missing_directories(tmp_path: Path
     )
     assert target_a.read_text() == "secret"
     assert target_b.read_text() == "secret"
+
+
+def test_collect_resource_roots_includes_onefile_parent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    parent = tmp_path / "onefile_parent"
+    parent.mkdir()
+    script_dir = tmp_path / "runtime"
+    script_dir.mkdir()
+    exe_dir = tmp_path / "launcher"
+    exe_dir.mkdir()
+    app_dir = tmp_path / "appdata"
+    initial = tmp_path / "initial"
+    initial.mkdir()
+
+    monkeypatch.setenv("NUITKA_ONEFILE_PARENT", str(parent))
+    monkeypatch.setattr(helpers, "_INITIAL_CWD", str(initial), raising=False)  # type: ignore[attr-defined]
+    monkeypatch.setattr(helpers, "_preferred_app_directory", lambda: str(app_dir), raising=False)  # type: ignore[attr-defined]
+    monkeypatch.setattr(helpers.sys, "argv", [str(script_dir / "ClassroomTools.exe")])
+    monkeypatch.setattr(helpers.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(helpers.sys, "executable", str(exe_dir / "ClassroomTools.exe"), raising=False)
+    helpers._get_resource_locator.cache_clear()  # type: ignore[attr-defined]
+
+    roots = helpers._collect_resource_roots()  # type: ignore[attr-defined]
+
+    normalized = {Path(root) for root in roots}
+    assert Path(parent) in normalized
+    assert Path(script_dir) in normalized
+    assert Path(initial) in normalized
+    assert Path(app_dir) in normalized
+    assert Path(exe_dir) in normalized
+
+
+def test_resolve_writable_resource_prefers_existing_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script_dir = tmp_path / "script"
+    script_dir.mkdir()
+    existing = tmp_path / "data" / "students.xlsx"
+    existing.parent.mkdir()
+    existing.write_text("payload")
+    app_dir = tmp_path / "appdata"
+    initial = tmp_path / "initial"
+    initial.mkdir()
+
+    monkeypatch.setattr(helpers, "_INITIAL_CWD", str(initial), raising=False)  # type: ignore[attr-defined]
+    monkeypatch.setattr(helpers, "_preferred_app_directory", lambda: str(app_dir), raising=False)  # type: ignore[attr-defined]
+    monkeypatch.setattr(helpers.sys, "argv", [str(script_dir / "ClassroomTools.py")])
+    monkeypatch.setattr(helpers.sys, "frozen", False, raising=False)
+    monkeypatch.setenv("NUITKA_ONEFILE_PARENT", "")
+    helpers._get_resource_locator.cache_clear()  # type: ignore[attr-defined]
+
+    group = helpers._resolve_writable_resource(  # type: ignore[attr-defined]
+        "students.xlsx",
+        extra_candidates=(str(existing),),
+        is_dir=False,
+        copy_from_candidates=False,
+    )
+
+    assert group.primary == str(existing)
 
 
 _WPS_WRITER_CLASSES = {
