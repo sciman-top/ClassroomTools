@@ -4288,8 +4288,9 @@ class _PresentationWindowMixin:
             return None
         return candidates
 
-    def _overlay_widget(self) -> Optional[QWidget]:
-        raise NotImplementedError
+    @classmethod
+    def _normalize_class_hint(cls, value: Any) -> str:
+        return cls._PrefixKeywordClassifier._normalize(value)
 
     def _overlay_child_widget(self, attribute: str) -> Optional[QWidget]:
         overlay = self._overlay_widget()
@@ -4298,11 +4299,27 @@ class _PresentationWindowMixin:
     def _widget_hwnd(self, widget: Optional[QWidget]) -> int:
         if widget is None:
             return 0
+        pid = wintypes.DWORD()
         try:
-            wid = widget.winId()
+            thread_id = int(_USER32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(pid)))
         except Exception:
-            return 0
-        return int(wid) if wid else 0
+            thread_id = 0
+        return thread_id
+
+    def _toolbar_widget(self) -> Optional[QWidget]:
+        return self._overlay_child_widget("toolbar")
+
+    def _photo_overlay_widget(self) -> Optional[QWidget]:
+        return self._overlay_child_widget("_photo_overlay")
+
+    def _overlay_hwnd(self) -> int:
+        return self._widget_hwnd(self._overlay_widget())
+
+    def _toolbar_hwnd(self) -> int:
+        return self._widget_hwnd(self._toolbar_widget())
+
+    def _photo_overlay_hwnd(self) -> int:
+        return self._widget_hwnd(self._photo_overlay_widget())
 
     def _toolbar_widget(self) -> Optional[QWidget]:
         return self._overlay_child_widget("toolbar")
