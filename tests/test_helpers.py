@@ -169,6 +169,9 @@ def test_normalize_class_token_handles_varied_inputs() -> None:
     assert helpers._normalize_class_token("  KwppFrameClass  ") == "kwppframeclass"
     assert helpers._normalize_class_token(bytearray(b"WPSMainFrame")) == "wpsmainframe"
     assert helpers._normalize_class_token(memoryview(b" kwpsDocView")) == "kwpsdocview"
+    assert (
+        helpers._normalize_class_token("\x00KwppFrameClass\x00") == "kwppframeclass"
+    )
 
     class _Explosive:
         def __str__(self) -> str:
@@ -382,6 +385,7 @@ def test_normalize_process_name_handles_bytes_and_failures() -> None:
 
     assert harness._normalize_process_name(b"  WPS.EXE  ") == "wps.exe"
     assert harness._normalize_process_name(memoryview(b"WpPt.exe")) == "wppt.exe"
+    assert harness._normalize_process_name("WPS.EXE\x00") == "wps.exe"
     assert harness._normalize_process_name(None) == ""
 
     class _Explosive:

@@ -184,7 +184,10 @@ def _coerce_bool_from_str(value: str) -> object:
 def _casefold_cached(value: str) -> str:
     """Return a stripped, case-folded representation of *value* with caching."""
 
-    return value.strip().casefold()
+    if not value:
+        return ""
+    sanitized = value.replace("\x00", "") if "\x00" in value else value
+    return sanitized.strip().casefold()
 
 
 def _normalize_class_token(value: Any) -> str:
@@ -4358,6 +4361,391 @@ class _PresentationWindowMixin:
     @classmethod
     def _normalize_class_hint(cls, value: Any) -> str:
         return cls._PrefixKeywordClassifier._normalize(value)
+
+    @staticmethod
+    def _resolve_debug_logger() -> Optional[Callable[..., None]]:
+        """Return a callable debug logger suitable for predicate diagnostics."""
+
+        logger_ref = globals().get("logger")
+        debug = getattr(logger_ref, "debug", None)
+        if callable(debug):
+            return debug
+
+        logging_module = globals().get("logging")
+        if logging_module is None:  # pragma: no cover - helper extraction fallback
+            import logging as logging_module  # type: ignore[import-not-found]
+
+        fallback_logger = logging_module.getLogger(__name__)
+        debug = getattr(fallback_logger, "debug", None)
+        if callable(debug):
+            return debug
+        return None
+
+    def _wps_hint_predicate_specs(self) -> Tuple["_PredicateSpec", ...]:
+        cls = _PresentationWindowMixin
+        return (
+            self._PredicateSpec(
+                "has_slideshow",
+                self._is_wps_slideshow_class,
+                self._normalized_is_wps_slideshow_class,
+                cls._is_wps_slideshow_class,
+            ),
+            self._PredicateSpec(
+                "has_wps_presentation_signature",
+                self._class_has_wps_presentation_signature,
+                self._normalized_has_wps_presentation_signature,
+                cls._class_has_wps_presentation_signature,
+            ),
+            self._PredicateSpec(
+                "has_ms_presentation_signature",
+                self._class_has_ms_presentation_signature,
+                self._normalized_has_ms_presentation_signature,
+                cls._class_has_ms_presentation_signature,
+            ),
+            self._PredicateSpec(
+                "has_writer_signature",
+                self._class_has_wps_writer_signature,
+                self._normalized_has_wps_writer_signature,
+                cls._class_has_wps_writer_signature,
+            ),
+        )
+
+    def _normalized_is_wps_slideshow_class(self, normalized: str) -> bool:
+        if not normalized:
+            return False
+        if normalized in self._WPS_SLIDESHOW_CLASSES:
+            return True
+        return normalized.startswith("kwppshow")
+
+    def _evaluate_normalized_class(
+        self,
+        class_name: Any,
+        normalized_predicate: Callable[[str], bool],
+    ) -> bool:
+        normalized = self._normalize_class_hint(class_name)
+        if not normalized:
+            return False
+        return bool(normalized_predicate(normalized))
+
+    def _is_wps_slideshow_class(self, class_name: str) -> bool:
+        return self._evaluate_normalized_class(
+            class_name, self._normalized_is_wps_slideshow_class
+        )
+
+    def _is_word_like_class(self, class_name: str) -> bool:
+        normalized = self._normalize_class_hint(class_name)
+        if not normalized:
+            return False
+        if normalized in self._WORD_WINDOW_CLASSES:
+            return True
+        if normalized in self._WORD_CONTENT_CLASSES:
+            return True
+        if normalized in self._WORD_HOST_CLASSES:
+            return True
+        if normalized.startswith("_ww"):
+            return True
+        if "word" in normalized:
+            return True
+        return self._WPS_WRITER_CLASSIFIER.has_signature(normalized)
+
+    def _class_has_wps_writer_signature(self, class_name: str) -> bool:
+        return self._WPS_WRITER_CLASSIFIER.has_signature(class_name)
+
+    def _normalized_has_wps_writer_signature(self, normalized: str) -> bool:
+        if not normalized:
+            return False
+        return self._WPS_WRITER_CLASSIFIER.has_normalized_signature(normalized)
+
+    def _normalized_has_wps_presentation_signature(self, normalized: str) -> bool:
+        if not normalized:
+            return False
+        if self._normalized_is_wps_slideshow_class(normalized):
+            return True
+        if normalized.startswith("kwpp") or "kwpp" in normalized:
+            return True
+        if normalized.startswith("wpp") and "wps" not in normalized:
+            return True
+        if normalized.startswith("wpsshow") or "wpsshow" in normalized:
+            return True
+        return False
+
+    def _class_has_wps_presentation_signature(self, class_name: str) -> bool:
+        return self._evaluate_normalized_class(
+            class_name, self._normalized_has_wps_presentation_signature
+        )
+
+    def _normalized_has_ms_presentation_signature(self, normalized: str) -> bool:
+        if not normalized:
+            return False
+        if self._normalized_has_wps_presentation_signature(normalized):
+            return False
+        if normalized in self._SLIDESHOW_PRIORITY_CLASSES:
+            return True
+        if normalized in self._SLIDESHOW_SECONDARY_CLASSES:
+            return True
+        if normalized in self._PRESENTATION_EDITOR_CLASSES:
+            if normalized.startswith("kwpp") or normalized.startswith("kwps"):
+                return False
+            if normalized.startswith("wps"):
+                return False
+            return True
+        keywords = ("ppt", "powerpnt", "powerpoint", "screenclass")
+        return any(keyword in normalized for keyword in keywords)
+
+    def _class_has_ms_presentation_signature(self, class_name: str) -> bool:
+        return self._evaluate_normalized_class(
+            class_name, self._normalized_has_ms_presentation_signature
+        )
+
+    def _normalized_class_hints(self, *classes: Any) -> Tuple[str, ...]:
+        normalized: List[str] = []
+        for value in classes:
+            hint = self._normalize_class_hint(value)
+            if hint:
+                normalized.append(hint)
+        return tuple(normalized)
+
+    def _normalize_process_name(self, value: Any) -> str:
+        if value is None:
+            return ""
+        try:
+            if isinstance(value, (bytes, bytearray, memoryview)):
+                text = bytes(value).decode("utf-8", "ignore")
+            else:
+                text = str(value)
+        except Exception:
+            return ""
+        if not text:
+            return ""
+        return _casefold_cached(text)
+
+    def _normalized_process_context(
+        self, process_name: Any, classes: Iterable[Any]
+    ) -> Tuple[str, Tuple[str, ...]]:
+        normalized_name = self._normalize_process_name(process_name)
+        normalized_classes = self._normalized_class_hints(*classes)
+        return normalized_name, normalized_classes
+
+    def _empty_wps_process_hints(
+        self, classes: Tuple[str, ...]
+    ) -> "_PresentationWindowMixin._WPSProcessHints":
+        return self._WPSProcessHints(classes, False, False, False, False)
+
+    @staticmethod
+    def _emit_wps_debug(
+        debug: Optional[Callable[..., None]],
+        message: str,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        if callable(debug):
+            debug(message, *args, **kwargs)
+
+    def _log_wps_predicate_failure(
+        self, debug: Optional[Callable[..., None]]
+    ) -> None:
+        self._emit_wps_debug(
+            debug,
+            "WPS process hint predicate failed",  # pragma: no cover - debug logging
+            exc_info=True,
+        )
+
+    def _memoize_wps_spec(
+        self,
+        spec: "_PresentationWindowMixin._PredicateSpec",
+        debug: Optional[Callable[..., None]],
+    ) -> Callable[[str], bool]:
+        normalized_impl = spec.normalized_delegate()
+        delegate: Callable[[Any], bool]
+        if normalized_impl is None:
+            delegate = spec.predicate
+        else:
+            delegate = normalized_impl
+
+        @functools.lru_cache(maxsize=None)
+        def _call(class_name: str) -> bool:
+            try:
+                return bool(delegate(class_name))
+            except Exception:
+                self._log_wps_predicate_failure(debug)
+                return False
+
+        return _call
+
+    def _resolve_wps_predicate_cache(self) -> Dict[
+        Tuple[Any, ...], Tuple[Tuple[str, Callable[[str], bool]], ...]
+    ]:
+        cache = getattr(self, "_cached_wps_predicate_delegates", None)
+        if cache is None:
+            cache = {}
+            setattr(self, "_cached_wps_predicate_delegates", cache)
+        return cast(
+            Dict[Tuple[Any, ...], Tuple[Tuple[str, Callable[[str], bool]], ...]],
+            cache,
+        )
+
+    def _debug_delegate_cache_key(
+        self, debug: Optional[Callable[..., None]]
+    ) -> Tuple[Any, Any]:
+        if not callable(debug):
+            return (None, None)
+        owner = getattr(debug, "__self__", None)
+        return (
+            owner,
+            self._unwrap_predicate_callable(debug),
+        )
+
+    def _build_wps_delegate_cache_key(
+        self,
+        debug: Optional[Callable[..., None]],
+        predicate_specs: Tuple["_PresentationWindowMixin._PredicateSpec", ...],
+    ) -> Tuple[Any, ...]:
+        debug_key = self._debug_delegate_cache_key(debug)
+        spec_keys: List[Tuple[Any, Any, Any, Any]] = []
+        for spec in predicate_specs:
+            predicate_impl = self._unwrap_predicate_callable(spec.predicate)
+            if spec.normalized_predicate is None:
+                normalized_impl: Optional[Callable[..., Any]] = None
+            else:
+                normalized_impl = self._unwrap_predicate_callable(
+                    spec.normalized_predicate
+                )
+            base_impl = self._unwrap_predicate_callable(spec.base_impl)
+            spec_keys.append(
+                (
+                    spec.flag_name,
+                    predicate_impl,
+                    normalized_impl,
+                    base_impl,
+                )
+            )
+        return (debug_key, tuple(spec_keys))
+
+    def _prepare_wps_predicate_delegates(
+        self,
+        predicate_specs: Iterable["_PresentationWindowMixin._PredicateSpec"],
+        debug: Optional[Callable[..., None]],
+    ) -> Tuple[Tuple[str, Callable[[str], bool]], ...]:
+        manager = self._WPSPredicateManager(
+            owner=self,
+            debug=debug,
+            specs=tuple(predicate_specs),
+        )
+        return manager.delegates()
+
+    def _summarize_wps_process_hints(
+        self, normalized_classes: Iterable[str]
+    ) -> "_PresentationWindowMixin._WPSProcessHints":
+        classes = tuple(normalized_classes)
+        empty_hints = self._empty_wps_process_hints(classes)
+        if not classes:
+            return empty_hints
+
+        manager = self._WPSPredicateManager(
+            owner=self,
+            debug=self._resolve_debug_logger(),
+            specs=self._wps_hint_predicate_specs(),
+        )
+        return manager.summarize(classes)
+
+    def _classify_wps_process(
+        self, process_name: Any, *classes: Any
+    ) -> Literal["presentation", "writer", "other"]:
+        name, normalized_classes = self._normalized_process_context(process_name, classes)
+        if not name:
+            return "other"
+        if name.startswith(("wpp", "wppt")) or "wpspresentation" in name:
+            return "presentation"
+
+        hints = self._summarize_wps_process_hints(normalized_classes)
+
+        presentation_detected = any(
+            (
+                hints.has_slideshow,
+                hints.has_wps_presentation_signature,
+                hints.has_ms_presentation_signature,
+            )
+        )
+        writer_detected = hints.has_writer_signature
+
+        if name.startswith("wps"):
+            if presentation_detected:
+                return "presentation"
+            if writer_detected or "wpswriter" in name:
+                return "writer"
+            return "other"
+
+        return "writer" if writer_detected else "other"
+
+    def _is_wps_presentation_process(self, process_name: str, *classes: str) -> bool:
+        return self._classify_wps_process(process_name, *classes) == "presentation"
+
+    def _is_wps_writer_process(self, process_name: str, *classes: str) -> bool:
+        return self._classify_wps_process(process_name, *classes) == "writer"
+
+    def _window_thread_id(self, hwnd: int) -> int:
+        if _USER32 is None or hwnd == 0:
+            return 0
+        pid = wintypes.DWORD()
+        try:
+            thread_id = int(_USER32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(pid)))
+        except Exception:
+            thread_id = 0
+        return thread_id
+
+    def _attach_to_target_thread(self, hwnd: int) -> Optional[Tuple[int, int]]:
+        if _USER32 is None or hwnd == 0:
+            return None
+        target_thread = self._window_thread_id(hwnd)
+        if not target_thread:
+            return None
+        try:
+            current_thread = int(_USER32.GetCurrentThreadId())
+        except Exception:
+            current_thread = 0
+        if not current_thread or current_thread == target_thread:
+            return None
+        try:
+            attached = bool(_USER32.AttachThreadInput(current_thread, target_thread, True))
+        except Exception:
+            attached = False
+        return (current_thread, target_thread) if attached else None
+
+    def _detach_from_target_thread(self, pair: Optional[Tuple[int, int]]) -> None:
+        if _USER32 is None or not pair:
+            return
+        src, dst = pair
+        if not src or not dst or src == dst:
+            return
+        try:
+            _USER32.AttachThreadInput(src, dst, False)
+        except Exception:
+            pass
+
+    def _enumerate_overlay_candidate_windows(self, overlay_hwnd: int) -> Optional[List[int]]:
+        if _USER32 is None or _WNDENUMPROC is None:
+            return None
+        candidates: List[int] = []
+
+        def _enum_callback(hwnd: int, _l_param: int) -> int:
+            if hwnd == overlay_hwnd:
+                return True
+            if self._should_ignore_window(hwnd):
+                return True
+            if not _user32_is_window_visible(hwnd) or _user32_is_window_iconic(hwnd):
+                return True
+            rect = _user32_window_rect(hwnd)
+            if not rect or not self._rect_intersects_overlay(rect):
+                return True
+            candidates.append(int(hwnd))
+            return True
+
+        enum_proc = _WNDENUMPROC(_enum_callback)
+        try:
+            _USER32.EnumWindows(enum_proc, 0)
+        except Exception:
+            return None
+        return candidates
 
     def _overlay_child_widget(self, attribute: str) -> Optional[QWidget]:
         overlay = self._overlay_widget()
