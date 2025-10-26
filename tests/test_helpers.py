@@ -6,9 +6,11 @@ import ast
 import dataclasses
 import enum
 import functools
+import logging
 import math
 import contextlib
 import os
+import shutil
 import sys
 import tempfile
 import types
@@ -49,8 +51,10 @@ def _load_helper_module() -> types.ModuleType:
             "Enum": enum.Enum,
             "math": math,
             "singledispatch": singledispatch,
+            "shutil": shutil,
             "win32gui": None,
             "_user32_top_level_hwnd": lambda hwnd: 0,
+            "logger": logging.getLogger("ctools_helpers"),
         }
     )
     sys.modules[module.__name__] = module
@@ -69,6 +73,11 @@ def _load_helper_module() -> types.ModuleType:
         "_ensure_writable_directory",
         "_preferred_app_directory",
         "_choose_writable_target",
+        "_iter_unique_paths",
+        "_normalize_path_marker",
+        "_candidate_path_pool",
+        "_remove_file_candidates",
+        "_replicate_file_to_candidates",
         "str_to_bool",
         "_compute_presentation_category",
         "_PresentationWindowMixin",
@@ -214,6 +223,35 @@ def test_choose_writable_target_falls_back_when_parent_is_file(tmp_path: Path) -
     )
     assert Path(result).name == "students.xlsx"
     assert Path(result).parent != blocker
+
+
+def test_remove_file_candidates_deduplicates_and_respects_skip(tmp_path: Path) -> None:
+    primary = tmp_path / "students.xlsx"
+    sibling = tmp_path / "copy" / "students.xlsx"
+    sibling.parent.mkdir()
+    primary.write_text("plain")
+    sibling.write_text("plain")
+    keep = tmp_path / "keep.xlsx"
+    keep.write_text("stay")
+    helpers._remove_file_candidates(  # type: ignore[attr-defined]
+        [str(primary), str(primary), str(sibling), str(keep)],
+        skip=str(keep),
+    )
+    assert not primary.exists()
+    assert not sibling.exists()
+    assert keep.exists()
+
+
+def test_replicate_file_to_candidates_creates_missing_directories(tmp_path: Path) -> None:
+    source = tmp_path / "students.xlsx.enc"
+    source.write_text("secret")
+    target_a = tmp_path / "mirror" / "students.xlsx.enc"
+    target_b = tmp_path / "students.xlsx.enc"
+    helpers._replicate_file_to_candidates(  # type: ignore[attr-defined]
+        str(source), [str(target_a), str(target_b), str(source)]
+    )
+    assert target_a.read_text() == "secret"
+    assert target_b.read_text() == "secret"
 
 
 _WPS_WRITER_CLASSES = {
