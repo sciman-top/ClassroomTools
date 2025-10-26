@@ -60,6 +60,7 @@ def _load_helper_module() -> types.ModuleType:
         "_FALSE_STRINGS",
         "_BooleanParseResult",
         "_coerce_bool",
+        "_casefold_cached",
         "_normalize_class_token",
         "parse_bool",
         "_ensure_directory",
@@ -162,6 +163,18 @@ def test_str_to_bool_interprets_numeric_strings() -> None:
 def test_str_to_bool_ignores_nan_strings() -> None:
     assert helpers.str_to_bool("nan", default=True) is True
     assert helpers.str_to_bool("nan", default=False) is False
+
+
+def test_normalize_class_token_handles_varied_inputs() -> None:
+    assert helpers._normalize_class_token("  KwppFrameClass  ") == "kwppframeclass"
+    assert helpers._normalize_class_token(bytearray(b"WPSMainFrame")) == "wpsmainframe"
+    assert helpers._normalize_class_token(memoryview(b" kwpsDocView")) == "kwpsdocview"
+
+    class _Explosive:
+        def __str__(self) -> str:
+            raise RuntimeError("boom")
+
+    assert helpers._normalize_class_token(_Explosive()) == ""
 
 
 def test_choose_writable_target_falls_back_when_parent_is_file(tmp_path: Path) -> None:
@@ -362,6 +375,20 @@ def test_class_tokens_freeze_normalizes_inputs() -> None:
         "kwpsdocview",
         "wpsmainframe",
     }
+
+
+def test_normalize_process_name_handles_bytes_and_failures() -> None:
+    harness = _MixinHarness()
+
+    assert harness._normalize_process_name(b"  WPS.EXE  ") == "wps.exe"
+    assert harness._normalize_process_name(memoryview(b"WpPt.exe")) == "wppt.exe"
+    assert harness._normalize_process_name(None) == ""
+
+    class _Explosive:
+        def __str__(self) -> str:
+            raise ValueError("boom")
+
+    assert harness._normalize_process_name(_Explosive()) == ""
 
 
 class _MixinHarness(helpers._PresentationWindowMixin):  # type: ignore[attr-defined]
