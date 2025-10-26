@@ -14,7 +14,7 @@ import tempfile
 import types
 from functools import singledispatch
 from pathlib import Path
-from typing import Any, Callable, Iterable, List, Mapping, Optional, Set, Tuple, cast
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, Tuple, cast
 
 
 def _load_helper_module() -> types.ModuleType:
@@ -40,6 +40,7 @@ def _load_helper_module() -> types.ModuleType:
             "Iterable": Iterable,
             "Set": Set,
             "Mapping": Mapping,
+            "Dict": Dict,
             "functools": functools,
             "cast": cast,
             "Callable": Callable,
@@ -435,6 +436,54 @@ def test_summarize_wps_process_hints_logs_with_fallback_logger() -> None:
     assert hints.classes == normalized
     assert hints.has_wps_presentation_signature is False
     assert hints.has_writer_signature is True
+
+
+def test_summarize_wps_process_hints_updates_cached_logger() -> None:
+    class _FlakyHarness(_MixinHarness):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        def _class_has_wps_presentation_signature(self, class_name: str) -> bool:
+            self.calls += 1
+            raise RuntimeError("predicate failure")
+
+    class _Recorder:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def debug(self, *args: Any, **kwargs: Any) -> None:
+            self.calls += 1
+
+    harness = _FlakyHarness()
+    normalized = harness._normalized_class_hints("BoomWindow", "kwpsframeclass")
+    original_logger = getattr(helpers, "logger", None)
+    recorder_one = _Recorder()
+    recorder_two = _Recorder()
+
+    try:
+        helpers.logger = recorder_one  # type: ignore[assignment]
+        hints = harness._summarize_wps_process_hints(normalized)
+        assert hints.has_writer_signature is True
+        assert recorder_one.calls == 2
+
+        hints = harness._summarize_wps_process_hints(normalized)
+        assert recorder_one.calls == 2
+
+        helpers.logger = recorder_two  # type: ignore[assignment]
+        hints = harness._summarize_wps_process_hints(normalized)
+        assert recorder_two.calls == 2
+    finally:
+        if original_logger is None:
+            try:
+                del helpers.logger
+            except AttributeError:
+                pass
+        else:
+            helpers.logger = original_logger
+
+    assert harness.calls == 4
+    assert recorder_one.calls == 2
 
 
 def test_summarize_wps_process_hints_caches_duplicate_classes() -> None:
