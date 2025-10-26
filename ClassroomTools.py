@@ -21,8 +21,6 @@ import tempfile
 import threading
 import time
 import traceback
-import hashlib
-import hmac
 import functools
 from collections import OrderedDict, deque
 from functools import singledispatch
@@ -47,6 +45,11 @@ from typing import (
 )
 
 logger = logging.getLogger(__name__)
+
+try:
+    _INITIAL_CWD = os.path.normpath(os.path.abspath(os.getcwd()))
+except Exception:  # pragma: no cover - defensive fallback for exotic environments
+    _INITIAL_CWD = ""
 
 if sys.platform == "win32":
     try:  # pragma: no cover - Windows 专用依赖
@@ -190,19 +193,37 @@ def _casefold_cached(value: str) -> str:
     return sanitized.strip().casefold()
 
 
+def _coerce_to_text(value: Any) -> Optional[str]:
+    """Return *value* converted to ``str`` when possible.
+
+    ``None`` and values whose conversion raises an exception are treated as
+    missing and therefore return :data:`None`. The helper is intentionally
+    conservative and does not attempt to special-case false-y values such as
+    ``0`` or ``False`` so callers can decide how those should be handled.
+    """
+
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        try:
+            return bytes(value).decode("utf-8", "ignore")
+        except Exception:
+            return None
+    try:
+        return str(value)
+    except Exception:
+        return None
+
+
 def _normalize_text_token(value: Any, *, empty_on_falsy: bool) -> str:
     """Normalize arbitrary *value* inputs into case-folded strings."""
 
     if empty_on_falsy and not value:
         return ""
-    if value is None:
-        return ""
-    try:
-        if isinstance(value, (bytes, bytearray, memoryview)):
-            text = bytes(value).decode("utf-8", "ignore")
-        else:
-            text = str(value)
-    except Exception:
+    text = _coerce_to_text(value)
+    if text is None:
         return ""
     if empty_on_falsy and not text:
         return ""
@@ -276,36 +297,46 @@ def _collect_resource_roots() -> List[str]:
     """Return an ordered list of candidate directories containing bundled resources."""
 
     roots: List[str] = []
-    seen: Set[str] = set()
+    seen_markers: Set[str] = set()
 
     def _append(path: Optional[str]) -> None:
         if not path:
             return
-        normalized = os.path.normpath(os.path.abspath(path))
-        if normalized in seen:
+        try:
+            normalized = os.path.normpath(os.path.abspath(path))
+        except Exception:
             return
-        seen.add(normalized)
+        marker = os.path.normcase(normalized)
+        if marker in seen_markers:
+            return
+        seen_markers.add(marker)
         roots.append(normalized)
 
-    app_dir = _preferred_app_directory()
-    if _ensure_directory(app_dir):
-        _append(app_dir)
-
-    exe_dir: Optional[str] = None
-    with contextlib.suppress(Exception):
-        exe_dir = os.path.dirname(os.path.abspath(getattr(sys, "executable", "")))
-    if getattr(sys, "frozen", False) and exe_dir:
-        _append(exe_dir)
-
-    meipass = getattr(sys, "_MEIPASS", None)
-    if meipass:
-        _append(meipass)
+    _append(os.environ.get("NUITKA_ONEFILE_PARENT"))
 
     script_dir: Optional[str] = None
     with contextlib.suppress(Exception):
         script_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
     if script_dir:
         _append(script_dir)
+
+    if _INITIAL_CWD:
+        _append(_INITIAL_CWD)
+
+    app_dir = _preferred_app_directory()
+    if _ensure_directory(app_dir):
+        _append(app_dir)
+
+    if getattr(sys, "frozen", False):
+        exe_dir: Optional[str] = None
+        with contextlib.suppress(Exception):
+            exe_dir = os.path.dirname(os.path.abspath(getattr(sys, "executable", "")))
+        if exe_dir:
+            _append(exe_dir)
+
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        _append(meipass)
 
     module_dir = os.path.dirname(os.path.abspath(__file__))
     _append(module_dir)
@@ -406,6 +437,134 @@ def _mirror_resource_to_primary(primary: str, candidates: Tuple[str, ...]) -> No
         logger.debug("Failed to mirror %s to %s", source, primary, exc_info=True)
 
 
+def _iter_unique_paths(paths: Iterable[str]) -> Iterable[str]:
+    seen: Set[str] = set()
+    for path in paths:
+        if not path:
+            continue
+        try:
+            normalized = os.path.normpath(os.path.abspath(path))
+        except Exception:
+            continue
+        marker = os.path.normcase(normalized)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        yield normalized
+
+
+def _normalize_path_marker(path: Optional[str]) -> Optional[str]:
+    if not path:
+        return None
+    try:
+        normalized = os.path.normpath(os.path.abspath(path))
+    except Exception:
+        return None
+    return os.path.normcase(normalized)
+
+
+@functools.lru_cache(maxsize=1)
+def _temporary_directory_roots() -> Tuple[str, ...]:
+    """Return a tuple of normalised temporary directory roots."""
+
+    roots: List[str] = []
+    seen: Set[str] = set()
+
+    def _append(value: Optional[str]) -> None:
+        marker = _normalize_path_marker(value)
+        if not marker or marker in seen:
+            return
+        seen.add(marker)
+        roots.append(marker)
+
+    for name in ("NUITKA_ONEFILE_TEMP", "TEMP", "TMP", "TMPDIR", "TEMPDIR"):
+        _append(os.environ.get(name))
+
+    try:
+        _append(tempfile.gettempdir())
+    except Exception:  # pragma: no cover - defensive guard against exotic envs
+        pass
+
+    return tuple(roots)
+
+
+def _is_probably_temporary_path(path: Optional[str]) -> bool:
+    """Heuristically determine whether *path* resides in a temporary directory."""
+
+    marker = _normalize_path_marker(path)
+    if not marker:
+        return False
+    for root in _temporary_directory_roots():
+        if marker == root or marker.startswith(root + os.sep):
+            return True
+    return False
+
+
+def _candidate_path_pool(primary: str, extra: Optional[Iterable[str]]) -> Tuple[str, ...]:
+    combined: List[str] = [primary]
+    if extra is not None:
+        for candidate in extra:
+            combined.append(candidate)
+    return tuple(_iter_unique_paths(combined))
+
+
+def _partition_temporary_candidates(
+    paths: Iterable[str],
+) -> Tuple[Tuple[str, ...], Tuple[str, ...]]:
+    """Split *paths* into persistent and temporary candidates."""
+
+    persistent: List[str] = []
+    transient: List[str] = []
+    cache: Dict[str, bool] = {}
+
+    for path in paths:
+        marker = _normalize_path_marker(path)
+        if marker is None:
+            persistent.append(path)
+            continue
+        cached = cache.get(marker)
+        if cached is None:
+            cached = _is_probably_temporary_path(path)
+            cache[marker] = cached
+        if cached:
+            transient.append(path)
+        else:
+            persistent.append(path)
+
+    return tuple(persistent), tuple(transient)
+
+
+def _remove_file_candidates(paths: Iterable[str], *, skip: Optional[str] = None) -> None:
+    skip_marker = _normalize_path_marker(skip)
+    for candidate in _iter_unique_paths(paths):
+        if skip_marker and os.path.normcase(candidate) == skip_marker:
+            continue
+        try:
+            os.remove(candidate)
+        except FileNotFoundError:
+            continue
+        except Exception:
+            logger.debug("Failed to remove %s", candidate, exc_info=True)
+
+
+def _replicate_file_to_candidates(source: str, candidates: Iterable[str]) -> None:
+    source_marker = _normalize_path_marker(source)
+    if source_marker is None:
+        return
+    for target in _iter_unique_paths(candidates):
+        if os.path.normcase(target) == source_marker:
+            continue
+        directory = os.path.dirname(target)
+        if directory and not _ensure_directory(directory):
+            continue
+        try:
+            shutil.copy2(source, target)
+        except FileNotFoundError:
+            continue
+        except Exception:
+            logger.debug("Failed to replicate %s to %s", source, target, exc_info=True)
+
+
 @dataclass(frozen=True)
 class _ResolvedPathGroup:
     primary: str
@@ -425,6 +584,7 @@ def _resolve_writable_resource(
     ensure_primary_exists: bool = False,
     copy_from_candidates: bool = True,
     prefer_extra_candidates: bool = False,
+    preferred_primary: Optional[str] = None,
 ) -> _ResolvedPathGroup:
     normalized_rel = str(relative_path).strip().replace("\\", "/")
     locator = _get_resource_locator()
@@ -442,6 +602,10 @@ def _resolve_writable_resource(
         candidate_list.append(normalized)
 
     locator_candidates = locator.candidates(normalized_rel)
+    preferred_marker: Optional[str] = None
+    if preferred_primary:
+        preferred_marker = os.path.normcase(os.path.normpath(os.path.abspath(preferred_primary)))
+        _append(preferred_primary)
     if prefer_extra_candidates:
         for extra in extra_candidates:
             _append(extra)
@@ -458,10 +622,35 @@ def _resolve_writable_resource(
         _append(os.path.join(module_dir, normalized_rel))
 
     fallback = fallback_name or os.path.basename(normalized_rel) or normalized_rel.replace("/", "_")
-    primary = _choose_writable_target(tuple(candidate_list), is_dir=is_dir, fallback_name=fallback)
-    unique_candidates = (primary,) + tuple(
-        candidate for candidate in candidate_list if os.path.normcase(candidate) != os.path.normcase(primary)
-    )
+    ordered_candidates: List[str] = []
+    existing_candidates: List[str] = []
+    for candidate in candidate_list:
+        exists = False
+        try:
+            if is_dir:
+                exists = os.path.isdir(candidate)
+            else:
+                exists = os.path.exists(candidate)
+        except Exception:
+            exists = False
+        if exists:
+            existing_candidates.append(candidate)
+        else:
+            ordered_candidates.append(candidate)
+    prioritized_candidates = tuple(existing_candidates + ordered_candidates) if existing_candidates else tuple(candidate_list)
+    primary: Optional[str] = None
+
+    if preferred_marker:
+        target = next((candidate for candidate in candidate_list if os.path.normcase(candidate) == preferred_marker), None)
+        if target:
+            directory = target if is_dir else os.path.dirname(target)
+            if _ensure_writable_directory(directory or os.getcwd()):
+                primary = target
+
+    if primary is None:
+        primary = _choose_writable_target(prioritized_candidates, is_dir=is_dir, fallback_name=fallback)
+
+    unique_candidates = tuple(_iter_unique_paths((primary, *candidate_list)))
 
     if is_dir:
         if ensure_primary_exists:
@@ -475,13 +664,38 @@ def _resolve_writable_resource(
 @dataclass(frozen=True)
 class _StudentResourcePaths:
     plain: str
-    encrypted: str
     plain_candidates: Tuple[str, ...]
-    encrypted_candidates: Tuple[str, ...]
+
+
+def _preferred_student_resource_directory() -> str:
+    """Return the user-visible directory for student roster files."""
+
+    module_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = list(_collect_resource_roots())
+
+    for candidate in candidates:
+        if _is_probably_temporary_path(candidate):
+            continue
+        if _ensure_writable_directory(candidate):
+            return os.path.normpath(os.path.abspath(candidate))
+
+    for candidate in candidates:
+        if _ensure_writable_directory(candidate):
+            return os.path.normpath(os.path.abspath(candidate))
+
+    fallback = _preferred_app_directory()
+    if not _ensure_writable_directory(fallback):
+        fallback = module_dir
+        if not _ensure_writable_directory(fallback):
+            fallback = os.path.abspath(os.getcwd())
+            _ensure_directory(fallback)
+    return os.path.normpath(os.path.abspath(fallback))
 
 
 @functools.lru_cache(maxsize=1)
 def _resolve_student_resource_paths() -> _StudentResourcePaths:
+    base_dir = _preferred_student_resource_directory()
+    preferred_plain = os.path.join(base_dir, "students.xlsx")
     legacy_plain = os.path.abspath("students.xlsx")
     plain_group = _resolve_writable_resource(
         "students.xlsx",
@@ -489,24 +703,12 @@ def _resolve_student_resource_paths() -> _StudentResourcePaths:
         extra_candidates=(legacy_plain,),
         is_dir=False,
         copy_from_candidates=True,
-    )
-
-    preferred_encrypted = os.path.join(os.path.dirname(plain_group.primary), "students.xlsx.enc")
-    legacy_encrypted = os.path.abspath("students.xlsx.enc")
-    encrypted_group = _resolve_writable_resource(
-        "students.xlsx.enc",
-        fallback_name="students.xlsx.enc",
-        extra_candidates=(preferred_encrypted, legacy_encrypted),
-        is_dir=False,
-        copy_from_candidates=True,
-        prefer_extra_candidates=True,
+        preferred_primary=preferred_plain,
     )
 
     return _StudentResourcePaths(
         plain=plain_group.primary,
-        encrypted=encrypted_group.primary,
         plain_candidates=plain_group.candidates,
-        encrypted_candidates=encrypted_group.candidates,
     )
 
 
@@ -890,19 +1092,6 @@ if sys.platform == "win32":
 else:
     WINREG_AVAILABLE = False
 
-
-_SESSION_STUDENT_PASSWORD: Optional[str] = None
-_SESSION_STUDENT_FILE_ENCRYPTED: bool = False
-
-
-def _set_session_student_encryption(encrypted: bool, password: Optional[str]) -> None:
-    global _SESSION_STUDENT_PASSWORD, _SESSION_STUDENT_FILE_ENCRYPTED
-    _SESSION_STUDENT_FILE_ENCRYPTED = bool(encrypted)
-    _SESSION_STUDENT_PASSWORD = password if encrypted else None
-
-
-def _get_session_student_encryption() -> tuple[bool, Optional[str]]:
-    return _SESSION_STUDENT_FILE_ENCRYPTED, _SESSION_STUDENT_PASSWORD
 
 
 # ---------- 缓存 ----------
@@ -1503,215 +1692,6 @@ class QuietQuestionDialog(QDialog):
         self._ok_button.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
 
 
-class PasswordPromptDialog(QDialog):
-    """统一样式的密码输入窗口，确保按钮始终可见且尺寸一致。"""
-
-    def __init__(self, parent: Optional[QWidget], title: str, prompt: str) -> None:
-        super().__init__(parent)
-        self.setWindowTitle(title)
-        self.setModal(True)
-        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
-        self._captured_text: str = ""
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 18, 24, 18)
-        layout.setSpacing(12)
-
-        label = QLabel(prompt, self)
-        label.setWordWrap(True)
-        label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        layout.addWidget(label)
-
-        self.line_edit = QLineEdit(self)
-        self.line_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.line_edit.setMinimumWidth(220)
-        layout.addWidget(self.line_edit)
-
-        self.error_label = QLabel("", self)
-        self.error_label.setWordWrap(True)
-        self.error_label.setObjectName("passwordPromptErrorLabel")
-        self.error_label.setStyleSheet(
-            "#passwordPromptErrorLabel { color: #d93025; font-size: 12px; margin-top: 4px; }"
-        )
-        self.error_label.hide()
-        layout.addWidget(self.error_label)
-
-        button_box = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
-            Qt.Orientation.Horizontal,
-            self,
-        )
-        button_box.accepted.connect(self.accept)
-        button_box.rejected.connect(self.reject)
-        style_dialog_buttons(
-            button_box,
-            {
-                QDialogButtonBox.StandardButton.Ok: ButtonStyles.PRIMARY,
-                QDialogButtonBox.StandardButton.Cancel: ButtonStyles.TOOLBAR,
-            },
-            extra_padding=12,
-            minimum_height=34,
-            uniform_width=True,
-        )
-        layout.addWidget(button_box)
-
-        self.line_edit.returnPressed.connect(self.accept)
-        self.line_edit.textChanged.connect(
-            lambda _text: _hide_label_if_visible(self.error_label)
-        )
-
-    @classmethod
-    def get_password(
-        cls,
-        parent: Optional[QWidget],
-        title: str,
-        prompt: str,
-        *,
-        allow_empty: bool = True,
-    ) -> tuple[str, bool]:
-        dialog = cls(parent, title, prompt)
-        dialog._allow_empty = allow_empty  # type: ignore[attr-defined]
-        accepted = dialog.exec() == QDialog.DialogCode.Accepted
-        value = dialog._captured_text if accepted else ""
-        return value, accepted
-
-    def showEvent(self, event) -> None:  # type: ignore[override]
-        super().showEvent(event)
-        self.line_edit.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
-
-    def accept(self) -> None:  # type: ignore[override]
-        text = self.line_edit.text()
-        if not getattr(self, "_allow_empty", True) and not text.strip():
-            self._show_error("密码不能为空，请重新输入。")
-            return
-        self._captured_text = text
-        super().accept()
-
-    def reject(self) -> None:  # type: ignore[override]
-        self._captured_text = ""
-        super().reject()
-
-    def _show_error(self, message: str) -> None:
-        self.error_label.setText(message)
-        self.error_label.show()
-        self.line_edit.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
-
-class PasswordSetupDialog(QDialog):
-    """一次性采集两次输入的新密码，避免外部循环引发界面阻塞。"""
-
-    def __init__(self, parent: Optional[QWidget], title: str, prompt: str, confirm_prompt: str) -> None:
-        super().__init__(parent)
-        self.setWindowTitle(title)
-        self.setModal(True)
-        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
-        self._password: str = ""
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 18, 24, 18)
-        layout.setSpacing(12)
-
-        prompt_label = QLabel(prompt, self)
-        prompt_label.setWordWrap(True)
-        prompt_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        layout.addWidget(prompt_label)
-
-        self.password_edit = QLineEdit(self)
-        self.password_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.password_edit.setMinimumWidth(220)
-        layout.addWidget(self.password_edit)
-
-        confirm_label = QLabel(confirm_prompt, self)
-        confirm_label.setWordWrap(True)
-        confirm_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        layout.addWidget(confirm_label)
-
-        self.confirm_edit = QLineEdit(self)
-        self.confirm_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.confirm_edit.setMinimumWidth(220)
-        layout.addWidget(self.confirm_edit)
-
-        self.error_label = QLabel("", self)
-        self.error_label.setWordWrap(True)
-        self.error_label.setObjectName("passwordSetupErrorLabel")
-        self.error_label.setStyleSheet(
-            "#passwordSetupErrorLabel { color: #d93025; font-size: 12px; margin-top: 4px; }"
-        )
-        self.error_label.hide()
-        layout.addWidget(self.error_label)
-
-        button_box = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
-            Qt.Orientation.Horizontal,
-            self,
-        )
-        button_box.accepted.connect(self.accept)
-        button_box.rejected.connect(self.reject)
-        style_dialog_buttons(
-            button_box,
-            {
-                QDialogButtonBox.StandardButton.Ok: ButtonStyles.PRIMARY,
-                QDialogButtonBox.StandardButton.Cancel: ButtonStyles.TOOLBAR,
-            },
-            extra_padding=12,
-            minimum_height=34,
-            uniform_width=True,
-        )
-        layout.addWidget(button_box)
-
-        self.password_edit.returnPressed.connect(self._focus_confirm)
-        self.confirm_edit.returnPressed.connect(self.accept)
-        self.password_edit.textChanged.connect(
-            lambda _text: _hide_label_if_visible(self.error_label)
-        )
-        self.confirm_edit.textChanged.connect(
-            lambda _text: _hide_label_if_visible(self.error_label)
-        )
-
-    @classmethod
-    def get_new_password(
-        cls,
-        parent: Optional[QWidget],
-        title: str,
-        prompt: str,
-        confirm_prompt: str,
-    ) -> tuple[str, bool]:
-        dialog = cls(parent, title, prompt, confirm_prompt)
-        accepted = dialog.exec() == QDialog.DialogCode.Accepted
-        value = dialog._password if accepted else ""
-        return value, accepted
-
-    def showEvent(self, event) -> None:  # type: ignore[override]
-        super().showEvent(event)
-        self.password_edit.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
-
-    def accept(self) -> None:  # type: ignore[override]
-        password = self.password_edit.text().strip()
-        confirm = self.confirm_edit.text().strip()
-        if not password:
-            self._show_error("密码不能为空，请重新输入。", focus_widget=self.password_edit)
-            return
-        if password != confirm:
-            self._show_error("两次输入的密码不一致，请重新设置。", focus_widget=self.confirm_edit)
-            return
-        self._password = password
-        super().accept()
-
-    def reject(self) -> None:  # type: ignore[override]
-        self._password = ""
-        super().reject()
-
-    def _show_error(self, message: str, *, focus_widget: Optional[QWidget] = None) -> None:
-        self.error_label.setText(message)
-        self.error_label.show()
-        target = focus_widget or self.password_edit
-        target.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
-
-    def _focus_confirm(self) -> None:
-        self.confirm_edit.setFocus(Qt.FocusReason.TabFocusReason)
-
-
 def ask_quiet_confirmation(parent: Optional[QWidget], text: str, title: str = "确认") -> bool:
     dialog = QuietQuestionDialog(parent, text, title)
     return dialog.exec() == QDialog.DialogCode.Accepted
@@ -2002,7 +1982,7 @@ class SettingsManager:
             except Exception:
                 failed.append(path)
         if failed and self.filename not in failed:
-            print(f"无法写入备用配置文件: {failed}")
+            logger.warning("无法写入备用配置文件: %s", failed)
 
         self._settings_cache = {section: values.copy() for section, values in snapshot.items()}
 
@@ -4352,776 +4332,10 @@ class _PresentationWindowMixin:
             return None
         return candidates
 
-    @classmethod
-    def _normalize_class_hint(cls, value: Any) -> str:
-        return cls._PrefixKeywordClassifier._normalize(value)
-
-    @staticmethod
-    def _resolve_debug_logger() -> Optional[Callable[..., None]]:
-        """Return a callable debug logger suitable for predicate diagnostics."""
-
-        logger_ref = globals().get("logger")
-        debug = getattr(logger_ref, "debug", None)
-        if callable(debug):
-            return debug
-
-        logging_module = globals().get("logging")
-        if logging_module is None:  # pragma: no cover - helper extraction fallback
-            import logging as logging_module  # type: ignore[import-not-found]
-
-        fallback_logger = logging_module.getLogger(__name__)
-        debug = getattr(fallback_logger, "debug", None)
-        if callable(debug):
-            return debug
-        return None
-
-    def _wps_hint_predicate_specs(self) -> Tuple["_PredicateSpec", ...]:
-        cls = _PresentationWindowMixin
-        return (
-            self._PredicateSpec(
-                "has_slideshow",
-                self._is_wps_slideshow_class,
-                self._normalized_is_wps_slideshow_class,
-                cls._is_wps_slideshow_class,
-            ),
-            self._PredicateSpec(
-                "has_wps_presentation_signature",
-                self._class_has_wps_presentation_signature,
-                self._normalized_has_wps_presentation_signature,
-                cls._class_has_wps_presentation_signature,
-            ),
-            self._PredicateSpec(
-                "has_ms_presentation_signature",
-                self._class_has_ms_presentation_signature,
-                self._normalized_has_ms_presentation_signature,
-                cls._class_has_ms_presentation_signature,
-            ),
-            self._PredicateSpec(
-                "has_writer_signature",
-                self._class_has_wps_writer_signature,
-                self._normalized_has_wps_writer_signature,
-                cls._class_has_wps_writer_signature,
-            ),
-        )
-
-    def _normalized_is_wps_slideshow_class(self, normalized: str) -> bool:
-        if not normalized:
-            return False
-        if normalized in self._WPS_SLIDESHOW_CLASSES:
-            return True
-        return normalized.startswith("kwppshow")
-
-    def _evaluate_normalized_class(
-        self,
-        class_name: Any,
-        normalized_predicate: Callable[[str], bool],
-    ) -> bool:
-        normalized = self._normalize_class_hint(class_name)
-        if not normalized:
-            return False
-        return bool(normalized_predicate(normalized))
-
-    def _is_wps_slideshow_class(self, class_name: str) -> bool:
-        return self._evaluate_normalized_class(
-            class_name, self._normalized_is_wps_slideshow_class
-        )
-
-    def _is_word_like_class(self, class_name: str) -> bool:
-        normalized = self._normalize_class_hint(class_name)
-        if not normalized:
-            return False
-        if normalized in self._WORD_WINDOW_CLASSES:
-            return True
-        if normalized in self._WORD_CONTENT_CLASSES:
-            return True
-        if normalized in self._WORD_HOST_CLASSES:
-            return True
-        if normalized.startswith("_ww"):
-            return True
-        if "word" in normalized:
-            return True
-        return self._WPS_WRITER_CLASSIFIER.has_signature(normalized)
-
-    def _class_has_wps_writer_signature(self, class_name: str) -> bool:
-        return self._WPS_WRITER_CLASSIFIER.has_signature(class_name)
-
-    def _normalized_has_wps_writer_signature(self, normalized: str) -> bool:
-        if not normalized:
-            return False
-        return self._WPS_WRITER_CLASSIFIER.has_normalized_signature(normalized)
-
-    def _normalized_has_wps_presentation_signature(self, normalized: str) -> bool:
-        if not normalized:
-            return False
-        if self._normalized_is_wps_slideshow_class(normalized):
-            return True
-        if normalized.startswith("kwpp") or "kwpp" in normalized:
-            return True
-        if normalized.startswith("wpp") and "wps" not in normalized:
-            return True
-        if normalized.startswith("wpsshow") or "wpsshow" in normalized:
-            return True
-        return False
-
-    def _class_has_wps_presentation_signature(self, class_name: str) -> bool:
-        return self._evaluate_normalized_class(
-            class_name, self._normalized_has_wps_presentation_signature
-        )
-
-    def _normalized_has_ms_presentation_signature(self, normalized: str) -> bool:
-        if not normalized:
-            return False
-        if self._normalized_has_wps_presentation_signature(normalized):
-            return False
-        if normalized in self._SLIDESHOW_PRIORITY_CLASSES:
-            return True
-        if normalized in self._SLIDESHOW_SECONDARY_CLASSES:
-            return True
-        if normalized in self._PRESENTATION_EDITOR_CLASSES:
-            if normalized.startswith("kwpp") or normalized.startswith("kwps"):
-                return False
-            if normalized.startswith("wps"):
-                return False
-            return True
-        keywords = ("ppt", "powerpnt", "powerpoint", "screenclass")
-        return any(keyword in normalized for keyword in keywords)
-
-    def _class_has_ms_presentation_signature(self, class_name: str) -> bool:
-        return self._evaluate_normalized_class(
-            class_name, self._normalized_has_ms_presentation_signature
-        )
-
-    def _normalized_class_hints(self, *classes: Any) -> Tuple[str, ...]:
-        normalized: List[str] = []
-        for value in classes:
-            hint = self._normalize_class_hint(value)
-            if hint:
-                normalized.append(hint)
-        return tuple(normalized)
-
-    def _normalize_process_name(self, value: Any) -> str:
-        if value is None:
-            return ""
-        try:
-            if isinstance(value, (bytes, bytearray, memoryview)):
-                text = bytes(value).decode("utf-8", "ignore")
-            else:
-                text = str(value)
-        except Exception:
-            return ""
-        if not text:
-            return ""
-        return _casefold_cached(text)
-
-    def _normalized_process_context(
-        self, process_name: Any, classes: Iterable[Any]
-    ) -> Tuple[str, Tuple[str, ...]]:
-        normalized_name = self._normalize_process_name(process_name)
-        normalized_classes = self._normalized_class_hints(*classes)
-        return normalized_name, normalized_classes
-
-    def _empty_wps_process_hints(
-        self, classes: Tuple[str, ...]
-    ) -> "_PresentationWindowMixin._WPSProcessHints":
-        return self._WPSProcessHints(classes, False, False, False, False)
-
-    @staticmethod
-    def _emit_wps_debug(
-        debug: Optional[Callable[..., None]],
-        message: str,
-        *args: Any,
-        **kwargs: Any,
-    ) -> None:
-        if callable(debug):
-            debug(message, *args, **kwargs)
-
-    def _log_wps_predicate_failure(
-        self, debug: Optional[Callable[..., None]]
-    ) -> None:
-        self._emit_wps_debug(
-            debug,
-            "WPS process hint predicate failed",  # pragma: no cover - debug logging
-            exc_info=True,
-        )
-
-    def _memoize_wps_spec(
-        self,
-        spec: "_PresentationWindowMixin._PredicateSpec",
-        debug: Optional[Callable[..., None]],
-    ) -> Callable[[str], bool]:
-        normalized_impl = spec.normalized_delegate()
-        delegate: Callable[[Any], bool]
-        if normalized_impl is None:
-            delegate = spec.predicate
-        else:
-            delegate = normalized_impl
-
-        @functools.lru_cache(maxsize=None)
-        def _call(class_name: str) -> bool:
-            try:
-                return bool(delegate(class_name))
-            except Exception:
-                self._log_wps_predicate_failure(debug)
-                return False
-
-        return _call
-
-    def _resolve_wps_predicate_cache(self) -> Dict[
-        Tuple[Any, ...], Tuple[Tuple[str, Callable[[str], bool]], ...]
-    ]:
-        cache = getattr(self, "_cached_wps_predicate_delegates", None)
-        if cache is None:
-            cache = {}
-            setattr(self, "_cached_wps_predicate_delegates", cache)
-        return cast(
-            Dict[Tuple[Any, ...], Tuple[Tuple[str, Callable[[str], bool]], ...]],
-            cache,
-        )
-
-    def _debug_delegate_cache_key(
-        self, debug: Optional[Callable[..., None]]
-    ) -> Tuple[Any, Any]:
-        if not callable(debug):
-            return (None, None)
-        owner = getattr(debug, "__self__", None)
-        return (
-            owner,
-            self._unwrap_predicate_callable(debug),
-        )
-
-    def _build_wps_delegate_cache_key(
-        self,
-        debug: Optional[Callable[..., None]],
-        predicate_specs: Tuple["_PresentationWindowMixin._PredicateSpec", ...],
-    ) -> Tuple[Any, ...]:
-        debug_key = self._debug_delegate_cache_key(debug)
-        spec_keys: List[Tuple[Any, Any, Any, Any]] = []
-        for spec in predicate_specs:
-            predicate_impl = self._unwrap_predicate_callable(spec.predicate)
-            if spec.normalized_predicate is None:
-                normalized_impl: Optional[Callable[..., Any]] = None
-            else:
-                normalized_impl = self._unwrap_predicate_callable(
-                    spec.normalized_predicate
-                )
-            base_impl = self._unwrap_predicate_callable(spec.base_impl)
-            spec_keys.append(
-                (
-                    spec.flag_name,
-                    predicate_impl,
-                    normalized_impl,
-                    base_impl,
-                )
-            )
-        return (debug_key, tuple(spec_keys))
-
-    def _prepare_wps_predicate_delegates(
-        self,
-        predicate_specs: Iterable["_PresentationWindowMixin._PredicateSpec"],
-        debug: Optional[Callable[..., None]],
-    ) -> Tuple[Tuple[str, Callable[[str], bool]], ...]:
-        manager = self._WPSPredicateManager(
-            owner=self,
-            debug=debug,
-            specs=tuple(predicate_specs),
-        )
-        return manager.delegates()
-
-    def _summarize_wps_process_hints(
-        self, normalized_classes: Iterable[str]
-    ) -> "_PresentationWindowMixin._WPSProcessHints":
-        classes = tuple(normalized_classes)
-        empty_hints = self._empty_wps_process_hints(classes)
-        if not classes:
-            return empty_hints
-
-        manager = self._WPSPredicateManager(
-            owner=self,
-            debug=self._resolve_debug_logger(),
-            specs=self._wps_hint_predicate_specs(),
-        )
-        return manager.summarize(classes)
-
-    def _classify_wps_process(
-        self, process_name: Any, *classes: Any
-    ) -> Literal["presentation", "writer", "other"]:
-        name, normalized_classes = self._normalized_process_context(process_name, classes)
-        if not name:
-            return "other"
-        if name.startswith(("wpp", "wppt")) or "wpspresentation" in name:
-            return "presentation"
-
-        hints = self._summarize_wps_process_hints(normalized_classes)
-
-        presentation_detected = any(
-            (
-                hints.has_slideshow,
-                hints.has_wps_presentation_signature,
-                hints.has_ms_presentation_signature,
-            )
-        )
-        writer_detected = hints.has_writer_signature
-
-        if name.startswith("wps"):
-            if presentation_detected:
-                return "presentation"
-            if writer_detected or "wpswriter" in name:
-                return "writer"
-            return "other"
-
-        return "writer" if writer_detected else "other"
-
-    def _is_wps_presentation_process(self, process_name: str, *classes: str) -> bool:
-        return self._classify_wps_process(process_name, *classes) == "presentation"
-
-    def _is_wps_writer_process(self, process_name: str, *classes: str) -> bool:
-        return self._classify_wps_process(process_name, *classes) == "writer"
-
-    def _window_thread_id(self, hwnd: int) -> int:
-        if _USER32 is None or hwnd == 0:
-            return 0
-        pid = wintypes.DWORD()
-        try:
-            thread_id = int(_USER32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(pid)))
-        except Exception:
-            thread_id = 0
-        return thread_id
-
-    def _attach_to_target_thread(self, hwnd: int) -> Optional[Tuple[int, int]]:
-        if _USER32 is None or hwnd == 0:
-            return None
-        target_thread = self._window_thread_id(hwnd)
-        if not target_thread:
-            return None
-        try:
-            current_thread = int(_USER32.GetCurrentThreadId())
-        except Exception:
-            current_thread = 0
-        if not current_thread or current_thread == target_thread:
-            return None
-        try:
-            attached = bool(_USER32.AttachThreadInput(current_thread, target_thread, True))
-        except Exception:
-            attached = False
-        return (current_thread, target_thread) if attached else None
-
-    def _detach_from_target_thread(self, pair: Optional[Tuple[int, int]]) -> None:
-        if _USER32 is None or not pair:
-            return
-        src, dst = pair
-        if not src or not dst or src == dst:
-            return
-        try:
-            _USER32.AttachThreadInput(src, dst, False)
-        except Exception:
-            pass
-
     def _enumerate_overlay_candidate_windows(self, overlay_hwnd: int) -> Optional[List[int]]:
         if _USER32 is None or _WNDENUMPROC is None:
             return None
         candidates: List[int] = []
-
-        def _enum_callback(hwnd: int, _l_param: int) -> int:
-            if hwnd == overlay_hwnd:
-                return True
-            if self._should_ignore_window(hwnd):
-                return True
-            if not _user32_is_window_visible(hwnd) or _user32_is_window_iconic(hwnd):
-                return True
-            rect = _user32_window_rect(hwnd)
-            if not rect or not self._rect_intersects_overlay(rect):
-                return True
-            candidates.append(int(hwnd))
-            return True
-
-        enum_proc = _WNDENUMPROC(_enum_callback)
-        try:
-            _USER32.EnumWindows(enum_proc, 0)
-        except Exception:
-            return None
-        return candidates
-
-    @classmethod
-    def _normalize_class_hint(cls, value: Any) -> str:
-        return cls._PrefixKeywordClassifier._normalize(value)
-
-    @staticmethod
-    def _resolve_debug_logger() -> Optional[Callable[..., None]]:
-        """Return a callable debug logger suitable for predicate diagnostics."""
-
-        logger_ref = globals().get("logger")
-        debug = getattr(logger_ref, "debug", None)
-        if callable(debug):
-            return debug
-
-        logging_module = globals().get("logging")
-        if logging_module is None:  # pragma: no cover - helper extraction fallback
-            import logging as logging_module  # type: ignore[import-not-found]
-
-        fallback_logger = logging_module.getLogger(__name__)
-        debug = getattr(fallback_logger, "debug", None)
-        if callable(debug):
-            return debug
-        return None
-
-    def _wps_hint_predicate_specs(self) -> Tuple["_PredicateSpec", ...]:
-        cls = _PresentationWindowMixin
-        return (
-            self._PredicateSpec(
-                "has_slideshow",
-                self._is_wps_slideshow_class,
-                self._normalized_is_wps_slideshow_class,
-                cls._is_wps_slideshow_class,
-            ),
-            self._PredicateSpec(
-                "has_wps_presentation_signature",
-                self._class_has_wps_presentation_signature,
-                self._normalized_has_wps_presentation_signature,
-                cls._class_has_wps_presentation_signature,
-            ),
-            self._PredicateSpec(
-                "has_ms_presentation_signature",
-                self._class_has_ms_presentation_signature,
-                self._normalized_has_ms_presentation_signature,
-                cls._class_has_ms_presentation_signature,
-            ),
-            self._PredicateSpec(
-                "has_writer_signature",
-                self._class_has_wps_writer_signature,
-                self._normalized_has_wps_writer_signature,
-                cls._class_has_wps_writer_signature,
-            ),
-        )
-
-    def _normalized_is_wps_slideshow_class(self, normalized: str) -> bool:
-        if not normalized:
-            return False
-        if normalized in self._WPS_SLIDESHOW_CLASSES:
-            return True
-        return normalized.startswith("kwppshow")
-
-    def _evaluate_normalized_class(
-        self,
-        class_name: Any,
-        normalized_predicate: Callable[[str], bool],
-    ) -> bool:
-        normalized = self._normalize_class_hint(class_name)
-        if not normalized:
-            return False
-        return bool(normalized_predicate(normalized))
-
-    def _is_wps_slideshow_class(self, class_name: str) -> bool:
-        return self._evaluate_normalized_class(
-            class_name, self._normalized_is_wps_slideshow_class
-        )
-
-    def _is_word_like_class(self, class_name: str) -> bool:
-        normalized = self._normalize_class_hint(class_name)
-        if not normalized:
-            return False
-        if normalized in self._WORD_WINDOW_CLASSES:
-            return True
-        if normalized in self._WORD_CONTENT_CLASSES:
-            return True
-        if normalized in self._WORD_HOST_CLASSES:
-            return True
-        if normalized.startswith("_ww"):
-            return True
-        if "word" in normalized:
-            return True
-        return self._WPS_WRITER_CLASSIFIER.has_signature(normalized)
-
-    def _class_has_wps_writer_signature(self, class_name: str) -> bool:
-        return self._WPS_WRITER_CLASSIFIER.has_signature(class_name)
-
-    def _normalized_has_wps_writer_signature(self, normalized: str) -> bool:
-        if not normalized:
-            return False
-        return self._WPS_WRITER_CLASSIFIER.has_normalized_signature(normalized)
-
-    def _normalized_has_wps_presentation_signature(self, normalized: str) -> bool:
-        if not normalized:
-            return False
-        if self._normalized_is_wps_slideshow_class(normalized):
-            return True
-        if normalized.startswith("kwpp") or "kwpp" in normalized:
-            return True
-        if normalized.startswith("wpp") and "wps" not in normalized:
-            return True
-        if normalized.startswith("wpsshow") or "wpsshow" in normalized:
-            return True
-        return False
-
-    def _class_has_wps_presentation_signature(self, class_name: str) -> bool:
-        return self._evaluate_normalized_class(
-            class_name, self._normalized_has_wps_presentation_signature
-        )
-
-    def _normalized_has_ms_presentation_signature(self, normalized: str) -> bool:
-        if not normalized:
-            return False
-        if self._normalized_has_wps_presentation_signature(normalized):
-            return False
-        if normalized in self._SLIDESHOW_PRIORITY_CLASSES:
-            return True
-        if normalized in self._SLIDESHOW_SECONDARY_CLASSES:
-            return True
-        if normalized in self._PRESENTATION_EDITOR_CLASSES:
-            if normalized.startswith("kwpp") or normalized.startswith("kwps"):
-                return False
-            if normalized.startswith("wps"):
-                return False
-            return True
-        keywords = ("ppt", "powerpnt", "powerpoint", "screenclass")
-        return any(keyword in normalized for keyword in keywords)
-
-    def _class_has_ms_presentation_signature(self, class_name: str) -> bool:
-        return self._evaluate_normalized_class(
-            class_name, self._normalized_has_ms_presentation_signature
-        )
-
-    def _normalized_class_hints(self, *classes: Any) -> Tuple[str, ...]:
-        normalized: List[str] = []
-        for value in classes:
-            hint = self._normalize_class_hint(value)
-            if hint:
-                normalized.append(hint)
-        return tuple(normalized)
-
-    def _normalize_process_name(self, value: Any) -> str:
-        if value is None:
-            return ""
-        try:
-            if isinstance(value, (bytes, bytearray, memoryview)):
-                text = bytes(value).decode("utf-8", "ignore")
-            else:
-                text = str(value)
-        except Exception:
-            return ""
-        if not text:
-            return ""
-        return _casefold_cached(text)
-
-    def _normalized_process_context(
-        self, process_name: Any, classes: Iterable[Any]
-    ) -> Tuple[str, Tuple[str, ...]]:
-        normalized_name = self._normalize_process_name(process_name)
-        normalized_classes = self._normalized_class_hints(*classes)
-        return normalized_name, normalized_classes
-
-    def _empty_wps_process_hints(
-        self, classes: Tuple[str, ...]
-    ) -> "_PresentationWindowMixin._WPSProcessHints":
-        return self._WPSProcessHints(classes, False, False, False, False)
-
-    @staticmethod
-    def _emit_wps_debug(
-        debug: Optional[Callable[..., None]],
-        message: str,
-        *args: Any,
-        **kwargs: Any,
-    ) -> None:
-        if callable(debug):
-            debug(message, *args, **kwargs)
-
-    def _log_wps_predicate_failure(
-        self, debug: Optional[Callable[..., None]]
-    ) -> None:
-        self._emit_wps_debug(
-            debug,
-            "WPS process hint predicate failed",  # pragma: no cover - debug logging
-            exc_info=True,
-        )
-
-    def _memoize_wps_spec(
-        self,
-        spec: "_PresentationWindowMixin._PredicateSpec",
-        debug: Optional[Callable[..., None]],
-    ) -> Callable[[str], bool]:
-        normalized_impl = spec.normalized_delegate()
-        delegate: Callable[[Any], bool]
-        if normalized_impl is None:
-            delegate = spec.predicate
-        else:
-            delegate = normalized_impl
-
-        @functools.lru_cache(maxsize=None)
-        def _call(class_name: str) -> bool:
-            try:
-                return bool(delegate(class_name))
-            except Exception:
-                self._log_wps_predicate_failure(debug)
-                return False
-
-        return _call
-
-    def _resolve_wps_predicate_cache(self) -> Dict[
-        Tuple[Any, ...], Tuple[Tuple[str, Callable[[str], bool]], ...]
-    ]:
-        cache = getattr(self, "_cached_wps_predicate_delegates", None)
-        if cache is None:
-            cache = {}
-            setattr(self, "_cached_wps_predicate_delegates", cache)
-        return cast(
-            Dict[Tuple[Any, ...], Tuple[Tuple[str, Callable[[str], bool]], ...]],
-            cache,
-        )
-
-    def _debug_delegate_cache_key(
-        self, debug: Optional[Callable[..., None]]
-    ) -> Tuple[Any, Any]:
-        if not callable(debug):
-            return (None, None)
-        owner = getattr(debug, "__self__", None)
-        return (
-            owner,
-            self._unwrap_predicate_callable(debug),
-        )
-
-    def _build_wps_delegate_cache_key(
-        self,
-        debug: Optional[Callable[..., None]],
-        predicate_specs: Tuple["_PresentationWindowMixin._PredicateSpec", ...],
-    ) -> Tuple[Any, ...]:
-        debug_key = self._debug_delegate_cache_key(debug)
-        spec_keys: List[Tuple[Any, Any, Any, Any]] = []
-        for spec in predicate_specs:
-            predicate_impl = self._unwrap_predicate_callable(spec.predicate)
-            if spec.normalized_predicate is None:
-                normalized_impl: Optional[Callable[..., Any]] = None
-            else:
-                normalized_impl = self._unwrap_predicate_callable(
-                    spec.normalized_predicate
-                )
-            base_impl = self._unwrap_predicate_callable(spec.base_impl)
-            spec_keys.append(
-                (
-                    spec.flag_name,
-                    predicate_impl,
-                    normalized_impl,
-                    base_impl,
-                )
-            )
-        return (debug_key, tuple(spec_keys))
-
-    def _prepare_wps_predicate_delegates(
-        self,
-        predicate_specs: Iterable["_PresentationWindowMixin._PredicateSpec"],
-        debug: Optional[Callable[..., None]],
-    ) -> Tuple[Tuple[str, Callable[[str], bool]], ...]:
-        manager = self._WPSPredicateManager(
-            owner=self,
-            debug=debug,
-            specs=tuple(predicate_specs),
-        )
-        return manager.delegates()
-
-    def _summarize_wps_process_hints(
-        self, normalized_classes: Iterable[str]
-    ) -> "_PresentationWindowMixin._WPSProcessHints":
-        classes = tuple(normalized_classes)
-        empty_hints = self._empty_wps_process_hints(classes)
-        if not classes:
-            return empty_hints
-
-        manager = self._WPSPredicateManager(
-            owner=self,
-            debug=self._resolve_debug_logger(),
-            specs=self._wps_hint_predicate_specs(),
-        )
-        return manager.summarize(classes)
-
-    def _classify_wps_process(
-        self, process_name: Any, *classes: Any
-    ) -> Literal["presentation", "writer", "other"]:
-        name, normalized_classes = self._normalized_process_context(process_name, classes)
-        if not name:
-            return "other"
-        if name.startswith(("wpp", "wppt")) or "wpspresentation" in name:
-            return "presentation"
-
-        hints = self._summarize_wps_process_hints(normalized_classes)
-
-        presentation_detected = any(
-            (
-                hints.has_slideshow,
-                hints.has_wps_presentation_signature,
-                hints.has_ms_presentation_signature,
-            )
-        )
-        writer_detected = hints.has_writer_signature
-
-        if name.startswith("wps"):
-            if presentation_detected:
-                return "presentation"
-            if writer_detected or "wpswriter" in name:
-                return "writer"
-            return "other"
-
-        return "writer" if writer_detected else "other"
-
-    def _is_wps_presentation_process(self, process_name: str, *classes: str) -> bool:
-        return self._classify_wps_process(process_name, *classes) == "presentation"
-
-    def _is_wps_writer_process(self, process_name: str, *classes: str) -> bool:
-        return self._classify_wps_process(process_name, *classes) == "writer"
-
-    def _window_thread_id(self, hwnd: int) -> int:
-        if _USER32 is None or hwnd == 0:
-            return 0
-        pid = wintypes.DWORD()
-        try:
-            thread_id = int(_USER32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(pid)))
-        except Exception:
-            thread_id = 0
-        return thread_id
-
-    def _attach_to_target_thread(self, hwnd: int) -> Optional[Tuple[int, int]]:
-        if _USER32 is None or hwnd == 0:
-            return None
-        target_thread = self._window_thread_id(hwnd)
-        if not target_thread:
-            return None
-        try:
-            current_thread = int(_USER32.GetCurrentThreadId())
-        except Exception:
-            current_thread = 0
-        if not current_thread or current_thread == target_thread:
-            return None
-        try:
-            attached = bool(_USER32.AttachThreadInput(current_thread, target_thread, True))
-        except Exception:
-            attached = False
-        return (current_thread, target_thread) if attached else None
-
-    def _detach_from_target_thread(self, pair: Optional[Tuple[int, int]]) -> None:
-        if _USER32 is None or not pair:
-            return
-        src, dst = pair
-        if not src or not dst or src == dst:
-            return
-        try:
-            _USER32.AttachThreadInput(src, dst, False)
-        except Exception:
-            pass
-
-    def _enumerate_overlay_candidate_windows(self, overlay_hwnd: int) -> Optional[List[int]]:
-        if _USER32 is None or _WNDENUMPROC is None:
-            return None
-        candidates: List[int] = []
-
-        def _enum_callback(hwnd: int, _l_param: int) -> int:
-            if hwnd == overlay_hwnd:
-                return True
-            if self._should_ignore_window(hwnd):
-                return True
-            if not _user32_is_window_visible(hwnd) or _user32_is_window_iconic(hwnd):
-                return True
-            rect = _user32_window_rect(hwnd)
-            if not rect or not self._rect_intersects_overlay(rect):
-                return True
-            candidates.append(int(hwnd))
-            return True
 
     def _overlay_child_widget(self, attribute: str) -> Optional[QWidget]:
         overlay = self._overlay_widget()
@@ -10790,8 +10004,6 @@ class RollCallTimerWindow(QWidget):
 
     STUDENT_FILE = _STUDENT_RESOURCES.plain
     STUDENT_FILE_CANDIDATES = _STUDENT_RESOURCES.plain_candidates
-    ENCRYPTED_STUDENT_FILE = _STUDENT_RESOURCES.encrypted
-    ENCRYPTED_STUDENT_FILE_CANDIDATES = _STUDENT_RESOURCES.encrypted_candidates
     MIN_FONT_SIZE = 5
     MAX_FONT_SIZE = 220
 
@@ -10815,7 +10027,6 @@ class RollCallTimerWindow(QWidget):
         self.setWindowFlags(flags)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.settings_manager = settings_manager
-        self._encrypted_file_path = self.ENCRYPTED_STUDENT_FILE
         self.student_workbook: Optional[StudentWorkbook] = student_workbook
         base_dataframe: Optional[PandasDataFrame] = None
         if PANDAS_READY and self.student_workbook is not None:
@@ -10827,9 +10038,6 @@ class RollCallTimerWindow(QWidget):
             base_dataframe = pd.DataFrame(columns=["学号", "姓名", "分组", "成绩"])
         self.student_data = base_dataframe
         self._student_data_pending_load = False
-        encrypted_state, encrypted_password = _get_session_student_encryption()
-        self._student_file_encrypted = bool(encrypted_state)
-        self._student_password = encrypted_password
         if defer_password_prompt:
             base_empty = True
             if PANDAS_READY and isinstance(self.student_data, pd.DataFrame):
@@ -10838,8 +10046,7 @@ class RollCallTimerWindow(QWidget):
                 base_empty = False
             if base_empty:
                 has_plain = _any_existing_path(self.STUDENT_FILE_CANDIDATES) is not None
-                has_encrypted = _any_existing_path(self.ENCRYPTED_STUDENT_FILE_CANDIDATES) is not None
-                if has_plain or has_encrypted:
+                if has_plain:
                     self._student_data_pending_load = True
                     if self.student_data is None and PANDAS_READY:
                         self.student_data = pd.DataFrame(columns=["学号", "姓名", "分组", "成绩"])
@@ -10908,16 +10115,6 @@ class RollCallTimerWindow(QWidget):
 
         order_value = str(s.get("scoreboard_order", "rank")).strip().lower()
         self.scoreboard_order = order_value if order_value in {"rank", "id"} else "rank"
-        saved_encrypted = str_to_bool(s.get("students_encrypted", bool_to_str(self._student_file_encrypted)), self._student_file_encrypted)
-        plain_exists = _any_existing_path(self.STUDENT_FILE_CANDIDATES) is not None
-        encrypted_exists = _any_existing_path(self.ENCRYPTED_STUDENT_FILE_CANDIDATES) is not None
-        disk_encrypted = encrypted_exists and not plain_exists
-        if disk_encrypted:
-            self._student_file_encrypted = True
-        elif not saved_encrypted:
-            self._student_file_encrypted = False
-            self._student_password = None
-
         self.last_id_font_size = max(self.MIN_FONT_SIZE, _get_int("id_font_size", 48))
         self.last_name_font_size = max(self.MIN_FONT_SIZE, _get_int("name_font_size", 60))
         self.last_timer_font_size = max(self.MIN_FONT_SIZE, _get_int("timer_font_size", 56))
@@ -10970,7 +10167,6 @@ class RollCallTimerWindow(QWidget):
         self.update_mode_ui(force_timer_reset=self.mode == "timer")
         self.on_group_change(initial=True)
         self.display_current_student()
-        self._update_encryption_button()
 
     def _build_ui(self) -> None:
         self.setStyleSheet("background-color: #f4f5f7;")
@@ -11052,10 +10248,6 @@ class RollCallTimerWindow(QWidget):
         self.showcase_button = QPushButton("展示"); _setup_secondary_button(self.showcase_button)
         self.showcase_button.clicked.connect(self.show_scoreboard)
         control_layout.addWidget(self.showcase_button)
-
-        self.encrypt_button = QPushButton(""); _setup_secondary_button(self.encrypt_button)
-        self.encrypt_button.clicked.connect(self._on_encrypt_button_clicked)
-        control_layout.addWidget(self.encrypt_button)
 
         top.addWidget(control_bar, 0, Qt.AlignmentFlag.AlignLeft)
         top.addStretch(1)
@@ -11162,61 +10354,6 @@ class RollCallTimerWindow(QWidget):
 
         self.roll_call_frame.clicked.connect(self.roll_student)
         self.id_label.installEventFilter(self); self.name_label.installEventFilter(self)
-
-    def _update_encryption_button(self) -> None:
-        if not hasattr(self, "encrypt_button"):
-            return
-        plain_exists = _any_existing_path(self.STUDENT_FILE_CANDIDATES) is not None
-        encrypted_exists = _any_existing_path(self.ENCRYPTED_STUDENT_FILE_CANDIDATES) is not None
-        disk_encrypted = encrypted_exists and not plain_exists
-        if disk_encrypted and not self._student_file_encrypted:
-            self._student_file_encrypted = True
-        elif not disk_encrypted and self._student_file_encrypted and not encrypted_exists:
-            self._student_file_encrypted = False
-            self._student_password = None
-        self.encrypt_button.setText("解密" if self._student_file_encrypted else "加密")
-        if self._student_file_encrypted:
-            self.encrypt_button.setToolTip("当前学生数据已加密，点击输入密码以解密或更新。")
-        else:
-            self.encrypt_button.setToolTip("点击为 students.xlsx 设置密码并生成加密文件。")
-
-    def _on_encrypt_button_clicked(self) -> None:
-        if self._student_file_encrypted:
-            self._handle_decrypt_student_file()
-        else:
-            self._handle_encrypt_student_file()
-
-    def _prompt_new_encryption_password(self) -> Optional[str]:
-        password, ok = PasswordSetupDialog.get_new_password(
-            self,
-            "设置加密密码",
-            "请输入新的加密密码：",
-            "请再次输入密码以确认：",
-        )
-        if not ok or not password:
-            show_quiet_information(self, "未能成功设置密码，已取消加密操作。")
-            return None
-        return password
-
-    def _prompt_existing_encryption_password(self, title: str) -> Optional[str]:
-        attempts = 0
-        while attempts < 3:
-            password, ok = PasswordPromptDialog.get_password(
-                self,
-                title,
-                "请输入当前的加密密码：",
-                allow_empty=False,
-            )
-            if not ok:
-                return None
-            password = password.strip()
-            if not password:
-                show_quiet_information(self, "密码不能为空，请重新输入。")
-                attempts += 1
-                continue
-            return password
-        show_quiet_information(self, "密码输入次数过多，操作已取消。")
-        return None
 
     def _set_student_dataframe(self, df: Optional[PandasDataFrame], *, propagate: bool = True) -> None:
         if not PANDAS_READY:
@@ -11674,110 +10811,12 @@ class RollCallTimerWindow(QWidget):
             return False
         self._student_data_pending_load = False
         self._apply_student_workbook(workbook, propagate=True)
-        encrypted_state, encrypted_password = _get_session_student_encryption()
-        self._student_file_encrypted = bool(encrypted_state)
-        self._student_password = encrypted_password
         saved = self.settings_manager.load_settings().get("RollCallTimer", {})
         self._restore_group_state(saved)
-        self._update_encryption_button()
         self._update_class_button_label()
         self.display_current_student()
         self._schedule_save()
         return True
-
-    def _handle_encrypt_student_file(self) -> None:
-        if not PANDAS_READY:
-            show_quiet_information(self, "当前环境缺少 pandas，无法执行加密。")
-            return
-        password = self._prompt_new_encryption_password()
-        if not password:
-            return
-        if not self._ensure_student_data_ready():
-            return
-        if self.student_workbook is None:
-            if self.student_data is None or not isinstance(self.student_data, pd.DataFrame):
-                show_quiet_information(self, "没有可加密的学生数据。")
-                return
-            try:
-                snapshot = self.student_data.copy()
-            except Exception:
-                snapshot = pd.DataFrame(self.student_data)
-            class_name = self.current_class_name or "班级1"
-            self.current_class_name = class_name
-            self.student_workbook = StudentWorkbook(
-                OrderedDict({class_name: snapshot}),
-                active_class=class_name,
-            )
-        else:
-            self._snapshot_current_class()
-        try:
-            data = self.student_workbook.as_dict()
-            _save_student_workbook(
-                data,
-                self.STUDENT_FILE,
-                self._encrypted_file_path,
-                encrypted=True,
-                password=password,
-            )
-            _set_session_student_encryption(True, password)
-            self._student_file_encrypted = True
-            self._student_password = password
-            self._update_encryption_button()
-            self._propagate_student_dataframe()
-            self._update_class_button_label()
-            show_quiet_information(self, "已生成加密文件 students.xlsx.enc，并移除明文数据。")
-            self._schedule_save()
-        except Exception as exc:
-            show_quiet_information(self, f"加密失败：{exc}")
-
-    def _handle_decrypt_student_file(self) -> None:
-        encrypted_path = self._encrypted_file_path
-        if not os.path.exists(encrypted_path):
-            show_quiet_information(self, "未找到加密文件，无法解密。")
-            self._student_file_encrypted = False
-            self._update_encryption_button()
-            return
-        password = self._prompt_existing_encryption_password("解密学生数据")
-        if not password:
-            return
-        try:
-            with open(encrypted_path, "rb") as fh:
-                payload = fh.read()
-            plain_bytes = _decrypt_student_bytes(password, payload)
-        except Exception as exc:
-            show_quiet_information(self, f"解密失败：{exc}")
-            return
-        try:
-            buffer = io.BytesIO(plain_bytes)
-            raw_data = pd.read_excel(buffer, sheet_name=None)
-            workbook = StudentWorkbook(OrderedDict(raw_data), active_class="")
-        except Exception as exc:
-            show_quiet_information(self, f"读取解密后的学生数据失败：{exc}")
-            return
-        try:
-            _save_student_workbook(
-                workbook.as_dict(),
-                self.STUDENT_FILE,
-                self._encrypted_file_path,
-                encrypted=False,
-                password=None,
-            )
-        except Exception as exc:
-            show_quiet_information(self, f"写入学生数据失败：{exc}")
-            return
-        self._student_file_encrypted = False
-        self._student_password = None
-        _set_session_student_encryption(False, None)
-        self._apply_decrypted_student_data(workbook)
-        self._update_encryption_button()
-        show_quiet_information(self, "已成功解密学生数据并恢复 students.xlsx。")
-        self._schedule_save()
-
-    def _apply_decrypted_student_data(self, workbook: StudentWorkbook) -> None:
-        if not PANDAS_READY:
-            return
-        self._apply_student_workbook(workbook, propagate=True)
-        self.display_current_student()
 
     def _propagate_student_dataframe(self) -> None:
         parent = self.parent()
@@ -12239,9 +11278,7 @@ class RollCallTimerWindow(QWidget):
                 _save_student_workbook(
                     data,
                     self.STUDENT_FILE,
-                    self._encrypted_file_path,
-                    encrypted=self._student_file_encrypted,
-                    password=self._student_password,
+                    plain_candidates=self.STUDENT_FILE_CANDIDATES,
                 )
             self._score_persist_failed = False
             self._update_class_button_label()
@@ -12293,8 +11330,6 @@ class RollCallTimerWindow(QWidget):
                 self._schedule_save()
             self.schedule_font_update()
             self._hide_student_photo(force=True)
-        if hasattr(self, "encrypt_button"):
-            self.encrypt_button.setVisible(is_roll)
         if hasattr(self, "reset_button"):
             self.reset_button.setVisible(is_roll)
         self.updateGeometry()
@@ -13130,9 +12165,6 @@ class RollCallTimerWindow(QWidget):
             can_select = is_roll and (has_workbook or self._student_data_pending_load)
             self.class_button.setVisible(is_roll)
             self.class_button.setEnabled(can_select)
-        if hasattr(self, "encrypt_button"):
-            self.encrypt_button.setVisible(is_roll)
-            self.encrypt_button.setEnabled(is_roll and has_data)
         if hasattr(self, "reset_button"):
             self.reset_button.setEnabled(is_roll and has_data)
 
@@ -13251,7 +12283,6 @@ class RollCallTimerWindow(QWidget):
         sec["name_font_size"] = str(self.last_name_font_size)
         sec["timer_font_size"] = str(self.last_timer_font_size)
         sec["scoreboard_order"] = self.scoreboard_order
-        sec["students_encrypted"] = bool_to_str(self._student_file_encrypted)
         self._prune_orphan_class_states()
         if not self._student_data_pending_load:
             self._store_active_class_state()
@@ -13339,49 +12370,6 @@ class AboutDialog(_EnsureOnScreenMixin, QDialog):
             pass
 
 # ---------- 数据 ----------
-_ENCRYPTED_MAGIC = b"CTS1"
-
-
-def _derive_stream_keys(password: str, salt: bytes) -> tuple[bytes, bytes]:
-    material = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 120000, dklen=64)
-    return material[:32], material[32:]
-
-
-def _generate_keystream(stream_key: bytes, length: int) -> bytes:
-    output = bytearray()
-    counter = 0
-    while len(output) < length:
-        block = hashlib.sha256(stream_key + counter.to_bytes(8, "big")).digest()
-        output.extend(block)
-        counter += 1
-    return bytes(output[:length])
-
-
-def _encrypt_student_bytes(password: str, data: bytes) -> bytes:
-    if not password:
-        raise ValueError("缺少加密密码")
-    salt = os.urandom(16)
-    stream_key, mac_key = _derive_stream_keys(password, salt)
-    keystream = _generate_keystream(stream_key, len(data))
-    cipher = bytes(b ^ k for b, k in zip(data, keystream))
-    tag = hmac.new(mac_key, cipher, hashlib.sha256).digest()
-    return _ENCRYPTED_MAGIC + salt + tag + cipher
-
-
-def _decrypt_student_bytes(password: str, blob: bytes) -> bytes:
-    if not blob.startswith(_ENCRYPTED_MAGIC) or len(blob) <= len(_ENCRYPTED_MAGIC) + 48:
-        raise ValueError("文件格式无效")
-    salt = blob[len(_ENCRYPTED_MAGIC): len(_ENCRYPTED_MAGIC) + 16]
-    tag = blob[len(_ENCRYPTED_MAGIC) + 16: len(_ENCRYPTED_MAGIC) + 48]
-    cipher = blob[len(_ENCRYPTED_MAGIC) + 48:]
-    stream_key, mac_key = _derive_stream_keys(password, salt)
-    expected_tag = hmac.new(mac_key, cipher, hashlib.sha256).digest()
-    if not hmac.compare_digest(expected_tag, tag):
-        raise ValueError("密码错误或文件已损坏")
-    keystream = _generate_keystream(stream_key, len(cipher))
-    return bytes(b ^ k for b, k in zip(cipher, keystream))
-
-
 def _normalize_text(value: object) -> str:
     if PANDAS_READY:
         if pd.isna(value):
@@ -13563,25 +12551,6 @@ def _write_student_workbook(file_path: str, data: Mapping[str, PandasDataFrame])
     finally:
         with contextlib.suppress(FileNotFoundError):
             os.remove(tmp_path)
-
-
-def _write_encrypted_student_workbook(file_path: str, data: Mapping[str, PandasDataFrame], password: str) -> None:
-    payload = _export_student_workbook_bytes(data)
-    encrypted = _encrypt_student_bytes(password, payload)
-    target_dir = os.path.dirname(os.path.abspath(file_path))
-    if target_dir and not _ensure_directory(target_dir):
-        target_dir = os.getcwd()
-    tmp_dir = target_dir or "."
-    fd, tmp_path = tempfile.mkstemp(suffix=".enc", dir=tmp_dir)
-    try:
-        with os.fdopen(fd, "wb") as tmp_file:
-            tmp_file.write(encrypted)
-        os.replace(tmp_path, file_path)
-    finally:
-        with contextlib.suppress(FileNotFoundError):
-            os.remove(tmp_path)
-
-
 def _export_student_workbook_bytes(data: Mapping[str, PandasDataFrame]) -> bytes:
     normalized: "OrderedDict[str, PandasDataFrame]" = OrderedDict()
     for idx, (name, df) in enumerate(data.items(), start=1):
@@ -13613,21 +12582,15 @@ def _export_student_workbook_bytes(data: Mapping[str, PandasDataFrame]) -> bytes
 def _save_student_workbook(
     data: Mapping[str, PandasDataFrame],
     file_path: str,
-    encrypted_file_path: str,
     *,
-    encrypted: bool,
-    password: Optional[str],
+    plain_candidates: Optional[Iterable[str]] = None,
 ) -> None:
-    if encrypted:
-        if not password:
-            raise ValueError("缺少加密密码")
-        _write_encrypted_student_workbook(encrypted_file_path, data, password)
-        with contextlib.suppress(FileNotFoundError):
-            os.remove(file_path)
-    else:
-        _write_student_workbook(file_path, data)
-        with contextlib.suppress(FileNotFoundError):
-            os.remove(encrypted_file_path)
+    plain_pool = _candidate_path_pool(file_path, plain_candidates)
+    _write_student_workbook(file_path, data)
+    preferred_targets, transient_targets = _partition_temporary_candidates(plain_pool)
+    _replicate_file_to_candidates(file_path, preferred_targets)
+    if transient_targets:
+        _remove_file_candidates(transient_targets, skip=file_path)
 
 
 def load_student_data(parent: Optional[QWidget]) -> Optional[StudentWorkbook]:
@@ -13640,43 +12603,18 @@ def load_student_data(parent: Optional[QWidget]) -> Optional[StudentWorkbook]:
     resources = _STUDENT_RESOURCES
     file_path = resources.plain
     existing_plain = _any_existing_path(resources.plain_candidates)
-    existing_encrypted = _any_existing_path(resources.encrypted_candidates)
+
+    encrypted_candidates = (
+        os.path.join(os.path.dirname(file_path), "students.xlsx.enc"),
+        os.path.abspath("students.xlsx.enc"),
+    )
+    existing_encrypted = _any_existing_path(encrypted_candidates)
 
     if existing_plain is None and existing_encrypted is not None:
-        attempts = 0
-        encrypted_source = existing_encrypted
-        while attempts < 3:
-            password, ok = PasswordPromptDialog.get_password(
-                parent,
-                "解密学生数据",
-                "检测到已加密的学生名单，请输入密码：",
-                allow_empty=False,
-            )
-            if not ok:
-                QMessageBox.information(parent, "提示", "已取消加载加密的学生名单。")
-                return None
-            password = password.strip()
-            if not password:
-                QMessageBox.warning(parent, "提示", "密码不能为空，请重新输入。")
-                attempts += 1
-                continue
-            try:
-                with open(encrypted_source, "rb") as fh:
-                    payload = fh.read()
-                plain_bytes = _decrypt_student_bytes(password, payload)
-                buffer = io.BytesIO(plain_bytes)
-                raw_data = pd.read_excel(buffer, sheet_name=None)
-                workbook = StudentWorkbook(OrderedDict(raw_data), active_class="")
-                _set_session_student_encryption(True, password)
-                try:
-                    _write_student_workbook(file_path, workbook.as_dict())
-                except Exception:
-                    logger.debug("Failed to persist decrypted workbook to %s", file_path, exc_info=True)
-                return workbook
-            except Exception as exc:
-                attempts += 1
-                QMessageBox.warning(parent, "提示", f"解密失败：{exc}")
-        QMessageBox.critical(parent, "错误", "多次输入密码失败，无法加载学生名单。")
+        show_quiet_information(
+            parent,
+            "检测到旧版加密名单 students.xlsx.enc，但当前版本已取消加密功能，请先手动解密后再试。",
+        )
         return None
 
     if existing_plain is None:
@@ -13685,9 +12623,12 @@ def load_student_data(parent: Optional[QWidget]) -> Optional[StudentWorkbook]:
                 {"学号": [101, 102, 103], "姓名": ["张三", "李四", "王五"], "分组": ["A", "B", "A"], "成绩": [0, 0, 0]}
             )
             workbook = StudentWorkbook(OrderedDict({"班级1": template}), active_class="班级1")
-            _write_student_workbook(file_path, workbook.as_dict())
+            _save_student_workbook(
+                workbook.as_dict(),
+                file_path,
+                plain_candidates=resources.plain_candidates,
+            )
             show_quiet_information(parent, f"未找到学生名单，已为您创建模板文件：{file_path}")
-            _set_session_student_encryption(False, None)
             existing_plain = file_path
         except Exception as exc:
             QMessageBox.critical(parent, "错误", f"创建模板文件失败：{exc}")
@@ -13697,10 +12638,13 @@ def load_student_data(parent: Optional[QWidget]) -> Optional[StudentWorkbook]:
         read_path = existing_plain if existing_plain and os.path.exists(existing_plain) else file_path
         raw_data = pd.read_excel(read_path, sheet_name=None)
         workbook = StudentWorkbook(OrderedDict(raw_data), active_class="")
-        _write_student_workbook(file_path, workbook.as_dict())
-        _set_session_student_encryption(False, None)
-        if _any_existing_path(resources.encrypted_candidates):
-            show_quiet_information(parent, "检测到同时存在加密文件，将优先使用明文 students.xlsx。")
+        _save_student_workbook(
+            workbook.as_dict(),
+            file_path,
+            plain_candidates=resources.plain_candidates,
+        )
+        if existing_encrypted is not None:
+            show_quiet_information(parent, "检测到 students.xlsx.enc，本版本将忽略该文件。")
         return workbook
     except Exception as exc:
         QMessageBox.critical(parent, "错误", f"无法加载学生名单，请检查文件格式。\n错误：{exc}")
@@ -14295,9 +13239,7 @@ class ApplicationContext:
     def create(cls) -> "ApplicationContext":
         settings_manager = SettingsManager()
         workbook: Optional[StudentWorkbook] = None
-        encrypted_path = getattr(RollCallTimerWindow, "ENCRYPTED_STUDENT_FILE", "")
-        encrypted_exists = bool(encrypted_path and os.path.exists(encrypted_path))
-        if PANDAS_AVAILABLE and not encrypted_exists:
+        if PANDAS_AVAILABLE:
             workbook = load_student_data(None)
         return cls(settings_manager=settings_manager, student_workbook=workbook)
 
@@ -14319,9 +13261,10 @@ def main() -> None:
     window.show()
     sys.exit(app.exec())
 
-
 # Nuitka 打包指令（根据当前依赖整理的推荐参数，保持在单行便于复制）：
 # 单文件：python -m nuitka --onefile --enable-plugin=pyqt6 --include-qt-plugins=sensible --windows-disable-console --windows-icon-from-ico=icon.ico --include-data-file=students.xlsx=students.xlsx --include-data-file=settings.ini=settings.ini ClassroomTools.py
 # 独立目录：python -m nuitka --standalone --enable-plugin=pyqt6 --include-qt-plugins=sensible --windows-disable-console --windows-icon-from-ico=icon.ico --output-dir=dist --include-data-file=students.xlsx=students.xlsx --include-data-file=settings.ini=settings.ini ClassroomTools.py
+
+
 if __name__ == "__main__":
     main()

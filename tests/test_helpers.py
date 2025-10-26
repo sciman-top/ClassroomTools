@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 import ast
+import configparser
 import dataclasses
 import enum
 import functools
+import logging
 import math
+import io
 import contextlib
 import os
+import shutil
 import sys
 import tempfile
 import types
+
+import pytest
 from functools import singledispatch
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, Tuple, cast
@@ -49,8 +55,12 @@ def _load_helper_module() -> types.ModuleType:
             "Enum": enum.Enum,
             "math": math,
             "singledispatch": singledispatch,
+            "shutil": shutil,
+            "configparser": configparser,
+            "io": io,
             "win32gui": None,
             "_user32_top_level_hwnd": lambda hwnd: 0,
+            "logger": logging.getLogger("ctools_helpers"),
         }
     )
     sys.modules[module.__name__] = module
@@ -61,16 +71,35 @@ def _load_helper_module() -> types.ModuleType:
         "_BooleanParseResult",
         "_coerce_bool",
         "_casefold_cached",
+        "_coerce_to_text",
         "_normalize_text_token",
         "_normalize_class_token",
         "parse_bool",
         "_ensure_directory",
         "_ensure_writable_directory",
         "_preferred_app_directory",
+        "_collect_resource_roots",
+        "_ResourceLocator",
+        "_ResolvedPathGroup",
+        "_StudentResourcePaths",
+        "_get_resource_locator",
+        "_resolve_writable_resource",
+        "_preferred_student_resource_directory",
+        "_resolve_student_resource_paths",
         "_choose_writable_target",
+        "_iter_unique_paths",
+        "_normalize_path_marker",
+        "_candidate_path_pool",
+        "_partition_temporary_candidates",
+        "_temporary_directory_roots",
+        "_is_probably_temporary_path",
+        "_remove_file_candidates",
+        "_replicate_file_to_candidates",
+        "_mirror_resource_to_primary",
         "str_to_bool",
         "_compute_presentation_category",
         "_PresentationWindowMixin",
+        "SettingsManager",
     }
     def _should_include_function(node: ast.FunctionDef) -> bool:
         if node.name in targets:
@@ -181,6 +210,27 @@ def test_normalize_class_token_handles_varied_inputs() -> None:
     assert helpers._normalize_class_token(_Explosive()) == ""
 
 
+def test_coerce_to_text_handles_common_inputs() -> None:
+    assert helpers._coerce_to_text("value") == "value"
+    assert helpers._coerce_to_text(b"value") == "value"
+    assert helpers._coerce_to_text(bytearray(b"valu\xe9")) == "valu"
+    assert helpers._coerce_to_text(memoryview(b"value")) == "value"
+
+
+def test_coerce_to_text_rejects_missing_or_invalid_values() -> None:
+    class _Explosive:
+        def __str__(self) -> str:
+            raise RuntimeError("boom")
+
+    class _Stringy:
+        def __str__(self) -> str:
+            return "converted"
+
+    assert helpers._coerce_to_text(None) is None
+    assert helpers._coerce_to_text(_Explosive()) is None
+    assert helpers._coerce_to_text(_Stringy()) == "converted"
+
+
 def test_choose_writable_target_falls_back_when_parent_is_file(tmp_path: Path) -> None:
     blocker = tmp_path / "blocker"
     blocker.write_text("cannot use as directory")
@@ -192,6 +242,240 @@ def test_choose_writable_target_falls_back_when_parent_is_file(tmp_path: Path) -
     )
     assert Path(result).name == "students.xlsx"
     assert Path(result).parent != blocker
+
+
+def test_remove_file_candidates_deduplicates_and_respects_skip(tmp_path: Path) -> None:
+    primary = tmp_path / "students.xlsx"
+    sibling = tmp_path / "copy" / "students.xlsx"
+    sibling.parent.mkdir()
+    primary.write_text("plain")
+    sibling.write_text("plain")
+    keep = tmp_path / "keep.xlsx"
+    keep.write_text("stay")
+    helpers._remove_file_candidates(  # type: ignore[attr-defined]
+        [str(primary), str(primary), str(sibling), str(keep)],
+        skip=str(keep),
+    )
+    assert not primary.exists()
+    assert not sibling.exists()
+    assert keep.exists()
+
+
+def test_replicate_file_to_candidates_creates_missing_directories(tmp_path: Path) -> None:
+    source = tmp_path / "students.xlsx.enc"
+    source.write_text("secret")
+    target_a = tmp_path / "mirror" / "students.xlsx.enc"
+    target_b = tmp_path / "students.xlsx.enc"
+    helpers._replicate_file_to_candidates(  # type: ignore[attr-defined]
+        str(source), [str(target_a), str(target_b), str(source)]
+    )
+    assert target_a.read_text() == "secret"
+    assert target_b.read_text() == "secret"
+
+
+def test_collect_resource_roots_includes_onefile_parent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    parent = tmp_path / "onefile_parent"
+    parent.mkdir()
+    script_dir = tmp_path / "runtime"
+    script_dir.mkdir()
+    exe_dir = tmp_path / "launcher"
+    exe_dir.mkdir()
+    app_dir = tmp_path / "appdata"
+    initial = tmp_path / "initial"
+    initial.mkdir()
+
+    monkeypatch.setenv("NUITKA_ONEFILE_PARENT", str(parent))
+    monkeypatch.setattr(helpers, "_INITIAL_CWD", str(initial), raising=False)  # type: ignore[attr-defined]
+    monkeypatch.setattr(helpers, "_preferred_app_directory", lambda: str(app_dir), raising=False)  # type: ignore[attr-defined]
+    monkeypatch.setattr(helpers.sys, "argv", [str(script_dir / "ClassroomTools.exe")])
+    monkeypatch.setattr(helpers.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(helpers.sys, "executable", str(exe_dir / "ClassroomTools.exe"), raising=False)
+    helpers._get_resource_locator.cache_clear()  # type: ignore[attr-defined]
+
+    roots = helpers._collect_resource_roots()  # type: ignore[attr-defined]
+
+    normalized = {Path(root) for root in roots}
+    assert Path(parent) in normalized
+    assert Path(script_dir) in normalized
+    assert Path(initial) in normalized
+    assert Path(app_dir) in normalized
+    assert Path(exe_dir) in normalized
+
+
+def test_collect_resource_roots_deduplicates_case_insensitive(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NUITKA_ONEFILE_PARENT", "C\\\\DATA")
+    monkeypatch.setattr(helpers, "_INITIAL_CWD", "c\\\\Data", raising=False)  # type: ignore[attr-defined]
+    monkeypatch.setattr(helpers, "_preferred_app_directory", lambda: "C\\\\data", raising=False)  # type: ignore[attr-defined]
+    monkeypatch.setattr(helpers.os, "getcwd", lambda: "c\\\\DATA", raising=False)
+    monkeypatch.setattr(helpers.sys, "argv", ["C\\\\Data\\\\ClassroomTools.exe"])
+    monkeypatch.setattr(helpers.sys, "frozen", False, raising=False)
+    monkeypatch.setattr(helpers.os.path, "abspath", lambda path: str(path))
+    monkeypatch.setattr(helpers.os.path, "normpath", lambda path: str(path))
+    monkeypatch.setattr(helpers.os.path, "normcase", lambda path: str(path).lower())
+    monkeypatch.setattr(helpers, "_ensure_directory", lambda path: True, raising=False)  # type: ignore[attr-defined]
+    helpers._get_resource_locator.cache_clear()  # type: ignore[attr-defined]
+
+    roots = helpers._collect_resource_roots()  # type: ignore[attr-defined]
+
+    lowered = [root.lower() for root in roots]
+    assert lowered.count("c\\\\data") == 1
+
+
+def test_resolve_writable_resource_prefers_existing_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script_dir = tmp_path / "script"
+    script_dir.mkdir()
+    existing = tmp_path / "data" / "students.xlsx"
+    existing.parent.mkdir()
+    existing.write_text("payload")
+    app_dir = tmp_path / "appdata"
+    initial = tmp_path / "initial"
+    initial.mkdir()
+
+    monkeypatch.setattr(helpers, "_INITIAL_CWD", str(initial), raising=False)  # type: ignore[attr-defined]
+    monkeypatch.setattr(helpers, "_preferred_app_directory", lambda: str(app_dir), raising=False)  # type: ignore[attr-defined]
+    monkeypatch.setattr(helpers.sys, "argv", [str(script_dir / "ClassroomTools.py")])
+    monkeypatch.setattr(helpers.sys, "frozen", False, raising=False)
+    monkeypatch.setenv("NUITKA_ONEFILE_PARENT", "")
+    helpers._get_resource_locator.cache_clear()  # type: ignore[attr-defined]
+
+    group = helpers._resolve_writable_resource(  # type: ignore[attr-defined]
+        "students.xlsx",
+        extra_candidates=(str(existing),),
+        is_dir=False,
+        copy_from_candidates=False,
+    )
+
+    assert group.primary == str(existing)
+
+
+def test_resolve_writable_resource_respects_preferred_primary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    bundled = bundle_dir / "students.xlsx"
+    bundled.write_text("bundle")
+    preferred_dir = tmp_path / "launcher"
+    preferred_dir.mkdir()
+    preferred = preferred_dir / "students.xlsx"
+
+    class _Locator:
+        def __init__(self, values: Tuple[str, ...]) -> None:
+            self._values = values
+
+        def candidates(self, relative_path: str) -> Tuple[str, ...]:
+            return self._values
+
+    locator = _Locator((str(bundled),))
+    monkeypatch.setattr(helpers, "_get_resource_locator", lambda: locator, raising=False)  # type: ignore[attr-defined]
+    helpers._resolve_writable_resource.cache_clear()  # type: ignore[attr-defined]
+
+    group = helpers._resolve_writable_resource(  # type: ignore[attr-defined]
+        "students.xlsx",
+        is_dir=False,
+        copy_from_candidates=False,
+        preferred_primary=str(preferred),
+    )
+
+    assert Path(group.primary) == preferred
+    assert Path(group.candidates[0]) == preferred
+
+
+def test_resolve_student_resource_paths_target_preferred_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    preferred_dir = tmp_path / "app"
+    preferred_dir.mkdir()
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    bundled_plain = bundle_dir / "students.xlsx"
+    bundled_plain.write_text("plain")
+    class _Locator:
+        def candidates(self, relative_path: str) -> Tuple[str, ...]:
+            return (str(bundled_plain),)
+
+    locator = _Locator()
+    monkeypatch.setattr(helpers, "_get_resource_locator", lambda: locator, raising=False)  # type: ignore[attr-defined]
+    monkeypatch.setattr(
+        helpers,
+        "_preferred_student_resource_directory",
+        lambda: str(preferred_dir),
+        raising=False,
+    )  # type: ignore[attr-defined]
+    helpers._resolve_writable_resource.cache_clear()  # type: ignore[attr-defined]
+    helpers._resolve_student_resource_paths.cache_clear()  # type: ignore[attr-defined]
+
+    resources = helpers._resolve_student_resource_paths()  # type: ignore[attr-defined]
+
+    assert Path(resources.plain).parent == preferred_dir
+    assert any(Path(candidate) == bundled_plain for candidate in resources.plain_candidates)
+
+
+def test_partition_temporary_candidates_reuses_classification(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: List[str] = []
+
+    def _fake_is_temp(path: str) -> bool:
+        calls.append(path)
+        return path.endswith("temp\\students.xlsx")
+
+    monkeypatch.setattr(helpers, "_is_probably_temporary_path", _fake_is_temp, raising=False)  # type: ignore[attr-defined]
+
+    pool = (
+        "C\\students.xlsx",
+        "C\\temp\\students.xlsx",
+        "C\\students.xlsx",
+    )
+
+    persistent, transient = helpers._partition_temporary_candidates(pool)  # type: ignore[attr-defined]
+
+    assert persistent == ("C\\students.xlsx", "C\\students.xlsx")
+    assert transient == ("C\\temp\\students.xlsx",)
+    assert calls.count("C\\students.xlsx") == 1
+    assert calls.count("C\\temp\\students.xlsx") == 1
+
+
+def test_is_probably_temporary_path_detects_environment_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    temp_root = tmp_path / "nuikta"
+    temp_root.mkdir()
+    monkeypatch.setenv("NUITKA_ONEFILE_TEMP", str(temp_root))
+    helpers._temporary_directory_roots.cache_clear()  # type: ignore[attr-defined]
+
+    candidate = temp_root / "students.xlsx"
+
+    assert helpers._is_probably_temporary_path(str(candidate)) is True  # type: ignore[attr-defined]
+
+
+def test_preferred_student_directory_skips_temporary_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    temp_root = tmp_path / "temp"
+    temp_root.mkdir()
+    real_root = tmp_path / "real"
+    real_root.mkdir()
+
+    def _fake_collect_roots() -> List[str]:
+        return [str(temp_root), str(real_root)]
+
+    monkeypatch.setenv("TEMP", str(temp_root))
+    helpers._temporary_directory_roots.cache_clear()  # type: ignore[attr-defined]
+
+    def _fake_temp_roots() -> Tuple[str, ...]:
+        marker = helpers._normalize_path_marker(str(temp_root))  # type: ignore[attr-defined]
+        return (marker,) if marker else tuple()
+
+    monkeypatch.setattr(helpers, "_temporary_directory_roots", _fake_temp_roots, raising=False)  # type: ignore[attr-defined]
+    monkeypatch.setattr(helpers, "_collect_resource_roots", _fake_collect_roots, raising=False)  # type: ignore[attr-defined]
+
+    assert helpers._is_probably_temporary_path(str(temp_root)) is True  # type: ignore[attr-defined]
+    assert helpers._is_probably_temporary_path(str(real_root)) is False  # type: ignore[attr-defined]
+
+    selected = helpers._preferred_student_resource_directory()  # type: ignore[attr-defined]
+
+    assert Path(selected) == real_root
 
 
 _WPS_WRITER_CLASSES = {
@@ -628,6 +912,28 @@ def test_summarize_wps_process_hints_respects_wrapped_overrides() -> None:
     hints = harness._summarize_wps_process_hints(normalized)
     assert hints.has_wps_presentation_signature is False
     assert harness.calls == ["kwppshowframeclass"]
-    hints = harness._summarize_wps_process_hints(normalized)
-    assert hints.has_wps_presentation_signature is False
-    assert harness.calls == ["kwppshowframeclass"]
+
+
+def test_settings_manager_logs_mirror_write_failures(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    manager = helpers.SettingsManager(str(tmp_path / "settings.ini"))
+    mirror_path = tmp_path / "mirror" / "settings.ini"
+    manager._mirror_targets.add(str(mirror_path))
+
+    original_write = manager._write_atomic
+
+    def fake_write(path: str, data: str) -> None:
+        if Path(path) == mirror_path:
+            raise OSError("denied")
+        original_write(path, data)
+
+    manager._write_atomic = fake_write  # type: ignore[assignment]
+
+    caplog.set_level(logging.WARNING, logger="ctools_helpers")
+    manager.save_settings(manager.get_defaults())
+
+    assert any(
+        "无法写入备用配置文件" in record.getMessage() and str(mirror_path) in record.getMessage()
+        for record in caplog.records
+    )
