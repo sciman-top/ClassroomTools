@@ -61,6 +61,7 @@ def _load_helper_module() -> types.ModuleType:
         "_BooleanParseResult",
         "_coerce_bool",
         "_casefold_cached",
+        "_normalize_text_token",
         "_normalize_class_token",
         "parse_bool",
         "_ensure_directory",
