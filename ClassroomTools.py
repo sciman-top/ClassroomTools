@@ -682,6 +682,8 @@ def _user32_focus_window(hwnd: int) -> bool:
 
 from PyQt6.QtCore import (
     QByteArray,
+    QMutex,
+    QMutexLocker,
     QPoint,
     QPointF,
     QRect,
@@ -693,6 +695,8 @@ from PyQt6.QtCore import (
     pyqtSignal,
     QObject,
     QUrl,
+    QRunnable,
+    QThreadPool,
 )
 from PyQt6.QtGui import (
     QBrush,
@@ -1531,9 +1535,7 @@ class PasswordPromptDialog(QDialog):
         self.error_label = QLabel("", self)
         self.error_label.setWordWrap(True)
         self.error_label.setObjectName("passwordPromptErrorLabel")
-        self.error_label.setStyleSheet(
-            "#passwordPromptErrorLabel { color: #d93025; font-size: 12px; margin-top: 4px; }"
-        )
+        STYLE_MANAGER.apply_error_style(self.error_label)
         self.error_label.hide()
         layout.addWidget(self.error_label)
 
@@ -1635,9 +1637,7 @@ class PasswordSetupDialog(QDialog):
         self.error_label = QLabel("", self)
         self.error_label.setWordWrap(True)
         self.error_label.setObjectName("passwordSetupErrorLabel")
-        self.error_label.setStyleSheet(
-            "#passwordSetupErrorLabel { color: #d93025; font-size: 12px; margin-top: 4px; }"
-        )
+        STYLE_MANAGER.apply_error_style(self.error_label)
         self.error_label.hide()
         layout.addWidget(self.error_label)
 
@@ -1725,6 +1725,33 @@ def recommended_control_height(font: QFont, *, extra: int = 12, minimum: int = 3
     line_height = metrics.height()
     base_height = max(text_height, line_height)
     return max(minimum, int(math.ceil(base_height + extra)))
+
+
+@dataclass(frozen=True)
+class StyleManager:
+    """集中管理通用样式，避免分散的硬编码。"""
+
+    error_label: str = (
+        "color: #d93025; font-size: 12px; margin-top: 4px;"
+    )
+    description_label: str = "color: #5f6368; font-size: 12px;"
+
+    def apply_error_style(self, widget: QWidget) -> None:
+        """Apply the shared error label stylesheet to *widget* safely."""
+
+        try:
+            widget.setStyleSheet(self.error_label)
+        except Exception:
+            logger.debug("apply_error_style failed", exc_info=True)
+
+    def apply_description_style(self, widget: QWidget) -> None:
+        try:
+            widget.setStyleSheet(self.description_label)
+        except Exception:
+            logger.debug("apply_description_style failed", exc_info=True)
+
+
+STYLE_MANAGER = StyleManager()
 
 
 class ButtonStyles:
@@ -2050,6 +2077,39 @@ class SettingsManager:
         if removed:
             settings["RollCallTimer"] = section
             self.save_settings(settings)
+
+
+class _IOWorkerSignals(QObject):
+    """通用的线程任务信号定义。"""
+
+    finished = pyqtSignal(object)
+    error = pyqtSignal(str, object)
+
+
+class _IOWorker(QRunnable):
+    """在后台线程中执行 I/O 任务，避免阻塞 UI。"""
+
+    def __init__(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
+        super().__init__()
+        self.fn = fn
+        self.args = args
+        self.kwargs = kwargs
+        self.signals = _IOWorkerSignals()
+
+    def run(self) -> None:  # pragma: no cover - 线程任务
+        try:
+            result = self.fn(*self.args, **self.kwargs)
+        except Exception as exc:  # noqa: BLE001 - 顶层捕获以防线程崩溃
+            traceback.print_exc()
+            try:
+                self.signals.error.emit(str(exc), exc)
+            except Exception:
+                pass
+            return
+        try:
+            self.signals.finished.emit(result)
+        except Exception:
+            pass
 
 
 @dataclass(frozen=True)
@@ -2868,7 +2928,7 @@ class PenSettingsDialog(_EnsureOnScreenMixin, QDialog):
 
         self.style_description = QLabel("", self)
         self.style_description.setWordWrap(True)
-        self.style_description.setStyleSheet("color: #5f6368; font-size: 12px;")
+        STYLE_MANAGER.apply_description_style(self.style_description)
         layout.addWidget(self.style_description)
 
         size_layout = QHBoxLayout()
@@ -5259,10 +5319,26 @@ class _PresentationWindowMixin:
 class _PresentationForwarder(_PresentationWindowMixin):
     """在绘图模式下将特定输入事件转发给下层演示窗口。"""
 
-    __slots__ = ("overlay", "_last_target_hwnd", "_child_buffer")
+    __slots__ = (
+        "overlay",
+        "_last_target_hwnd",
+        "_child_buffer",
+        "_probe_failure_count",
+        "_probe_cooldown_until",
+    )
 
     def _overlay_widget(self) -> Optional[QWidget]:
         return self.overlay
+
+    def _is_hwnd_valid(self, hwnd: int) -> bool:
+        """Return True if *hwnd* looks like a usable window handle."""
+
+        if hwnd == 0 or _USER32 is None:
+            return False
+        try:
+            return bool(_USER32.IsWindow(wintypes.HWND(hwnd)))
+        except Exception:
+            return False
 
     _SMTO_ABORTIFHUNG = 0x0002
     _MAX_CHILD_FORWARDS = 32
@@ -5366,6 +5442,8 @@ class _PresentationForwarder(_PresentationWindowMixin):
         self.overlay = overlay
         self._last_target_hwnd: Optional[int] = None
         self._child_buffer: List[int] = []
+        self._probe_failure_count = 0
+        self._probe_cooldown_until = 0.0
 
     def _log_debug(self, message: str, *args: Any) -> None:
         if logger.isEnabledFor(logging.DEBUG):
@@ -5373,6 +5451,22 @@ class _PresentationForwarder(_PresentationWindowMixin):
 
     def clear_cached_target(self) -> None:
         self._last_target_hwnd = None
+        self._probe_failure_count = 0
+        self._probe_cooldown_until = 0.0
+
+    def _register_input_activity(self) -> None:
+        self._probe_failure_count = 0
+        self._probe_cooldown_until = 0.0
+
+    def _update_probe_backoff(self, found: bool) -> None:
+        now = time.monotonic()
+        if found:
+            self._probe_failure_count = 0
+            self._probe_cooldown_until = 0.0
+            return
+        self._probe_failure_count = min(self._probe_failure_count + 1, 8)
+        delay = min(1.0, 0.1 * (2 ** self._probe_failure_count))
+        self._probe_cooldown_until = now + delay
 
     def _window_class_name(self, hwnd: int) -> str:
         if hwnd == 0:
@@ -5385,6 +5479,8 @@ class _PresentationForwarder(_PresentationWindowMixin):
         return _user32_window_class_name(hwnd)
 
     def _is_wps_slideshow_window(self, hwnd: int) -> bool:
+        if not self._is_hwnd_valid(hwnd):
+            return False
         class_name = self._window_class_name(hwnd)
         if self._is_wps_slideshow_class(class_name):
             return True
@@ -5395,7 +5491,7 @@ class _PresentationForwarder(_PresentationWindowMixin):
         return False
 
     def _is_ms_slideshow_window(self, hwnd: int) -> bool:
-        if hwnd == 0:
+        if not self._is_hwnd_valid(hwnd):
             return False
         if self._is_wps_slideshow_window(hwnd):
             return False
@@ -5408,16 +5504,19 @@ class _PresentationForwarder(_PresentationWindowMixin):
         return "powerpnt" in process_name
 
     def _is_word_window(self, hwnd: int) -> bool:
-        if hwnd == 0:
+        if not self._is_hwnd_valid(hwnd):
             return False
         class_name = self._window_class_name(hwnd)
+        top_level = self._top_level_hwnd(hwnd)
+        process_name = self._window_process_name(top_level or hwnd)
+        if process_name and process_name.startswith("wpp"):
+            return False
         if class_name in self._WORD_CONTENT_CLASSES:
             return True
         if class_name in self._WORD_WINDOW_CLASSES or class_name in self._WORD_HOST_CLASSES:
             return True
         if class_name and class_name.startswith("_ww"):
             return True
-        process_name = self._window_process_name(self._top_level_hwnd(hwnd))
         if not process_name:
             return False
         return "winword" in process_name or process_name.startswith("wps")
@@ -5470,6 +5569,7 @@ class _PresentationForwarder(_PresentationWindowMixin):
     def focus_presentation_window(self) -> bool:
         if not self.is_supported():
             return False
+        self._register_input_activity()
         target = self._resolve_presentation_target()
         if not target:
             target = self._detect_presentation_window()
@@ -5495,6 +5595,7 @@ class _PresentationForwarder(_PresentationWindowMixin):
         if not self._can_forward(allow_cursor=allow_cursor):
             self.clear_cached_target()
             return False
+        self._register_input_activity()
         delta_vec = event.angleDelta()
         delta = int(delta_vec.y() or delta_vec.x())
         if delta == 0:
@@ -5541,9 +5642,13 @@ class _PresentationForwarder(_PresentationWindowMixin):
                     delivered = True
                     if update_cache:
                         self._last_target_hwnd = target
+                    if is_wps_target:
+                        return True
                     break
             if not delivered and focus_ok:
                 delivered = self._deliver_mouse_wheel(target, w_param, l_param)
+                if delivered and is_wps_target:
+                    return True
         if not delivered:
             self.clear_cached_target()
         if logger.isEnabledFor(logging.DEBUG):
@@ -5565,6 +5670,7 @@ class _PresentationForwarder(_PresentationWindowMixin):
         if not self._can_forward(allow_cursor=allow_cursor):
             self.clear_cached_target()
             return False
+        self._register_input_activity()
         vk_code = self._resolve_vk_code(event)
         if vk_code is None:
             return False
@@ -5823,7 +5929,7 @@ class _PresentationForwarder(_PresentationWindowMixin):
                         pass
 
     def _activate_window_for_input(self, hwnd: int) -> bool:
-        if _USER32 is None or hwnd == 0:
+        if not self._is_hwnd_valid(hwnd):
             return False
         if self._is_wps_slideshow_window(hwnd):
             return True
@@ -5944,7 +6050,7 @@ class _PresentationForwarder(_PresentationWindowMixin):
         return False
 
     def _locate_word_content_window(self, hwnd: int) -> Optional[int]:
-        if win32gui is None or hwnd == 0:
+        if win32gui is None or not self._is_hwnd_valid(hwnd):
             return None
         handles: List[int] = []
         top_hwnd = self._top_level_hwnd(hwnd)
@@ -5963,34 +6069,36 @@ class _PresentationForwarder(_PresentationWindowMixin):
             return None
         seen: Set[int] = set(handles)
         buffer = self._child_buffer
-        for root in roots:
-            queue: deque[int] = deque([root])
-            while queue:
-                parent = queue.popleft()
-                buffer.clear()
 
-                def _collector(child_hwnd: int, acc: List[int]) -> bool:
-                    if child_hwnd in seen:
-                        return True
-                    seen.add(child_hwnd)
-                    acc.append(child_hwnd)
+        def _collect_children(parent: int) -> Iterable[int]:
+            buffer.clear()
+
+            def _collector(child_hwnd: int, acc: List[int]) -> bool:
+                if child_hwnd in seen:
                     return True
+                seen.add(child_hwnd)
+                acc.append(child_hwnd)
+                return True
 
-                try:
-                    win32gui.EnumChildWindows(parent, _collector, buffer)
-                except Exception:
-                    continue
-                for child in list(buffer):
-                    class_name = self._window_class_name(child)
-                    if self._is_word_content_class(class_name):
-                        if self._is_target_window_valid(child):
-                            return child
-                    if self._is_word_host_class(class_name) or self._is_word_like_class(class_name):
-                        queue.append(child)
+            try:
+                win32gui.EnumChildWindows(parent, _collector, buffer)
+            except Exception:
+                return ()
+            return tuple(buffer)
+
+        queue: deque[int] = deque(roots)
+        while queue:
+            parent = queue.popleft()
+            for child in _collect_children(parent):
+                class_name = self._window_class_name(child)
+                if self._is_word_content_class(class_name):
+                    if self._is_target_window_valid(child):
+                        return child
+                queue.append(child)
         return None
 
     def _word_host_chain(self, hwnd: int) -> Tuple[int, ...]:
-        if win32gui is None or hwnd == 0:
+        if win32gui is None or not self._is_hwnd_valid(hwnd):
             return ()
         chain: List[int] = []
         seen: Set[int] = set()
@@ -6020,7 +6128,7 @@ class _PresentationForwarder(_PresentationWindowMixin):
         return tuple(chain)
 
     def _normalize_presentation_target(self, hwnd: int) -> Optional[int]:
-        if hwnd == 0:
+        if not self._is_hwnd_valid(hwnd):
             return None
         word_hwnd = self._locate_word_content_window(hwnd)
         if word_hwnd and self._is_target_window_valid(word_hwnd):
@@ -6036,7 +6144,9 @@ class _PresentationForwarder(_PresentationWindowMixin):
     def _target_priority(self, hwnd: int, *, base: int) -> int:
         score = base
         class_name = self._window_class_name(hwnd)
-        if self._is_slideshow_class(class_name):
+        if self._is_wps_slideshow_window(hwnd) or self._is_ms_slideshow_window(hwnd):
+            score += 10000
+        elif self._is_slideshow_class(class_name):
             score += 520
         elif class_name in self._KNOWN_PRESENTATION_CLASSES:
             score += 300
@@ -6176,6 +6286,8 @@ class _PresentationForwarder(_PresentationWindowMixin):
         return l_param & 0xFFFFFFFF
 
     def _deliver_key_message(self, hwnd: int, message: int, vk_code: int, l_param: int) -> bool:
+        if not self._is_hwnd_valid(hwnd):
+            return False
         delivered = False
         if win32api is not None:
             try:
@@ -6202,7 +6314,7 @@ class _PresentationForwarder(_PresentationWindowMixin):
         return bool(sent)
 
     def _deliver_mouse_wheel(self, hwnd: int, w_param: int, l_param: int) -> bool:
-        if hwnd == 0:
+        if not self._is_hwnd_valid(hwnd):
             return False
         delivered = False
         if win32api is not None and win32con is not None:
@@ -6458,6 +6570,9 @@ class _PresentationForwarder(_PresentationWindowMixin):
     def _fallback_detect_presentation_window_user32(self) -> Optional[int]:
         if _USER32 is None:
             return None
+        now = time.monotonic()
+        if self._probe_cooldown_until and now < self._probe_cooldown_until:
+            return None
         overlay_hwnd = int(self.overlay.winId()) if self.overlay.winId() else 0
         best_hwnd: Optional[int] = None
         best_score = -1
@@ -6482,6 +6597,7 @@ class _PresentationForwarder(_PresentationWindowMixin):
             if score > best_score and self._is_control_allowed(hwnd, log=False):
                 best_score = score
                 best_hwnd = hwnd
+        self._update_probe_backoff(bool(best_hwnd))
         return best_hwnd
 
     def _is_target_window_valid(self, hwnd: int) -> bool:
@@ -6550,6 +6666,9 @@ class _PresentationForwarder(_PresentationWindowMixin):
     def _detect_presentation_window(self) -> Optional[int]:
         if win32gui is None:
             return self._fallback_detect_presentation_window_user32()
+        now = time.monotonic()
+        if self._probe_cooldown_until and now < self._probe_cooldown_until:
+            return None
         overlay_hwnd = int(self.overlay.winId()) if self.overlay.winId() else 0
         try:
             foreground = win32gui.GetForegroundWindow()
@@ -6608,6 +6727,7 @@ class _PresentationForwarder(_PresentationWindowMixin):
             if score > best_score:
                 best_score = score
                 best_hwnd = normalized
+        self._update_probe_backoff(bool(best_hwnd))
         return best_hwnd
 
     def _resolve_presentation_target(self) -> Optional[int]:
@@ -8853,6 +8973,19 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                     pass
             if hasattr(self, "_last_target_hwnd"):
                 self._last_target_hwnd = None
+            try:
+                QTimer.singleShot(50, lambda: self._resolve_control_target())
+            except Exception:
+                try:
+                    self._resolve_control_target()
+                except Exception:
+                    pass
+            else:
+                if forwarder is not None:
+                    try:
+                        QTimer.singleShot(50, lambda: forwarder.get_presentation_target())
+                    except Exception:
+                        pass
         if not resolved.get("wps_ppt"):
             self._cancel_wps_slideshow_binding_retry()
         if resolved.get("wps_ppt") and not parse_bool(previous_flags.get("wps_ppt"), True):
@@ -9550,6 +9683,13 @@ class TTSManager(QObject):
         self._queue: Queue[str] = Queue()
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._pump)
+        self._preferred_voice_id = preferred_voice_id
+        self._initialized = False
+
+    def _lazy_init(self) -> None:
+        if self._initialized:
+            return
+        self._initialized = True
         missing_reason = ""
         if pyttsx3 is not None:
             try:
@@ -9562,9 +9702,8 @@ class TTSManager(QObject):
                     self.engine = None
                 else:
                     self.default_voice_id = self.voice_ids[0]
-                    self.current_voice_id = (
-                        preferred_voice_id if preferred_voice_id in self.voice_ids else self.default_voice_id
-                    )
+                    preferred = self._preferred_voice_id or self.default_voice_id
+                    self.current_voice_id = preferred if preferred in self.voice_ids else self.default_voice_id
                     if self.current_voice_id:
                         try:
                             self.engine.setProperty("voice", self.current_voice_id)
@@ -9604,9 +9743,11 @@ class TTSManager(QObject):
 
     @property
     def available(self) -> bool:
+        self._lazy_init()
         return self._mode in {"pyttsx3", "powershell"}
 
     def diagnostics(self) -> tuple[str, List[str]]:
+        self._lazy_init()
         reason = self.failure_reason
         suggestions = list(self.failure_suggestions)
         env_reason, env_suggestions = detect_speech_environment_issues()
@@ -9672,6 +9813,7 @@ class TTSManager(QObject):
         self.failure_suggestions = suggestions
 
     def set_voice(self, voice_id: str) -> None:
+        self._lazy_init()
         if not self.supports_voice_selection:
             return
         if voice_id in self.voice_ids:
@@ -9683,6 +9825,7 @@ class TTSManager(QObject):
                     pass
 
     def speak(self, text: str) -> None:
+        self._lazy_init()
         if not self.available:
             return
         while not self._queue.empty():
@@ -9761,6 +9904,7 @@ class TTSManager(QObject):
         self._mode = "none"
         self._powershell_busy = False
         self._timer.stop()
+        self._initialized = False
 
 
 # ---------- 点名/计时 ----------
@@ -10928,15 +11072,20 @@ class RollCallTimerWindow(QWidget):
         self.tts_manager: Optional[TTSManager] = None
         self.speech_enabled = str_to_bool(s.get("speech_enabled", "False"), False)
         self.selected_voice_id = s.get("speech_voice_id", "")
-        manager = TTSManager(self.selected_voice_id, parent=self)
-        self.tts_manager = manager
-        if not manager.available:
-            self.speech_enabled = False
+        self.tts_manager = None
+        if self.speech_enabled:
+            manager = TTSManager(self.selected_voice_id, parent=self)
+            self.tts_manager = manager
+            if not manager.available:
+                self.speech_enabled = False
         self._speech_issue_reported = False
         self._speech_check_scheduled = False
         self._pending_passive_student: Optional[int] = None
         self._score_persist_failed = False
-        self._score_write_lock = threading.Lock()
+        self._score_write_lock = QMutex()
+        self._settings_write_lock = QMutex()
+        self._student_data_loading = False
+        self._io_pool = QThreadPool.globalInstance()
 
         # QFontDatabase 在 Qt 6 中以静态方法为主，这里直接调用类方法避免实例化失败
         families_list = []
@@ -11667,23 +11816,56 @@ class RollCallTimerWindow(QWidget):
     def _load_student_data_if_needed(self) -> bool:
         if not self._student_data_pending_load:
             return True
+        if self._student_data_loading:
+            return False
         if not (PANDAS_AVAILABLE and OPENPYXL_AVAILABLE):
             return False
-        workbook = load_student_data(self)
-        if workbook is None:
-            return False
-        self._student_data_pending_load = False
-        self._apply_student_workbook(workbook, propagate=True)
-        encrypted_state, encrypted_password = _get_session_student_encryption()
-        self._student_file_encrypted = bool(encrypted_state)
-        self._student_password = encrypted_password
-        saved = self.settings_manager.load_settings().get("RollCallTimer", {})
-        self._restore_group_state(saved)
-        self._update_encryption_button()
-        self._update_class_button_label()
-        self.display_current_student()
-        self._schedule_save()
-        return True
+        existing_plain = _any_existing_path(self.STUDENT_FILE_CANDIDATES)
+        existing_encrypted = _any_existing_path(self.ENCRYPTED_STUDENT_FILE_CANDIDATES)
+        password: Optional[str] = None
+        if existing_plain is None and existing_encrypted is not None:
+            password = self._prompt_existing_encryption_password("解密学生数据")
+            if not password:
+                return False
+
+        def _on_success(result: object) -> None:
+            self._student_data_loading = False
+            if not isinstance(result, tuple) or len(result) != 4:
+                return
+            workbook, encrypted_state, encrypted_password, created = result
+            if workbook is None:
+                return
+            self._student_data_pending_load = False
+            self._apply_student_workbook(workbook, propagate=True)
+            self._student_file_encrypted = bool(encrypted_state)
+            self._student_password = encrypted_password
+            saved = self.settings_manager.load_settings().get("RollCallTimer", {})
+            self._restore_group_state(saved)
+            self._update_encryption_button()
+            self._update_class_button_label()
+            self.display_current_student()
+            if created:
+                show_quiet_information(self, f"未找到学生名单，已为您创建模板文件：{self.STUDENT_FILE}")
+            self._schedule_save()
+
+        def _on_error(message: str, _exc: object) -> None:
+            self._student_data_loading = False
+            if message:
+                show_quiet_information(self, f"加载学生数据失败：{message}")
+
+        worker = _IOWorker(
+            _read_student_workbook,
+            existing_plain,
+            existing_encrypted,
+            self._encrypted_file_path,
+            self.STUDENT_FILE,
+            password,
+        )
+        worker.signals.finished.connect(_on_success)
+        worker.signals.error.connect(_on_error)
+        self._student_data_loading = True
+        self._io_pool.start(worker)
+        return False
 
     def _handle_encrypt_student_file(self) -> None:
         if not PANDAS_READY:
@@ -12234,21 +12416,42 @@ class RollCallTimerWindow(QWidget):
         if self.student_workbook is None:
             return
         try:
-            with self._score_write_lock:
-                data = self.student_workbook.as_dict()
+            locker = QMutexLocker(self._score_write_lock)
+            data = self.student_workbook.as_dict()
+            locker.unlock()
+        except Exception as exc:
+            logger.debug("Failed to snapshot student workbook: %s", exc, exc_info=True)
+            return
+
+        def _write_scores(payload: Dict[str, Dict[str, list]]) -> bool:
+            locker_inner = QMutexLocker(self._score_write_lock)
+            try:
                 _save_student_workbook(
-                    data,
+                    payload,
                     self.STUDENT_FILE,
                     self._encrypted_file_path,
                     encrypted=self._student_file_encrypted,
                     password=self._student_password,
                 )
+            finally:
+                del locker_inner
+            return True
+
+        worker = _IOWorker(_write_scores, data)
+
+        def _on_success(_result: object) -> None:
             self._score_persist_failed = False
             self._update_class_button_label()
-        except Exception as exc:
+
+        def _on_error(message: str, _exc: object) -> None:
             if not self._score_persist_failed:
-                show_quiet_information(self, f"保存成绩失败：{exc}")
+                show_quiet_information(self, f"保存成绩失败：{message}")
                 self._score_persist_failed = True
+            logger.debug("Failed to persist student scores: %s", message, exc_info=True)
+
+        worker.signals.finished.connect(_on_success)
+        worker.signals.error.connect(_on_error)
+        self._io_pool.start(worker)
 
     def toggle_mode(self) -> None:
         self.mode = "timer" if self.mode == "roll_call" else "roll_call"
@@ -13225,6 +13428,23 @@ class RollCallTimerWindow(QWidget):
             self._save_timer.stop()
         self._save_timer.start()
 
+    def _threaded_save_settings(self, payload: Dict[str, Dict[str, str]]) -> bool:
+        locker = QMutexLocker(self._settings_write_lock)
+        try:
+            self.settings_manager.save_settings(payload)
+        finally:
+            del locker
+        return True
+
+    def _queue_settings_save(self, settings: Dict[str, Dict[str, str]]) -> None:
+        worker = _IOWorker(self._threaded_save_settings, settings)
+
+        def _log_error(message: str, _exc: object) -> None:
+            logger.debug("Failed to persist settings: %s", message)
+
+        worker.signals.error.connect(_log_error)
+        self._io_pool.start(worker)
+
     def save_settings(self) -> None:
         if self._save_timer.isActive():
             self._save_timer.stop()
@@ -13298,7 +13518,7 @@ class RollCallTimerWindow(QWidget):
         except TypeError:
             sec["global_drawn"] = json.dumps([], ensure_ascii=False)
         settings["RollCallTimer"] = sec
-        self.settings_manager.save_settings(settings)
+        self._queue_settings_save(settings)
 
 
 # ---------- 关于 ----------
@@ -13582,6 +13802,53 @@ def _write_encrypted_student_workbook(file_path: str, data: Mapping[str, PandasD
             os.remove(tmp_path)
 
 
+def _read_student_workbook(
+    existing_plain: Optional[str],
+    existing_encrypted: Optional[str],
+    encrypted_file_path: str,
+    plain_file_path: str,
+    password: Optional[str],
+) -> Tuple[Optional[StudentWorkbook], bool, Optional[str], bool]:
+    """在后台解析学生名单，返回 (workbook, 是否加密, 密码, 是否创建模板)。"""
+
+    if not (PANDAS_AVAILABLE and OPENPYXL_AVAILABLE):
+        raise RuntimeError("缺少 pandas 或 openpyxl")
+
+    created_template = False
+    if existing_plain is None and existing_encrypted is None:
+        template = pd.DataFrame(
+            {
+                "学号": [101, 102, 103],
+                "姓名": ["张三", "李四", "王五"],
+                "分组": ["A", "B", "A"],
+                "成绩": [0, 0, 0],
+            }
+        )
+        workbook = StudentWorkbook(OrderedDict({"班级1": template}), active_class="班级1")
+        _save_student_workbook(plain_file_path, workbook.as_dict(), encrypted_file_path, encrypted=False, password=None)
+        created_template = True
+        return workbook, False, None, created_template
+
+    if existing_plain is None and existing_encrypted is not None:
+        if not password:
+            raise ValueError("缺少加密密码")
+        encrypted_source = existing_encrypted
+        with open(encrypted_source, "rb") as fh:
+            payload = fh.read()
+        plain_bytes = _decrypt_student_bytes(password, payload)
+        buffer = io.BytesIO(plain_bytes)
+        raw_data = pd.read_excel(buffer, sheet_name=None)
+        workbook = StudentWorkbook(OrderedDict(raw_data), active_class="")
+        _save_student_workbook(plain_file_path, workbook.as_dict(), encrypted_file_path, encrypted=False, password=None)
+        return workbook, True, password, created_template
+
+    read_path = existing_plain if existing_plain and os.path.exists(existing_plain) else plain_file_path
+    raw_data = pd.read_excel(read_path, sheet_name=None)
+    workbook = StudentWorkbook(OrderedDict(raw_data), active_class="")
+    _save_student_workbook(plain_file_path, workbook.as_dict(), encrypted_file_path, encrypted=False, password=None)
+    return workbook, False, None, created_template
+
+
 def _export_student_workbook_bytes(data: Mapping[str, PandasDataFrame]) -> bytes:
     normalized: "OrderedDict[str, PandasDataFrame]" = OrderedDict()
     for idx, (name, df) in enumerate(data.items(), start=1):
@@ -13661,17 +13928,16 @@ def load_student_data(parent: Optional[QWidget]) -> Optional[StudentWorkbook]:
                 attempts += 1
                 continue
             try:
-                with open(encrypted_source, "rb") as fh:
-                    payload = fh.read()
-                plain_bytes = _decrypt_student_bytes(password, payload)
-                buffer = io.BytesIO(plain_bytes)
-                raw_data = pd.read_excel(buffer, sheet_name=None)
-                workbook = StudentWorkbook(OrderedDict(raw_data), active_class="")
-                _set_session_student_encryption(True, password)
-                try:
-                    _write_student_workbook(file_path, workbook.as_dict())
-                except Exception:
-                    logger.debug("Failed to persist decrypted workbook to %s", file_path, exc_info=True)
+                workbook, encrypted, pwd, _created = _read_student_workbook(
+                    existing_plain,
+                    encrypted_source,
+                    resources.encrypted,
+                    file_path,
+                    password,
+                )
+                if workbook is None:
+                    return None
+                _set_session_student_encryption(encrypted, pwd)
                 return workbook
             except Exception as exc:
                 attempts += 1
@@ -13681,24 +13947,33 @@ def load_student_data(parent: Optional[QWidget]) -> Optional[StudentWorkbook]:
 
     if existing_plain is None:
         try:
-            template = pd.DataFrame(
-                {"学号": [101, 102, 103], "姓名": ["张三", "李四", "王五"], "分组": ["A", "B", "A"], "成绩": [0, 0, 0]}
+            workbook, encrypted, pwd, created = _read_student_workbook(
+                existing_plain,
+                existing_encrypted,
+                resources.encrypted,
+                file_path,
+                None,
             )
-            workbook = StudentWorkbook(OrderedDict({"班级1": template}), active_class="班级1")
-            _write_student_workbook(file_path, workbook.as_dict())
-            show_quiet_information(parent, f"未找到学生名单，已为您创建模板文件：{file_path}")
-            _set_session_student_encryption(False, None)
+            if workbook is None:
+                return None
+            _set_session_student_encryption(encrypted, pwd)
             existing_plain = file_path
+            if created:
+                show_quiet_information(parent, f"未找到学生名单，已为您创建模板文件：{file_path}")
+
         except Exception as exc:
             QMessageBox.critical(parent, "错误", f"创建模板文件失败：{exc}")
             return None
 
     try:
-        read_path = existing_plain if existing_plain and os.path.exists(existing_plain) else file_path
-        raw_data = pd.read_excel(read_path, sheet_name=None)
-        workbook = StudentWorkbook(OrderedDict(raw_data), active_class="")
-        _write_student_workbook(file_path, workbook.as_dict())
-        _set_session_student_encryption(False, None)
+        workbook, encrypted, pwd, _created = _read_student_workbook(
+            existing_plain,
+            existing_encrypted,
+            resources.encrypted,
+            file_path,
+            None,
+        )
+        _set_session_student_encryption(encrypted, pwd)
         if _any_existing_path(resources.encrypted_candidates):
             show_quiet_information(parent, "检测到同时存在加密文件，将优先使用明文 students.xlsx。")
         return workbook
