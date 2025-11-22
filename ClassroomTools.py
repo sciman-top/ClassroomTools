@@ -27,7 +27,7 @@ import functools
 from collections import OrderedDict, deque
 from functools import singledispatch
 from queue import Empty, Queue
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import (
     TYPE_CHECKING,
@@ -1727,14 +1727,132 @@ def recommended_control_height(font: QFont, *, extra: int = 12, minimum: int = 3
     return max(minimum, int(math.ceil(base_height + extra)))
 
 
+class StyleConfig:
+    """统一管理颜色、字体与 QSS 片段，避免散落的硬编码。"""
+
+    ERROR_COLOR = "#d93025"
+    DESCRIPTION_COLOR = "#5f6368"
+    TOOLBAR_BG = "rgba(28, 29, 32, 235)"
+    TOOLBAR_BORDER = "rgba(255, 255, 255, 45)"
+    TOOLBAR_TEXT = "#f1f3f4"
+    TOOLBAR_BUTTON_BG = "rgba(60, 64, 67, 240)"
+    TOOLBAR_HOVER_BG = "rgba(138, 180, 248, 245)"
+    TOOLBAR_HOVER_BORDER = "rgba(138, 180, 248, 255)"
+    TOOLBAR_HOVER_TEXT = "#202124"
+    TOOLBAR_CHECKED_BG = "rgba(138, 180, 248, 255)"
+    TOOLBAR_CHECKED_TEXT = "#202124"
+    ERASER_BG = "rgba(241, 243, 244, 235)"
+    ERASER_TEXT = "#3c4043"
+    ERASER_BORDER = "rgba(138, 180, 248, 170)"
+    ERASER_ACTIVE_BG = "rgba(202, 225, 255, 255)"
+    ERASER_ACTIVE_BORDER = "#1a73e8"
+    ERASER_ACTIVE_TEXT = "#174ea6"
+    CLEAR_BG = "rgba(255, 236, 232, 240)"
+    CLEAR_BORDER = "rgba(255, 173, 153, 230)"
+    CLEAR_TEXT = "#a03a1e"
+    CLEAR_ACTIVE_BG = "rgba(255, 210, 204, 255)"
+    CLEAR_ACTIVE_BORDER = "rgba(255, 138, 101, 255)"
+    CLEAR_ACTIVE_TEXT = "#5f2121"
+    WHITEBOARD_ACTIVE_BG = "rgba(255, 214, 102, 240)"
+    WHITEBOARD_ACTIVE_BORDER = "rgba(251, 188, 5, 255)"
+    WHITEBOARD_ACTIVE_TEXT = "#202124"
+    PRIMARY_TEXT = "#202124"
+    TITLE_TEXT = "#202124"
+    GROUP_LABEL_TEXT = "#3c4043"
+
+    ERROR_LABEL_STYLE = f"color: {ERROR_COLOR}; font-size: 12px; margin-top: 4px;"
+    DESCRIPTION_LABEL_STYLE = f"color: {DESCRIPTION_COLOR}; font-size: 12px;"
+    MENU_BUTTON_STYLE = "font-size: 18px; padding-bottom: 6px;"
+
+    @staticmethod
+    def floating_toolbar_style() -> str:
+        return (
+            """
+            #container {{
+                background-color: {bg};
+                border-radius: 10px;
+                border: 1px solid {border};
+            }}
+            QPushButton {{
+                color: {text};
+                background: {button_bg};
+                border: 1px solid {border};
+                border-radius: 6px;
+                padding: 3px;
+                min-width: 28px;
+                min-height: 28px;
+            }}
+            QPushButton:hover {{
+                background: {hover_bg};
+                border-color: {hover_border};
+                color: {hover_text};
+            }}
+            QPushButton:checked {{
+                background: {checked_bg};
+                color: {checked_text};
+            }}
+            QPushButton#eraserButton {{
+                background: {eraser_bg};
+                color: {eraser_text};
+                border-color: {eraser_border};
+            }}
+            QPushButton#eraserButton:hover,
+            QPushButton#eraserButton:checked {{
+                background: {eraser_active_bg};
+                border-color: {eraser_active_border};
+                color: {eraser_active_text};
+            }}
+            QPushButton#clearButton {{
+                background: {clear_bg};
+                color: {clear_text};
+                border-color: {clear_border};
+            }}
+            QPushButton#clearButton:hover,
+            QPushButton#clearButton:checked {{
+                background: {clear_active_bg};
+                border-color: {clear_active_border};
+                color: {clear_active_text};
+            }}
+            #whiteboardButtonActive {{
+                background: {whiteboard_bg};
+                border-color: {whiteboard_border};
+                color: {whiteboard_text};
+            }}
+            """
+        ).format(
+            bg=StyleConfig.TOOLBAR_BG,
+            border=StyleConfig.TOOLBAR_BORDER,
+            text=StyleConfig.TOOLBAR_TEXT,
+            button_bg=StyleConfig.TOOLBAR_BUTTON_BG,
+            hover_bg=StyleConfig.TOOLBAR_HOVER_BG,
+            hover_border=StyleConfig.TOOLBAR_HOVER_BORDER,
+            hover_text=StyleConfig.TOOLBAR_HOVER_TEXT,
+            checked_bg=StyleConfig.TOOLBAR_CHECKED_BG,
+            checked_text=StyleConfig.TOOLBAR_CHECKED_TEXT,
+            eraser_bg=StyleConfig.ERASER_BG,
+            eraser_text=StyleConfig.ERASER_TEXT,
+            eraser_border=StyleConfig.ERASER_BORDER,
+            eraser_active_bg=StyleConfig.ERASER_ACTIVE_BG,
+            eraser_active_border=StyleConfig.ERASER_ACTIVE_BORDER,
+            eraser_active_text=StyleConfig.ERASER_ACTIVE_TEXT,
+            clear_bg=StyleConfig.CLEAR_BG,
+            clear_text=StyleConfig.CLEAR_TEXT,
+            clear_border=StyleConfig.CLEAR_BORDER,
+            clear_active_bg=StyleConfig.CLEAR_ACTIVE_BG,
+            clear_active_border=StyleConfig.CLEAR_ACTIVE_BORDER,
+            clear_active_text=StyleConfig.CLEAR_ACTIVE_TEXT,
+            whiteboard_bg=StyleConfig.WHITEBOARD_ACTIVE_BG,
+            whiteboard_border=StyleConfig.WHITEBOARD_ACTIVE_BORDER,
+            whiteboard_text=StyleConfig.WHITEBOARD_ACTIVE_TEXT,
+        )
+
+
 @dataclass(frozen=True)
 class StyleManager:
     """集中管理通用样式，避免分散的硬编码。"""
 
-    error_label: str = (
-        "color: #d93025; font-size: 12px; margin-top: 4px;"
-    )
-    description_label: str = "color: #5f6368; font-size: 12px;"
+    error_label: str = StyleConfig.ERROR_LABEL_STYLE
+    description_label: str = StyleConfig.DESCRIPTION_LABEL_STYLE
 
     def apply_error_style(self, widget: QWidget) -> None:
         """Apply the shared error label stylesheet to *widget* safely."""
@@ -1973,6 +2091,28 @@ class SettingsManager:
     def get_defaults(self) -> Dict[str, Dict[str, str]]:
         return {section: values.copy() for section, values in self.defaults.items()}
 
+    def get_paint_settings(self) -> PaintConfig:
+        settings = self.load_settings()
+        section = settings.get("Paint", {})
+        defaults = self.defaults.get("Paint", {})
+        return PaintConfig.from_mapping(section, defaults)
+
+    def update_paint_settings(self, config: PaintConfig) -> None:
+        settings = self.load_settings()
+        settings["Paint"] = config.to_mapping()
+        self.save_settings(settings)
+
+    def get_roll_call_settings(self) -> RollCallTimerConfig:
+        settings = self.load_settings()
+        section = settings.get("RollCallTimer", {})
+        defaults = self.defaults.get("RollCallTimer", {})
+        return RollCallTimerConfig.from_mapping(section, defaults)
+
+    def update_roll_call_settings(self, config: RollCallTimerConfig) -> None:
+        settings = self.load_settings()
+        settings["RollCallTimer"] = config.to_mapping()
+        self.save_settings(settings)
+
     def load_settings(self) -> Dict[str, Dict[str, str]]:
         if self._settings_cache is not None:
             return {section: values.copy() for section, values in self._settings_cache.items()}
@@ -2176,6 +2316,195 @@ class StartupSettings:
 
     def to_mapping(self) -> Dict[str, str]:
         return {"autostart_enabled": bool_to_str(self.autostart_enabled)}
+
+
+@dataclass
+class PaintConfig:
+    """Typed configuration for overlay and paint tools."""
+
+    x: int = 260
+    y: int = 260
+    brush_size: float = 12.0
+    brush_base_size: float = 12.0
+    brush_color: str = "#ff0000"
+    brush_style: PenStyle = _DEFAULT_PEN_STYLE
+    control_ms_ppt: bool = True
+    control_ms_word: bool = False
+    control_wps_ppt: bool = True
+    control_wps_word: bool = False
+    base_size_overrides: Dict[str, float] = field(default_factory=dict)
+    opacity_overrides: Dict[str, int] = field(default_factory=dict)
+
+    @classmethod
+    def from_mapping(cls, mapping: Mapping[str, str], defaults: Mapping[str, str]) -> "PaintConfig":
+        def _get_float(key: str, fallback: float) -> float:
+            raw = mapping.get(key, defaults.get(key, str(fallback)))
+            try:
+                return float(str(raw))
+            except (TypeError, ValueError):
+                return fallback
+
+        def _get_int(key: str, fallback: int) -> int:
+            raw = mapping.get(key, defaults.get(key, str(fallback)))
+            try:
+                return int(str(raw))
+            except (TypeError, ValueError):
+                return fallback
+
+        def _get_bool(key: str, fallback: bool) -> bool:
+            raw = mapping.get(key, defaults.get(key, bool_to_str(fallback)))
+            return str_to_bool(str(raw), fallback)
+
+        style_raw = mapping.get("brush_style", defaults.get("brush_style", _DEFAULT_PEN_STYLE.value))
+        style = _DEFAULT_PEN_STYLE
+        if isinstance(style_raw, str):
+            with contextlib.suppress(Exception):
+                style = PenStyle(style_raw)
+        base_sizes: Dict[str, float] = {}
+        opacity_overrides: Dict[str, int] = {}
+        for key, raw in mapping.items():
+            if key.endswith("_base_size"):
+                style_name = key[: -len("_base_size")]
+                fallback_base = get_pen_style_config(_DEFAULT_PEN_STYLE).default_base
+                with contextlib.suppress(Exception):
+                    fallback_base = get_pen_style_config(PenStyle(style_name)).default_base
+                base_sizes[key] = _get_float(key, float(fallback_base))
+            if key.endswith("_opacity"):
+                opacity_overrides[key] = int(_get_float(key, 0))
+        return cls(
+            x=_get_int("x", 260),
+            y=_get_int("y", 260),
+            brush_size=_get_float("brush_size", 12.0),
+            brush_base_size=_get_float("brush_base_size", 12.0),
+            brush_color=str(mapping.get("brush_color", defaults.get("brush_color", "#ff0000"))),
+            brush_style=style,
+            control_ms_ppt=_get_bool("control_ms_ppt", True),
+            control_ms_word=_get_bool("control_ms_word", False),
+            control_wps_ppt=_get_bool("control_wps_ppt", True),
+            control_wps_word=_get_bool("control_wps_word", False),
+            base_size_overrides=base_sizes,
+            opacity_overrides=opacity_overrides,
+        )
+
+    def to_mapping(self) -> Dict[str, str]:
+        return {
+            "x": str(int(self.x)),
+            "y": str(int(self.y)),
+            "brush_size": f"{float(self.brush_size):.2f}",
+            "brush_base_size": f"{float(self.brush_base_size):.2f}",
+            "brush_color": str(self.brush_color),
+            "brush_style": self.brush_style.value,
+            "control_ms_ppt": bool_to_str(self.control_ms_ppt),
+            "control_ms_word": bool_to_str(self.control_ms_word),
+            "control_wps_ppt": bool_to_str(self.control_wps_ppt),
+            "control_wps_word": bool_to_str(self.control_wps_word),
+            **(self.base_size_overrides or {}),
+            **(self.opacity_overrides or {}),
+        }
+
+
+@dataclass
+class RollCallTimerConfig:
+    """Typed configuration for roll call and timer settings."""
+
+    geometry: str = "480x280+180+180"
+    show_id: bool = True
+    show_name: bool = True
+    show_photo: bool = False
+    photo_duration_seconds: int = 0
+    speech_enabled: bool = False
+    speech_voice_id: str = ""
+    current_group: str = "全部"
+    timer_countdown_minutes: int = 5
+    timer_countdown_seconds: int = 0
+    timer_sound_enabled: bool = True
+    mode: str = "roll_call"
+    timer_mode: str = "countdown"
+    timer_seconds_left: int = 300
+    timer_stopwatch_seconds: int = 0
+    timer_running: bool = False
+    id_font_size: int = 48
+    name_font_size: int = 60
+    timer_font_size: int = 56
+    scoreboard_order: str = "rank"
+    current_class: str = ""
+    class_states: str = ""
+    group_remaining: str = ""
+    group_last: str = ""
+    global_drawn: str = ""
+    students_encrypted: bool = False
+
+    @classmethod
+    def from_mapping(cls, mapping: Mapping[str, str], defaults: Mapping[str, str]) -> "RollCallTimerConfig":
+        def _get_int(key: str, fallback: int) -> int:
+            raw = mapping.get(key, defaults.get(key, str(fallback)))
+            try:
+                return int(str(raw))
+            except (TypeError, ValueError):
+                return fallback
+
+        def _get_bool(key: str, fallback: bool) -> bool:
+            raw = mapping.get(key, defaults.get(key, bool_to_str(fallback)))
+            return str_to_bool(str(raw), fallback)
+
+        return cls(
+            geometry=str(mapping.get("geometry", defaults.get("geometry", "480x280+180+180"))),
+            show_id=_get_bool("show_id", True),
+            show_name=_get_bool("show_name", True),
+            show_photo=_get_bool("show_photo", False),
+            photo_duration_seconds=max(0, _get_int("photo_duration_seconds", 0)),
+            speech_enabled=_get_bool("speech_enabled", False),
+            speech_voice_id=str(mapping.get("speech_voice_id", defaults.get("speech_voice_id", ""))),
+            current_group=str(mapping.get("current_group", defaults.get("current_group", "全部"))),
+            timer_countdown_minutes=_get_int("timer_countdown_minutes", 5),
+            timer_countdown_seconds=_get_int("timer_countdown_seconds", 0),
+            timer_sound_enabled=_get_bool("timer_sound_enabled", True),
+            mode=str(mapping.get("mode", defaults.get("mode", "roll_call"))),
+            timer_mode=str(mapping.get("timer_mode", defaults.get("timer_mode", "countdown"))),
+            timer_seconds_left=max(0, _get_int("timer_seconds_left", 300)),
+            timer_stopwatch_seconds=max(0, _get_int("timer_stopwatch_seconds", 0)),
+            timer_running=_get_bool("timer_running", False),
+            id_font_size=_get_int("id_font_size", 48),
+            name_font_size=_get_int("name_font_size", 60),
+            timer_font_size=_get_int("timer_font_size", 56),
+            scoreboard_order=str(mapping.get("scoreboard_order", defaults.get("scoreboard_order", "rank"))),
+            current_class=str(mapping.get("current_class", defaults.get("current_class", ""))),
+            class_states=str(mapping.get("class_states", "")),
+            group_remaining=str(mapping.get("group_remaining", "")),
+            group_last=str(mapping.get("group_last", "")),
+            global_drawn=str(mapping.get("global_drawn", "")),
+            students_encrypted=_get_bool("students_encrypted", False),
+        )
+
+    def to_mapping(self) -> Dict[str, str]:
+        return {
+            "geometry": self.geometry,
+            "show_id": bool_to_str(self.show_id),
+            "show_name": bool_to_str(self.show_name),
+            "show_photo": bool_to_str(self.show_photo),
+            "photo_duration_seconds": str(int(self.photo_duration_seconds)),
+            "speech_enabled": bool_to_str(self.speech_enabled),
+            "speech_voice_id": self.speech_voice_id,
+            "current_group": self.current_group,
+            "timer_countdown_minutes": str(int(self.timer_countdown_minutes)),
+            "timer_countdown_seconds": str(int(self.timer_countdown_seconds)),
+            "timer_sound_enabled": bool_to_str(self.timer_sound_enabled),
+            "mode": self.mode,
+            "timer_mode": self.timer_mode,
+            "timer_seconds_left": str(int(self.timer_seconds_left)),
+            "timer_stopwatch_seconds": str(int(self.timer_stopwatch_seconds)),
+            "timer_running": bool_to_str(self.timer_running),
+            "id_font_size": str(int(self.id_font_size)),
+            "name_font_size": str(int(self.name_font_size)),
+            "timer_font_size": str(int(self.timer_font_size)),
+            "scoreboard_order": self.scoreboard_order,
+            "current_class": self.current_class,
+            "class_states": self.class_states,
+            "group_remaining": self.group_remaining,
+            "group_last": self.group_last,
+            "global_drawn": self.global_drawn,
+            "students_encrypted": bool_to_str(self.students_encrypted),
+        }
 
 
 # ---------- 画笔风格 ----------
@@ -3386,60 +3715,7 @@ class FloatingToolbar(_EnsureOnScreenMixin, QWidget):
         self._ensure_min_height = self.height()
 
     def _build_ui(self) -> None:
-        self.setStyleSheet(
-            """
-            #container {
-                background-color: rgba(28, 29, 32, 235);
-                border-radius: 10px;
-                border: 1px solid rgba(255, 255, 255, 45);
-            }
-            QPushButton {
-                color: #f1f3f4;
-                background: rgba(60, 64, 67, 240);
-                border: 1px solid rgba(255, 255, 255, 45);
-                border-radius: 6px;
-                padding: 3px;
-                min-width: 28px;
-                min-height: 28px;
-            }
-            QPushButton:hover {
-                background: rgba(138, 180, 248, 245);
-                border-color: rgba(138, 180, 248, 255);
-                color: #202124;
-            }
-            QPushButton:checked {
-                background: rgba(138, 180, 248, 255);
-                color: #202124;
-            }
-            QPushButton#eraserButton {
-                background: rgba(241, 243, 244, 235);
-                color: #3c4043;
-                border-color: rgba(138, 180, 248, 170);
-            }
-            QPushButton#eraserButton:hover,
-            QPushButton#eraserButton:checked {
-                background: rgba(202, 225, 255, 255);
-                border-color: #1a73e8;
-                color: #174ea6;
-            }
-            QPushButton#clearButton {
-                background: rgba(255, 236, 232, 240);
-                color: #a03a1e;
-                border-color: rgba(255, 173, 153, 230);
-            }
-            QPushButton#clearButton:hover,
-            QPushButton#clearButton:checked {
-                background: rgba(255, 210, 204, 255);
-                border-color: rgba(255, 138, 101, 255);
-                color: #5f2121;
-            }
-            #whiteboardButtonActive {
-                background: rgba(255, 214, 102, 240);
-                border-color: rgba(251, 188, 5, 255);
-                color: #202124;
-            }
-            """
-        )
+        self.setStyleSheet(StyleConfig.floating_toolbar_style())
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -6816,23 +7092,22 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.settings_manager = settings_manager
-        paint_settings = self.settings_manager.load_settings().get("Paint", {})
+        paint_config = self.settings_manager.get_paint_settings()
+        self.paint_config = paint_config
+        paint_mapping = paint_config.to_mapping()
         self._presentation_control_flags: Dict[str, bool] = {}
-        self._update_presentation_control_flags(paint_settings)
-        style_value = paint_settings.get("brush_style", _DEFAULT_PEN_STYLE.value)
-        try:
-            self.pen_style = PenStyle(style_value)
-        except ValueError:
-            self.pen_style = _DEFAULT_PEN_STYLE
-        base_size_value = paint_settings.get("brush_base_size")
-        if base_size_value is None:
-            base_size_value = paint_settings.get("brush_size", "12")
-        try:
-            parsed_base = float(base_size_value)
-        except (TypeError, ValueError):
-            parsed_base = 12.0
-        self.pen_base_size = clamp_base_size_for_style(self.pen_style, parsed_base)
-        color_hex = paint_settings.get("brush_color", "#ff0000")
+        self._update_presentation_control_flags(
+            {
+                "ms_ppt": paint_config.control_ms_ppt,
+                "ms_word": paint_config.control_ms_word,
+                "wps_ppt": paint_config.control_wps_ppt,
+                "wps_word": paint_config.control_wps_word,
+            }
+        )
+        self.pen_style = paint_config.brush_style
+        parsed_base = clamp_base_size_for_style(self.pen_style, float(paint_config.brush_base_size))
+        self.pen_base_size = parsed_base
+        color_hex = paint_config.brush_color
         self.pen_color = QColor(color_hex)
         if not self.pen_color.isValid():
             self.pen_color = QColor("#ff0000")
@@ -6842,7 +7117,7 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             if not config.opacity_range:
                 continue
             key = f"{style.value}_opacity"
-            raw_value = paint_settings.get(key)
+            raw_value = paint_mapping.get(key)
             if raw_value is None:
                 if config.default_opacity is not None:
                     value = int(config.default_opacity)
@@ -6860,7 +7135,7 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         for style in PEN_STYLE_ORDER:
             style_config = get_pen_style_config(style)
             key = f"{style.value}_base_size"
-            raw_base = paint_settings.get(key)
+            raw_base = paint_mapping.get(key)
             if raw_base is None:
                 if style == self.pen_style:
                     stored = float(self.pen_base_size)
@@ -9017,41 +9292,39 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                 pass
 
     def save_settings(self) -> None:
-        settings = self.settings_manager.load_settings()
-        paint = settings.get("Paint", {})
-        paint["brush_size"] = str(self.pen_size)
-        paint["brush_base_size"] = f"{self.pen_base_size:.2f}"
-        paint["brush_color"] = self.pen_color.name()
-        paint["brush_style"] = self.pen_style.value
-        self._style_base_sizes[self.pen_style] = float(
-            clamp_base_size_for_style(self.pen_style, float(self.pen_base_size))
-        )
+        self.paint_config.brush_size = float(self.pen_size)
+        self.paint_config.brush_base_size = float(self.pen_base_size)
+        self.paint_config.brush_color = self.pen_color.name()
+        self.paint_config.brush_style = self.pen_style
+        self.paint_config.control_ms_ppt = bool(self.control_ms_ppt)
+        self.paint_config.control_ms_word = bool(self.control_ms_word)
+        self.paint_config.control_wps_ppt = bool(self.control_wps_ppt)
+        self.paint_config.control_wps_word = bool(self.control_wps_word)
         for style in PEN_STYLE_ORDER:
             config = get_pen_style_config(style)
             base_value = clamp_base_size_for_style(
                 style,
                 float(self._style_base_sizes.get(style, float(config.default_base))),
             )
-            paint[f"{style.value}_base_size"] = f"{base_value:.2f}"
-            if not config.opacity_range:
-                continue
-            default_alpha = int(config.default_opacity or config.base_alpha)
-            value = int(self._style_opacity_overrides.get(style, default_alpha))
-            paint[f"{style.value}_opacity"] = str(value)
-        paint["control_ms_ppt"] = "True" if self.control_ms_ppt else "False"
-        paint["control_ms_word"] = "True" if self.control_ms_word else "False"
-        paint["control_wps_ppt"] = "True" if self.control_wps_ppt else "False"
-        paint["control_wps_word"] = "True" if self.control_wps_word else "False"
-        settings["Paint"] = paint
-        self.settings_manager.save_settings(settings)
+            self._style_base_sizes[style] = base_value
+            self.paint_config.base_size_overrides[f"{style.value}_base_size"] = base_value
+            if config.opacity_range:
+                default_alpha = int(config.default_opacity or config.base_alpha)
+                value = int(self._style_opacity_overrides.get(style, default_alpha))
+                self.paint_config.opacity_overrides[f"{style.value}_opacity"] = value
+        try:
+            self.settings_manager.update_paint_settings(self.paint_config)
+        except Exception:
+            logger.error("Failed to persist paint settings", exc_info=True)
 
     def save_window_position(self) -> None:
-        settings = self.settings_manager.load_settings()
-        paint = settings.get("Paint", {})
         pos = self.toolbar.pos()
-        paint["x"] = str(pos.x()); paint["y"] = str(pos.y())
-        settings["Paint"] = paint
-        self.settings_manager.save_settings(settings)
+        self.paint_config.x = int(pos.x())
+        self.paint_config.y = int(pos.y())
+        try:
+            self.settings_manager.update_paint_settings(self.paint_config)
+        except Exception:
+            logger.error("Failed to persist paint window position", exc_info=True)
 
     # ---- 画图事件 ----
     def wheelEvent(self, e) -> None:
@@ -11002,13 +11275,9 @@ class RollCallTimerWindow(QWidget):
         except NotImplementedError:
             self._rng = random.Random()
 
-        s = self.settings_manager.load_settings().get("RollCallTimer", {})
-        def _get_int(key: str, default: int) -> int:
-            try:
-                return int(s.get(key, str(default)))
-            except (TypeError, ValueError):
-                return default
-        apply_geometry_from_text(self, s.get("geometry", "420x240+180+180"))
+        self.roll_call_config = self.settings_manager.get_roll_call_settings()
+        config = self.roll_call_config
+        apply_geometry_from_text(self, config.geometry)
         self.setMinimumSize(260, 160)
         # 记录初始最小宽高，供后续还原窗口尺寸时使用
         self._base_minimum_width = self.minimumWidth()
@@ -11016,19 +11285,19 @@ class RollCallTimerWindow(QWidget):
         self._ensure_min_width = self._base_minimum_width
         self._ensure_min_height = self._base_minimum_height
 
-        self.mode = s.get("mode", "roll_call") if s.get("mode", "roll_call") in {"roll_call", "timer"} else "roll_call"
+        self.mode = config.mode if config.mode in {"roll_call", "timer"} else "roll_call"
         self.timer_modes = ["countdown", "stopwatch", "clock"]
-        self.timer_mode_index = self.timer_modes.index(s.get("timer_mode", "countdown")) if s.get("timer_mode", "countdown") in self.timer_modes else 0
+        self.timer_mode_index = self.timer_modes.index(config.timer_mode) if config.timer_mode in self.timer_modes else 0
         self._active_timer_mode: Optional[str] = None
 
-        self.timer_countdown_minutes = _get_int("timer_countdown_minutes", 5)
-        self.timer_countdown_seconds = _get_int("timer_countdown_seconds", 0)
-        self.timer_sound_enabled = str_to_bool(s.get("timer_sound_enabled", "True"), True)
+        self.timer_countdown_minutes = config.timer_countdown_minutes
+        self.timer_countdown_seconds = config.timer_countdown_seconds
+        self.timer_sound_enabled = config.timer_sound_enabled
 
-        self.show_id = str_to_bool(s.get("show_id", "True"), True)
-        self.show_name = str_to_bool(s.get("show_name", "True"), True)
-        self.show_photo = str_to_bool(s.get("show_photo", "False"), False)
-        self.photo_duration_seconds = max(0, _get_int("photo_duration_seconds", 0))
+        self.show_id = config.show_id
+        self.show_name = config.show_name
+        self.show_photo = config.show_photo
+        self.photo_duration_seconds = max(0, config.photo_duration_seconds)
         if not (self.show_id or self.show_name):
             self.show_name = True
 
@@ -11039,8 +11308,8 @@ class RollCallTimerWindow(QWidget):
         self._photo_manual_hidden = False
         self._ensure_photo_root_directory()
 
-        self.current_class_name = str(s.get("current_class", "")).strip()
-        self.current_group_name = s.get("current_group", "全部")
+        self.current_class_name = str(config.current_class).strip()
+        self.current_group_name = config.current_group
         self.groups = ["全部"]
 
         self.current_student_index: Optional[int] = None
@@ -11056,13 +11325,13 @@ class RollCallTimerWindow(QWidget):
         self._global_drawn_students: set[int] = set()
         self._student_groups: Dict[int, set[str]] = {}
         self._class_roll_states: Dict[str, ClassRollState] = {}
-        self.timer_seconds_left = max(0, _get_int("timer_seconds_left", self.timer_countdown_minutes * 60 + self.timer_countdown_seconds))
-        self.timer_stopwatch_seconds = max(0, _get_int("timer_stopwatch_seconds", 0))
-        self.timer_running = str_to_bool(s.get("timer_running", "False"), False)
+        self.timer_seconds_left = max(0, config.timer_seconds_left)
+        self.timer_stopwatch_seconds = max(0, config.timer_stopwatch_seconds)
+        self.timer_running = bool(config.timer_running)
 
-        order_value = str(s.get("scoreboard_order", "rank")).strip().lower()
+        order_value = str(config.scoreboard_order).strip().lower()
         self.scoreboard_order = order_value if order_value in {"rank", "id"} else "rank"
-        saved_encrypted = str_to_bool(s.get("students_encrypted", bool_to_str(self._student_file_encrypted)), self._student_file_encrypted)
+        saved_encrypted = bool(config.students_encrypted)
         plain_exists = _any_existing_path(self.STUDENT_FILE_CANDIDATES) is not None
         encrypted_exists = _any_existing_path(self.ENCRYPTED_STUDENT_FILE_CANDIDATES) is not None
         disk_encrypted = encrypted_exists and not plain_exists
@@ -11072,16 +11341,16 @@ class RollCallTimerWindow(QWidget):
             self._student_file_encrypted = False
             self._student_password = None
 
-        self.last_id_font_size = max(self.MIN_FONT_SIZE, _get_int("id_font_size", 48))
-        self.last_name_font_size = max(self.MIN_FONT_SIZE, _get_int("name_font_size", 60))
-        self.last_timer_font_size = max(self.MIN_FONT_SIZE, _get_int("timer_font_size", 56))
+        self.last_id_font_size = max(self.MIN_FONT_SIZE, int(config.id_font_size))
+        self.last_name_font_size = max(self.MIN_FONT_SIZE, int(config.name_font_size))
+        self.last_timer_font_size = max(self.MIN_FONT_SIZE, int(config.timer_font_size))
 
         self.count_timer = QTimer(self); self.count_timer.setInterval(1000); self.count_timer.timeout.connect(self._on_count_timer)
         self.clock_timer = QTimer(self); self.clock_timer.setInterval(1000); self.clock_timer.timeout.connect(self._update_clock)
 
         self.tts_manager: Optional[TTSManager] = None
-        self.speech_enabled = str_to_bool(s.get("speech_enabled", "False"), False)
-        self.selected_voice_id = s.get("speech_voice_id", "")
+        self.speech_enabled = bool(config.speech_enabled)
+        self.selected_voice_id = config.speech_voice_id
         self.tts_manager = None
         if self.speech_enabled:
             manager = TTSManager(self.selected_voice_id, parent=self)
@@ -11125,7 +11394,7 @@ class RollCallTimerWindow(QWidget):
             self._set_student_dataframe(self.student_data, propagate=False)
         self._apply_saved_fonts()
         self._update_menu_state()
-        self._restore_group_state(s)
+        self._restore_group_state(config.to_mapping())
         self.update_mode_ui(force_timer_reset=self.mode == "timer")
         self.on_group_change(initial=True)
         self.display_current_student()
@@ -11221,7 +11490,7 @@ class RollCallTimerWindow(QWidget):
 
         self.menu_button = QToolButton(); self.menu_button.setText("..."); self.menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.menu_button.setFixedSize(toolbar_height, toolbar_height)
-        self.menu_button.setStyleSheet("font-size: 18px; padding-bottom: 6px;")
+        self.menu_button.setStyleSheet(StyleConfig.MENU_BUTTON_STYLE)
         self.main_menu = self._build_menu(); self.menu_button.setMenu(self.main_menu)
         top.addWidget(self.menu_button, 0, Qt.AlignmentFlag.AlignRight)
         toolbar_layout.addLayout(top)
@@ -11849,7 +12118,7 @@ class RollCallTimerWindow(QWidget):
             self._apply_student_workbook(workbook, propagate=True)
             self._student_file_encrypted = bool(encrypted_state)
             self._student_password = encrypted_password
-            saved = self.settings_manager.load_settings().get("RollCallTimer", {})
+            saved = self.roll_call_config.to_mapping()
             self._restore_group_state(saved)
             self._update_encryption_button()
             self._update_class_button_label()
@@ -13450,7 +13719,7 @@ class RollCallTimerWindow(QWidget):
         worker = _IOWorker(self._threaded_save_settings, settings)
 
         def _log_error(message: str, _exc: object) -> None:
-            logger.debug("Failed to persist settings: %s", message)
+            logger.error("Failed to persist settings: %s", message)
 
         worker.signals.error.connect(_log_error)
         self._io_pool.start(worker)
@@ -13458,38 +13727,38 @@ class RollCallTimerWindow(QWidget):
     def save_settings(self) -> None:
         if self._save_timer.isActive():
             self._save_timer.stop()
-        settings = self.settings_manager.load_settings()
-        sec = settings.get("RollCallTimer", {})
-        sec["geometry"] = geometry_to_text(self)
-        sec["show_id"] = bool_to_str(self.show_id)
-        sec["show_name"] = bool_to_str(self.show_name)
-        sec["show_photo"] = bool_to_str(self.show_photo)
-        sec["photo_duration_seconds"] = str(int(self.photo_duration_seconds))
-        sec["speech_enabled"] = bool_to_str(self.speech_enabled)
-        sec["speech_voice_id"] = self.selected_voice_id
-        sec["current_class"] = self.current_class_name
-        sec["current_group"] = self.current_group_name
-        sec["timer_countdown_minutes"] = str(self.timer_countdown_minutes)
-        sec["timer_countdown_seconds"] = str(self.timer_countdown_seconds)
-        sec["timer_sound_enabled"] = bool_to_str(self.timer_sound_enabled)
-        sec["mode"] = self.mode
-        sec["timer_mode"] = self.timer_modes[self.timer_mode_index]
-        sec["timer_seconds_left"] = str(self.timer_seconds_left)
-        sec["timer_stopwatch_seconds"] = str(self.timer_stopwatch_seconds)
-        sec["timer_running"] = bool_to_str(self.timer_running)
-        sec["id_font_size"] = str(self.last_id_font_size)
-        sec["name_font_size"] = str(self.last_name_font_size)
-        sec["timer_font_size"] = str(self.last_timer_font_size)
-        sec["scoreboard_order"] = self.scoreboard_order
-        sec["students_encrypted"] = bool_to_str(self._student_file_encrypted)
+        self.roll_call_config.geometry = geometry_to_text(self)
+        self.roll_call_config.show_id = bool(self.show_id)
+        self.roll_call_config.show_name = bool(self.show_name)
+        self.roll_call_config.show_photo = bool(self.show_photo)
+        self.roll_call_config.photo_duration_seconds = int(self.photo_duration_seconds)
+        self.roll_call_config.speech_enabled = bool(self.speech_enabled)
+        self.roll_call_config.speech_voice_id = self.selected_voice_id
+        self.roll_call_config.current_class = self.current_class_name
+        self.roll_call_config.current_group = self.current_group_name
+        self.roll_call_config.timer_countdown_minutes = int(self.timer_countdown_minutes)
+        self.roll_call_config.timer_countdown_seconds = int(self.timer_countdown_seconds)
+        self.roll_call_config.timer_sound_enabled = bool(self.timer_sound_enabled)
+        self.roll_call_config.mode = self.mode
+        self.roll_call_config.timer_mode = self.timer_modes[self.timer_mode_index]
+        self.roll_call_config.timer_seconds_left = int(self.timer_seconds_left)
+        self.roll_call_config.timer_stopwatch_seconds = int(self.timer_stopwatch_seconds)
+        self.roll_call_config.timer_running = bool(self.timer_running)
+        self.roll_call_config.id_font_size = int(self.last_id_font_size)
+        self.roll_call_config.name_font_size = int(self.last_name_font_size)
+        self.roll_call_config.timer_font_size = int(self.last_timer_font_size)
+        self.roll_call_config.scoreboard_order = self.scoreboard_order
+        self.roll_call_config.students_encrypted = bool(self._student_file_encrypted)
         self._prune_orphan_class_states()
         if not self._student_data_pending_load:
             self._store_active_class_state()
-        sec["class_states"] = self._encode_class_states()
+        self.roll_call_config.class_states = self._encode_class_states()
         if self._student_data_pending_load:
             # 在尚未加载真实名单数据时，保留磁盘上已有的未点名状态，避免误把占位空列表写回
             # 此时直接返回，保持上一轮保存的名单信息不被覆盖。
-            settings["RollCallTimer"] = sec
+            payload = self.roll_call_config.to_mapping()
+            settings = self.settings_manager.load_settings()
+            settings["RollCallTimer"] = payload
             self.settings_manager.save_settings(settings)
             return
 
@@ -13515,19 +13784,20 @@ class RollCallTimerWindow(QWidget):
                 except (TypeError, ValueError):
                     last_payload[group] = None
         try:
-            sec["group_remaining"] = json.dumps(remaining_payload, ensure_ascii=False)
+            self.roll_call_config.group_remaining = json.dumps(remaining_payload, ensure_ascii=False)
         except TypeError:
-            sec["group_remaining"] = json.dumps({}, ensure_ascii=False)
+            self.roll_call_config.group_remaining = json.dumps({}, ensure_ascii=False)
         try:
-            sec["group_last"] = json.dumps(last_payload, ensure_ascii=False)
+            self.roll_call_config.group_last = json.dumps(last_payload, ensure_ascii=False)
         except TypeError:
-            sec["group_last"] = json.dumps({}, ensure_ascii=False)
+            self.roll_call_config.group_last = json.dumps({}, ensure_ascii=False)
         try:
             global_drawn_payload = sorted(int(idx) for idx in self._global_drawn_students)
-            sec["global_drawn"] = json.dumps(global_drawn_payload, ensure_ascii=False)
+            self.roll_call_config.global_drawn = json.dumps(global_drawn_payload, ensure_ascii=False)
         except TypeError:
-            sec["global_drawn"] = json.dumps([], ensure_ascii=False)
-        settings["RollCallTimer"] = sec
+            self.roll_call_config.global_drawn = json.dumps([], ensure_ascii=False)
+        settings = self.settings_manager.load_settings()
+        settings["RollCallTimer"] = self.roll_call_config.to_mapping()
         self._queue_settings_save(settings)
 
 
@@ -14376,8 +14646,8 @@ class LauncherWindow(QWidget):
             if not PANDAS_AVAILABLE or not OPENPYXL_AVAILABLE:
                 QMessageBox.warning(self, "提示", "未安装 pandas/openpyxl，点名功能不可用。")
                 return
-            settings = self.settings_manager.load_settings().get("RollCallTimer", {})
-            initial_mode = settings.get("mode", "roll_call")
+            config = self.settings_manager.get_roll_call_settings()
+            initial_mode = config.mode
             defer_prompt = initial_mode == "timer"
             if self.student_workbook is None and not defer_prompt:
                 workbook = load_student_data(self)
