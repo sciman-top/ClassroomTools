@@ -1531,9 +1531,7 @@ class PasswordPromptDialog(QDialog):
         self.error_label = QLabel("", self)
         self.error_label.setWordWrap(True)
         self.error_label.setObjectName("passwordPromptErrorLabel")
-        self.error_label.setStyleSheet(
-            "#passwordPromptErrorLabel { color: #d93025; font-size: 12px; margin-top: 4px; }"
-        )
+        STYLE_MANAGER.apply_error_style(self.error_label)
         self.error_label.hide()
         layout.addWidget(self.error_label)
 
@@ -1635,9 +1633,7 @@ class PasswordSetupDialog(QDialog):
         self.error_label = QLabel("", self)
         self.error_label.setWordWrap(True)
         self.error_label.setObjectName("passwordSetupErrorLabel")
-        self.error_label.setStyleSheet(
-            "#passwordSetupErrorLabel { color: #d93025; font-size: 12px; margin-top: 4px; }"
-        )
+        STYLE_MANAGER.apply_error_style(self.error_label)
         self.error_label.hide()
         layout.addWidget(self.error_label)
 
@@ -1725,6 +1721,33 @@ def recommended_control_height(font: QFont, *, extra: int = 12, minimum: int = 3
     line_height = metrics.height()
     base_height = max(text_height, line_height)
     return max(minimum, int(math.ceil(base_height + extra)))
+
+
+@dataclass(frozen=True)
+class StyleManager:
+    """集中管理通用样式，避免分散的硬编码。"""
+
+    error_label: str = (
+        "color: #d93025; font-size: 12px; margin-top: 4px;"
+    )
+    description_label: str = "color: #5f6368; font-size: 12px;"
+
+    def apply_error_style(self, widget: QWidget) -> None:
+        """Apply the shared error label stylesheet to *widget* safely."""
+
+        try:
+            widget.setStyleSheet(self.error_label)
+        except Exception:
+            logger.debug("apply_error_style failed", exc_info=True)
+
+    def apply_description_style(self, widget: QWidget) -> None:
+        try:
+            widget.setStyleSheet(self.description_label)
+        except Exception:
+            logger.debug("apply_description_style failed", exc_info=True)
+
+
+STYLE_MANAGER = StyleManager()
 
 
 class ButtonStyles:
@@ -2868,7 +2891,7 @@ class PenSettingsDialog(_EnsureOnScreenMixin, QDialog):
 
         self.style_description = QLabel("", self)
         self.style_description.setWordWrap(True)
-        self.style_description.setStyleSheet("color: #5f6368; font-size: 12px;")
+        STYLE_MANAGER.apply_description_style(self.style_description)
         layout.addWidget(self.style_description)
 
         size_layout = QHBoxLayout()
@@ -5264,6 +5287,16 @@ class _PresentationForwarder(_PresentationWindowMixin):
     def _overlay_widget(self) -> Optional[QWidget]:
         return self.overlay
 
+    def _is_hwnd_valid(self, hwnd: int) -> bool:
+        """Return True if *hwnd* looks like a usable window handle."""
+
+        if hwnd == 0 or _USER32 is None:
+            return False
+        try:
+            return bool(_USER32.IsWindow(wintypes.HWND(hwnd)))
+        except Exception:
+            return False
+
     _SMTO_ABORTIFHUNG = 0x0002
     _MAX_CHILD_FORWARDS = 32
     _INPUT_KEYBOARD = 1
@@ -5385,6 +5418,8 @@ class _PresentationForwarder(_PresentationWindowMixin):
         return _user32_window_class_name(hwnd)
 
     def _is_wps_slideshow_window(self, hwnd: int) -> bool:
+        if not self._is_hwnd_valid(hwnd):
+            return False
         class_name = self._window_class_name(hwnd)
         if self._is_wps_slideshow_class(class_name):
             return True
@@ -5395,7 +5430,7 @@ class _PresentationForwarder(_PresentationWindowMixin):
         return False
 
     def _is_ms_slideshow_window(self, hwnd: int) -> bool:
-        if hwnd == 0:
+        if not self._is_hwnd_valid(hwnd):
             return False
         if self._is_wps_slideshow_window(hwnd):
             return False
@@ -5408,7 +5443,7 @@ class _PresentationForwarder(_PresentationWindowMixin):
         return "powerpnt" in process_name
 
     def _is_word_window(self, hwnd: int) -> bool:
-        if hwnd == 0:
+        if not self._is_hwnd_valid(hwnd):
             return False
         class_name = self._window_class_name(hwnd)
         top_level = self._top_level_hwnd(hwnd)
@@ -5830,7 +5865,7 @@ class _PresentationForwarder(_PresentationWindowMixin):
                         pass
 
     def _activate_window_for_input(self, hwnd: int) -> bool:
-        if _USER32 is None or hwnd == 0:
+        if not self._is_hwnd_valid(hwnd):
             return False
         if self._is_wps_slideshow_window(hwnd):
             return True
@@ -5951,7 +5986,7 @@ class _PresentationForwarder(_PresentationWindowMixin):
         return False
 
     def _locate_word_content_window(self, hwnd: int) -> Optional[int]:
-        if win32gui is None or hwnd == 0:
+        if win32gui is None or not self._is_hwnd_valid(hwnd):
             return None
         handles: List[int] = []
         top_hwnd = self._top_level_hwnd(hwnd)
@@ -5999,7 +6034,7 @@ class _PresentationForwarder(_PresentationWindowMixin):
         return None
 
     def _word_host_chain(self, hwnd: int) -> Tuple[int, ...]:
-        if win32gui is None or hwnd == 0:
+        if win32gui is None or not self._is_hwnd_valid(hwnd):
             return ()
         chain: List[int] = []
         seen: Set[int] = set()
@@ -6029,7 +6064,7 @@ class _PresentationForwarder(_PresentationWindowMixin):
         return tuple(chain)
 
     def _normalize_presentation_target(self, hwnd: int) -> Optional[int]:
-        if hwnd == 0:
+        if not self._is_hwnd_valid(hwnd):
             return None
         word_hwnd = self._locate_word_content_window(hwnd)
         if word_hwnd and self._is_target_window_valid(word_hwnd):
@@ -6187,6 +6222,8 @@ class _PresentationForwarder(_PresentationWindowMixin):
         return l_param & 0xFFFFFFFF
 
     def _deliver_key_message(self, hwnd: int, message: int, vk_code: int, l_param: int) -> bool:
+        if not self._is_hwnd_valid(hwnd):
+            return False
         delivered = False
         if win32api is not None:
             try:
@@ -6213,7 +6250,7 @@ class _PresentationForwarder(_PresentationWindowMixin):
         return bool(sent)
 
     def _deliver_mouse_wheel(self, hwnd: int, w_param: int, l_param: int) -> bool:
-        if hwnd == 0:
+        if not self._is_hwnd_valid(hwnd):
             return False
         delivered = False
         if win32api is not None and win32con is not None:
