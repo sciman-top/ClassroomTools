@@ -5411,13 +5411,16 @@ class _PresentationForwarder(_PresentationWindowMixin):
         if hwnd == 0:
             return False
         class_name = self._window_class_name(hwnd)
+        top_level = self._top_level_hwnd(hwnd)
+        process_name = self._window_process_name(top_level or hwnd)
+        if process_name and process_name.startswith("wpp"):
+            return False
         if class_name in self._WORD_CONTENT_CLASSES:
             return True
         if class_name in self._WORD_WINDOW_CLASSES or class_name in self._WORD_HOST_CLASSES:
             return True
         if class_name and class_name.startswith("_ww"):
             return True
-        process_name = self._window_process_name(self._top_level_hwnd(hwnd))
         if not process_name:
             return False
         return "winword" in process_name or process_name.startswith("wps")
@@ -5541,9 +5544,13 @@ class _PresentationForwarder(_PresentationWindowMixin):
                     delivered = True
                     if update_cache:
                         self._last_target_hwnd = target
+                    if is_wps_target:
+                        return True
                     break
             if not delivered and focus_ok:
                 delivered = self._deliver_mouse_wheel(target, w_param, l_param)
+                if delivered and is_wps_target:
+                    return True
         if not delivered:
             self.clear_cached_target()
         if logger.isEnabledFor(logging.DEBUG):
@@ -5963,30 +5970,32 @@ class _PresentationForwarder(_PresentationWindowMixin):
             return None
         seen: Set[int] = set(handles)
         buffer = self._child_buffer
-        for root in roots:
-            queue: deque[int] = deque([root])
-            while queue:
-                parent = queue.popleft()
-                buffer.clear()
 
-                def _collector(child_hwnd: int, acc: List[int]) -> bool:
-                    if child_hwnd in seen:
-                        return True
-                    seen.add(child_hwnd)
-                    acc.append(child_hwnd)
+        def _collect_children(parent: int) -> Iterable[int]:
+            buffer.clear()
+
+            def _collector(child_hwnd: int, acc: List[int]) -> bool:
+                if child_hwnd in seen:
                     return True
+                seen.add(child_hwnd)
+                acc.append(child_hwnd)
+                return True
 
-                try:
-                    win32gui.EnumChildWindows(parent, _collector, buffer)
-                except Exception:
-                    continue
-                for child in list(buffer):
-                    class_name = self._window_class_name(child)
-                    if self._is_word_content_class(class_name):
-                        if self._is_target_window_valid(child):
-                            return child
-                    if self._is_word_host_class(class_name) or self._is_word_like_class(class_name):
-                        queue.append(child)
+            try:
+                win32gui.EnumChildWindows(parent, _collector, buffer)
+            except Exception:
+                return ()
+            return tuple(buffer)
+
+        queue: deque[int] = deque(roots)
+        while queue:
+            parent = queue.popleft()
+            for child in _collect_children(parent):
+                class_name = self._window_class_name(child)
+                if self._is_word_content_class(class_name):
+                    if self._is_target_window_valid(child):
+                        return child
+                queue.append(child)
         return None
 
     def _word_host_chain(self, hwnd: int) -> Tuple[int, ...]:
@@ -6036,7 +6045,9 @@ class _PresentationForwarder(_PresentationWindowMixin):
     def _target_priority(self, hwnd: int, *, base: int) -> int:
         score = base
         class_name = self._window_class_name(hwnd)
-        if self._is_slideshow_class(class_name):
+        if self._is_wps_slideshow_window(hwnd) or self._is_ms_slideshow_window(hwnd):
+            score += 10000
+        elif self._is_slideshow_class(class_name):
             score += 520
         elif class_name in self._KNOWN_PRESENTATION_CLASSES:
             score += 300
@@ -8853,6 +8864,19 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                     pass
             if hasattr(self, "_last_target_hwnd"):
                 self._last_target_hwnd = None
+            try:
+                QTimer.singleShot(50, lambda: self._resolve_control_target())
+            except Exception:
+                try:
+                    self._resolve_control_target()
+                except Exception:
+                    pass
+            else:
+                if forwarder is not None:
+                    try:
+                        QTimer.singleShot(50, lambda: forwarder.get_presentation_target())
+                    except Exception:
+                        pass
         if not resolved.get("wps_ppt"):
             self._cancel_wps_slideshow_binding_retry()
         if resolved.get("wps_ppt") and not parse_bool(previous_flags.get("wps_ppt"), True):
