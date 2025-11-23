@@ -2242,6 +2242,10 @@ class PenStyleConfig:
 
 
 _DEFAULT_PEN_STYLE = PenStyle.FOUNTAIN
+# Backward compatibility: some code paths still reference the older name without
+# a leading underscore. Keep the public alias so type evaluations during module
+# import don't raise NameError.
+DEFAULT_PEN_STYLE = _DEFAULT_PEN_STYLE
 
 
 PEN_STYLE_CONFIGS: Dict[PenStyle, PenStyleConfig] = {
@@ -8069,7 +8073,17 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             release = forwarder._deliver_key_message(hwnd, win32con.WM_KEYUP, vk_code, up_param)
         except Exception:
             return False
-        if press and release:
+        if press:
+            if not release and _USER32 is not None:
+                try:
+                    scan_code = _USER32.MapVirtualKeyW(vk_code, 0) if hasattr(_USER32, "MapVirtualKeyW") else 0
+                except Exception:
+                    scan_code = 0
+                try:
+                    flags = KEYEVENTF_EXTENDEDKEY if vk_code in _NAVIGATION_EXTENDED_KEYS else 0
+                    _USER32.keybd_event(vk_code, scan_code, flags | KEYEVENTF_KEYUP, 0)
+                except Exception:
+                    pass
             try:
                 forwarder._last_target_hwnd = hwnd
             except Exception:
