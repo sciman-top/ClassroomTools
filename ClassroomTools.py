@@ -6,6 +6,7 @@ import configparser
 import contextlib
 import ctypes
 from ctypes import wintypes
+import filecmp
 import importlib
 import io
 import json
@@ -27,7 +28,7 @@ import functools
 from collections import OrderedDict, deque
 from functools import singledispatch
 from queue import Empty, Queue
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import (
     TYPE_CHECKING,
@@ -226,6 +227,7 @@ def parse_bool(value: Any, default: bool = False) -> bool:
     return bool(result)
 
 
+@functools.lru_cache(maxsize=1)
 def _preferred_app_directory() -> str:
     """Return the user-specific data directory without creating it."""
 
@@ -482,21 +484,24 @@ class _StudentResourcePaths:
 
 @functools.lru_cache(maxsize=1)
 def _resolve_student_resource_paths() -> _StudentResourcePaths:
+    module_plain = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "students.xlsx"))
     legacy_plain = os.path.abspath("students.xlsx")
     plain_group = _resolve_writable_resource(
         "students.xlsx",
         fallback_name="students.xlsx",
-        extra_candidates=(legacy_plain,),
+        extra_candidates=(module_plain, legacy_plain),
         is_dir=False,
         copy_from_candidates=True,
+        prefer_extra_candidates=True,
     )
 
     preferred_encrypted = os.path.join(os.path.dirname(plain_group.primary), "students.xlsx.enc")
+    module_encrypted = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "students.xlsx.enc"))
     legacy_encrypted = os.path.abspath("students.xlsx.enc")
     encrypted_group = _resolve_writable_resource(
         "students.xlsx.enc",
         fallback_name="students.xlsx.enc",
-        extra_candidates=(preferred_encrypted, legacy_encrypted),
+        extra_candidates=(preferred_encrypted, module_encrypted, legacy_encrypted),
         is_dir=False,
         copy_from_candidates=True,
         prefer_extra_candidates=True,
@@ -513,16 +518,46 @@ def _resolve_student_resource_paths() -> _StudentResourcePaths:
 _STUDENT_RESOURCES = _resolve_student_resource_paths()
 
 
+def _cleanup_student_candidates(keep_plain: Optional[str], keep_encrypted: Optional[str]) -> None:
+    """Remove duplicated student files in alternative candidate locations."""
+
+    def _is_duplicate(path: str, keep: Optional[str]) -> bool:
+        if not path or not keep:
+            return False
+        if not (os.path.exists(path) and os.path.exists(keep)):
+            return False
+        try:
+            if os.path.samefile(path, keep):
+                return False
+        except Exception:
+            pass
+        with contextlib.suppress(Exception):
+            if filecmp.cmp(path, keep, shallow=False):
+                return True
+        return False
+
+    for path in _STUDENT_RESOURCES.plain_candidates:
+        if _is_duplicate(path, keep_plain):
+            with contextlib.suppress(Exception):
+                os.remove(path)
+    for path in _STUDENT_RESOURCES.encrypted_candidates:
+        if _is_duplicate(path, keep_encrypted):
+            with contextlib.suppress(Exception):
+                os.remove(path)
+
+
 def _determine_student_photo_roots() -> Tuple[str, List[str]]:
     """Select the most appropriate student photo root and provide the fallback list."""
 
+    module_dir = os.path.dirname(os.path.abspath(__file__))
     group = _resolve_writable_resource(
         "student_photos",
         fallback_name="student_photos",
         is_dir=True,
-        extra_candidates=(os.path.abspath("student_photos"),),
+        extra_candidates=(os.path.join(module_dir, "student_photos"), os.path.abspath("student_photos")),
         ensure_primary_exists=True,
         copy_from_candidates=False,
+        prefer_extra_candidates=True,
     )
     return group.primary, list(group.candidates)
 
@@ -682,6 +717,8 @@ def _user32_focus_window(hwnd: int) -> bool:
 
 from PyQt6.QtCore import (
     QByteArray,
+    QMutex,
+    QMutexLocker,
     QPoint,
     QPointF,
     QRect,
@@ -693,6 +730,8 @@ from PyQt6.QtCore import (
     pyqtSignal,
     QObject,
     QUrl,
+    QRunnable,
+    QThreadPool,
 )
 from PyQt6.QtGui import (
     QBrush,
@@ -881,6 +920,11 @@ if TYPE_CHECKING:
 else:  # pragma: no cover - runtime fallback for typing
     PandasDataFrame = Any  # type: ignore[misc, assignment]
 
+# 统一学生名单使用的列顺序，避免各处硬编码。
+DEFAULT_STUDENT_COLUMNS: list[str] = ["学号", "姓名", "分组", "成绩"]
+# 规范化后的空表模板，避免重复构造；每次取用时复制以保证不可变。
+_EMPTY_STUDENT_TEMPLATE: Optional["PandasDataFrame"] = None
+
 if sys.platform == "win32":
     try:
         import winreg
@@ -904,6 +948,12 @@ def _set_session_student_encryption(encrypted: bool, password: Optional[str]) ->
 def _get_session_student_encryption() -> tuple[bool, Optional[str]]:
     return _SESSION_STUDENT_FILE_ENCRYPTED, _SESSION_STUDENT_PASSWORD
 
+
+def _update_encryption_state(encrypted: bool, password: Optional[str]) -> None:
+    """Cache student encryption status for this session."""
+
+    password_value = password if encrypted else None
+    _set_session_student_encryption(encrypted, password_value)
 
 # ---------- 缓存 ----------
 _SPEECH_ENV_CACHE: tuple[float, str, List[str]] = (0.0, "", [])
@@ -1053,6 +1103,107 @@ def dedupe_strings(values: List[str]) -> List[str]:
         unique.append(normalized)
     return unique
 
+
+def _new_student_dataframe() -> Optional["PandasDataFrame"]:
+    """生成一份空白的学生名单 DataFrame，保持列顺序一致。"""
+
+    if not (PANDAS_READY and pd is not None):
+        return None
+    try:
+        return _empty_student_dataframe().copy()
+    except Exception:
+        try:
+            return pd.DataFrame(columns=DEFAULT_STUDENT_COLUMNS)
+        except Exception:
+            return None
+
+
+@dataclass(frozen=True)
+class MappingReader:
+    """Lightweight helper to read typed values from a mapping with defaults."""
+
+    data: Mapping[str, Any]
+    defaults: Mapping[str, Any]
+
+    def _raw(self, key: str, fallback: Any) -> Any:
+        if key in self.data:
+            return self.data[key]
+        if key in self.defaults:
+            return self.defaults[key]
+        return fallback
+
+    def _raw_default(self, key: str, fallback: Any) -> Any:
+        if key in self.defaults:
+            return self.defaults[key]
+        return fallback
+
+    def get_str(self, key: str, fallback: str) -> str:
+        raw = self._raw(key, fallback)
+        try:
+            return str(raw)
+        except Exception:
+            return fallback
+
+    def get_bool(self, key: str, fallback: bool) -> bool:
+        raw = self._raw(key, fallback)
+        return parse_bool(raw, fallback)
+
+    def get_int(
+        self,
+        key: str,
+        fallback: int,
+        *,
+        min_value: Optional[int] = None,
+        max_value: Optional[int] = None,
+    ) -> int:
+        raw = self._raw(key, fallback)
+        try:
+            value = int(str(raw))
+        except (TypeError, ValueError):
+            value = fallback
+        if min_value is not None:
+            value = max(min_value, value)
+        if max_value is not None:
+            value = min(max_value, value)
+        return value
+
+    def get_float(
+        self,
+        key: str,
+        fallback: float,
+        *,
+        min_value: Optional[float] = None,
+        max_value: Optional[float] = None,
+    ) -> float:
+        raw = self._raw(key, fallback)
+        try:
+            value = float(str(raw))
+        except (TypeError, ValueError):
+            value = fallback
+        if min_value is not None:
+            value = max(min_value, value)
+        if max_value is not None:
+            value = min(max_value, value)
+        return value
+
+    def get_int_from_defaults(
+        self,
+        key: str,
+        fallback: int,
+        *,
+        min_value: Optional[int] = None,
+        max_value: Optional[int] = None,
+    ) -> int:
+        raw = self._raw_default(key, fallback)
+        try:
+            value = int(str(raw))
+        except (TypeError, ValueError):
+            value = fallback
+        if min_value is not None:
+            value = max(min_value, value)
+        if max_value is not None:
+            value = min(max_value, value)
+        return value
 
 def _compute_presentation_category(
     class_name: str,
@@ -1531,9 +1682,7 @@ class PasswordPromptDialog(QDialog):
         self.error_label = QLabel("", self)
         self.error_label.setWordWrap(True)
         self.error_label.setObjectName("passwordPromptErrorLabel")
-        self.error_label.setStyleSheet(
-            "#passwordPromptErrorLabel { color: #d93025; font-size: 12px; margin-top: 4px; }"
-        )
+        STYLE_MANAGER.apply_error_style(self.error_label)
         self.error_label.hide()
         layout.addWidget(self.error_label)
 
@@ -1635,9 +1784,7 @@ class PasswordSetupDialog(QDialog):
         self.error_label = QLabel("", self)
         self.error_label.setWordWrap(True)
         self.error_label.setObjectName("passwordSetupErrorLabel")
-        self.error_label.setStyleSheet(
-            "#passwordSetupErrorLabel { color: #d93025; font-size: 12px; margin-top: 4px; }"
-        )
+        STYLE_MANAGER.apply_error_style(self.error_label)
         self.error_label.hide()
         layout.addWidget(self.error_label)
 
@@ -1725,6 +1872,151 @@ def recommended_control_height(font: QFont, *, extra: int = 12, minimum: int = 3
     line_height = metrics.height()
     base_height = max(text_height, line_height)
     return max(minimum, int(math.ceil(base_height + extra)))
+
+
+class StyleConfig:
+    """统一管理颜色、字体与 QSS 片段，避免散落的硬编码。"""
+
+    ERROR_COLOR = "#d93025"
+    DESCRIPTION_COLOR = "#5f6368"
+    TOOLBAR_BG = "rgba(28, 29, 32, 235)"
+    TOOLBAR_BORDER = "rgba(255, 255, 255, 45)"
+    TOOLBAR_TEXT = "#f1f3f4"
+    TOOLBAR_BUTTON_BG = "rgba(60, 64, 67, 240)"
+    TOOLBAR_HOVER_BG = "rgba(138, 180, 248, 245)"
+    TOOLBAR_HOVER_BORDER = "rgba(138, 180, 248, 255)"
+    TOOLBAR_HOVER_TEXT = "#202124"
+    TOOLBAR_CHECKED_BG = "rgba(138, 180, 248, 255)"
+    TOOLBAR_CHECKED_TEXT = "#202124"
+    ERASER_BG = "rgba(241, 243, 244, 235)"
+    ERASER_TEXT = "#3c4043"
+    ERASER_BORDER = "rgba(138, 180, 248, 170)"
+    ERASER_ACTIVE_BG = "rgba(202, 225, 255, 255)"
+    ERASER_ACTIVE_BORDER = "#1a73e8"
+    ERASER_ACTIVE_TEXT = "#174ea6"
+    CLEAR_BG = "rgba(255, 236, 232, 240)"
+    CLEAR_BORDER = "rgba(255, 173, 153, 230)"
+    CLEAR_TEXT = "#a03a1e"
+    CLEAR_ACTIVE_BG = "rgba(255, 210, 204, 255)"
+    CLEAR_ACTIVE_BORDER = "rgba(255, 138, 101, 255)"
+    CLEAR_ACTIVE_TEXT = "#5f2121"
+    WHITEBOARD_ACTIVE_BG = "rgba(255, 214, 102, 240)"
+    WHITEBOARD_ACTIVE_BORDER = "rgba(251, 188, 5, 255)"
+    WHITEBOARD_ACTIVE_TEXT = "#202124"
+    PRIMARY_TEXT = "#202124"
+    TITLE_TEXT = "#202124"
+    GROUP_LABEL_TEXT = "#3c4043"
+
+    ERROR_LABEL_STYLE = f"color: {ERROR_COLOR}; font-size: 12px; margin-top: 4px;"
+    DESCRIPTION_LABEL_STYLE = f"color: {DESCRIPTION_COLOR}; font-size: 12px;"
+    MENU_BUTTON_STYLE = "font-size: 18px; padding-bottom: 6px;"
+
+    @staticmethod
+    def floating_toolbar_style() -> str:
+        return (
+            """
+            #container {{
+                background-color: {bg};
+                border-radius: 10px;
+                border: 1px solid {border};
+            }}
+            QPushButton {{
+                color: {text};
+                background: {button_bg};
+                border: 1px solid {border};
+                border-radius: 6px;
+                padding: 3px;
+                min-width: 28px;
+                min-height: 28px;
+            }}
+            QPushButton:hover {{
+                background: {hover_bg};
+                border-color: {hover_border};
+                color: {hover_text};
+            }}
+            QPushButton:checked {{
+                background: {checked_bg};
+                color: {checked_text};
+            }}
+            QPushButton#eraserButton {{
+                background: {eraser_bg};
+                color: {eraser_text};
+                border-color: {eraser_border};
+            }}
+            QPushButton#eraserButton:hover,
+            QPushButton#eraserButton:checked {{
+                background: {eraser_active_bg};
+                border-color: {eraser_active_border};
+                color: {eraser_active_text};
+            }}
+            QPushButton#clearButton {{
+                background: {clear_bg};
+                color: {clear_text};
+                border-color: {clear_border};
+            }}
+            QPushButton#clearButton:hover,
+            QPushButton#clearButton:checked {{
+                background: {clear_active_bg};
+                border-color: {clear_active_border};
+                color: {clear_active_text};
+            }}
+            #whiteboardButtonActive {{
+                background: {whiteboard_bg};
+                border-color: {whiteboard_border};
+                color: {whiteboard_text};
+            }}
+            """
+        ).format(
+            bg=StyleConfig.TOOLBAR_BG,
+            border=StyleConfig.TOOLBAR_BORDER,
+            text=StyleConfig.TOOLBAR_TEXT,
+            button_bg=StyleConfig.TOOLBAR_BUTTON_BG,
+            hover_bg=StyleConfig.TOOLBAR_HOVER_BG,
+            hover_border=StyleConfig.TOOLBAR_HOVER_BORDER,
+            hover_text=StyleConfig.TOOLBAR_HOVER_TEXT,
+            checked_bg=StyleConfig.TOOLBAR_CHECKED_BG,
+            checked_text=StyleConfig.TOOLBAR_CHECKED_TEXT,
+            eraser_bg=StyleConfig.ERASER_BG,
+            eraser_text=StyleConfig.ERASER_TEXT,
+            eraser_border=StyleConfig.ERASER_BORDER,
+            eraser_active_bg=StyleConfig.ERASER_ACTIVE_BG,
+            eraser_active_border=StyleConfig.ERASER_ACTIVE_BORDER,
+            eraser_active_text=StyleConfig.ERASER_ACTIVE_TEXT,
+            clear_bg=StyleConfig.CLEAR_BG,
+            clear_text=StyleConfig.CLEAR_TEXT,
+            clear_border=StyleConfig.CLEAR_BORDER,
+            clear_active_bg=StyleConfig.CLEAR_ACTIVE_BG,
+            clear_active_border=StyleConfig.CLEAR_ACTIVE_BORDER,
+            clear_active_text=StyleConfig.CLEAR_ACTIVE_TEXT,
+            whiteboard_bg=StyleConfig.WHITEBOARD_ACTIVE_BG,
+            whiteboard_border=StyleConfig.WHITEBOARD_ACTIVE_BORDER,
+            whiteboard_text=StyleConfig.WHITEBOARD_ACTIVE_TEXT,
+        )
+
+
+@dataclass(frozen=True)
+class StyleManager:
+    """集中管理通用样式，避免分散的硬编码。"""
+
+    error_label: str = StyleConfig.ERROR_LABEL_STYLE
+    description_label: str = StyleConfig.DESCRIPTION_LABEL_STYLE
+
+    def apply_error_style(self, widget: QWidget) -> None:
+        """Apply the shared error label stylesheet to *widget* safely."""
+
+        try:
+            widget.setStyleSheet(self.error_label)
+        except Exception:
+            logger.debug("apply_error_style failed", exc_info=True)
+
+    def apply_description_style(self, widget: QWidget) -> None:
+        try:
+            widget.setStyleSheet(self.description_label)
+        except Exception:
+            logger.debug("apply_description_style failed", exc_info=True)
+
+
+STYLE_MANAGER = StyleManager()
 
 
 class ButtonStyles:
@@ -1872,8 +2164,8 @@ class SettingsManager:
                 "minimized": "False",
                 "bubble_x": "120",
                 "bubble_y": "120",
+                "auto_exit_seconds": "2400",
             },
-            "Startup": {"autostart_enabled": "False"},
             "RollCallTimer": {
                 "geometry": "480x280+180+180",
                 "show_id": "True",
@@ -1946,6 +2238,28 @@ class SettingsManager:
     def get_defaults(self) -> Dict[str, Dict[str, str]]:
         return {section: values.copy() for section, values in self.defaults.items()}
 
+    def get_paint_settings(self) -> PaintConfig:
+        settings = self.load_settings()
+        section = settings.get("Paint", {})
+        defaults = self.defaults.get("Paint", {})
+        return PaintConfig.from_mapping(section, defaults)
+
+    def update_paint_settings(self, config: PaintConfig) -> None:
+        settings = self.load_settings()
+        settings["Paint"] = config.to_mapping()
+        self.save_settings(settings)
+
+    def get_roll_call_settings(self) -> RollCallTimerConfig:
+        settings = self.load_settings()
+        section = settings.get("RollCallTimer", {})
+        defaults = self.defaults.get("RollCallTimer", {})
+        return RollCallTimerConfig.from_mapping(section, defaults)
+
+    def update_roll_call_settings(self, config: RollCallTimerConfig) -> None:
+        settings = self.load_settings()
+        settings["RollCallTimer"] = config.to_mapping()
+        self.save_settings(settings)
+
     def load_settings(self) -> Dict[str, Dict[str, str]]:
         if self._settings_cache is not None:
             return {section: values.copy() for section, values in self._settings_cache.items()}
@@ -1970,7 +2284,13 @@ class SettingsManager:
         if directory and not os.path.exists(directory):
             os.makedirs(directory, exist_ok=True)
         target_dir = directory or os.getcwd()
-        fd, tmp_path = tempfile.mkstemp(prefix="ctools_", suffix=".tmp", dir=target_dir)
+        try:
+            fd, tmp_path = tempfile.mkstemp(prefix="ctools_", suffix=".tmp", dir=target_dir)
+        except Exception as exc:
+            logger.warning("Failed to create temp file for settings write %s: %s", path, exc)
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(data)
+            return
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 handle.write(data)
@@ -2006,34 +2326,22 @@ class SettingsManager:
 
         self._settings_cache = {section: values.copy() for section, values in snapshot.items()}
 
-    def get_launcher_state(self) -> Tuple["LauncherSettings", "StartupSettings"]:
-        """Return launcher geometry and startup flags in a single pass."""
+    def get_launcher_state(self) -> "LauncherSettings":
+        """Return launcher geometry and timing flags in a single pass."""
 
         settings = self.load_settings()
         launcher_defaults = self.defaults.get("Launcher", {})
-        startup_defaults = self.defaults.get("Startup", {})
         launcher_section = settings.get("Launcher", {})
-        startup_section = settings.get("Startup", {})
         launcher_settings = LauncherSettings.from_mapping(launcher_section, launcher_defaults)
-        startup_settings = StartupSettings.from_mapping(startup_section, startup_defaults)
-        return launcher_settings, startup_settings
+        return launcher_settings
 
-    def update_launcher_settings(
-        self,
-        launcher_settings: "LauncherSettings",
-        startup_settings: Optional["StartupSettings"] = None,
-    ) -> None:
-        """Persist the launcher configuration alongside optional startup flags."""
+    def update_launcher_settings(self, launcher_settings: "LauncherSettings") -> None:
+        """Persist the launcher configuration."""
 
         settings = self.load_settings()
         launcher_section = dict(settings.get("Launcher", {}))
         launcher_section.update(launcher_settings.to_mapping())
         settings["Launcher"] = launcher_section
-
-        if startup_settings is not None:
-            startup_section = dict(settings.get("Startup", {}))
-            startup_section.update(startup_settings.to_mapping())
-            settings["Startup"] = startup_section
 
         self.save_settings(settings)
 
@@ -2052,44 +2360,66 @@ class SettingsManager:
             self.save_settings(settings)
 
 
+class _IOWorkerSignals(QObject):
+    """通用的线程任务信号定义。"""
+
+    finished = pyqtSignal(object)
+    error = pyqtSignal(str, object)
+
+
+class _IOWorker(QRunnable):
+    """在后台线程中执行 I/O 任务，避免阻塞 UI。"""
+
+    def __init__(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
+        super().__init__()
+        self.fn = fn
+        self.args = args
+        self.kwargs = kwargs
+        self.signals = _IOWorkerSignals()
+
+    def run(self) -> None:  # pragma: no cover - 线程任务
+        try:
+            result = self.fn(*self.args, **self.kwargs)
+        except Exception as exc:  # noqa: BLE001 - 顶层捕获以防线程崩溃
+            traceback.print_exc()
+            try:
+                self.signals.error.emit(str(exc), exc)
+            except Exception:
+                pass
+            return
+        try:
+            self.signals.finished.emit(result)
+        except Exception:
+            pass
+
+
 @dataclass(frozen=True)
 class LauncherSettings:
     position: QPoint
     bubble_position: QPoint
     minimized: bool
+    auto_exit_seconds: int
 
     @staticmethod
     def from_mapping(
         mapping: Mapping[str, str],
         defaults: Mapping[str, str],
     ) -> "LauncherSettings":
-        def _to_int(key: str, fallback: int) -> int:
-            raw_value = mapping.get(key, defaults.get(key, str(fallback)))
-            try:
-                return int(str(raw_value))
-            except (TypeError, ValueError):
-                return fallback
+        reader = MappingReader(mapping, defaults)
 
-        def _int_from_defaults(key: str, fallback: int) -> int:
-            raw_default = defaults.get(key)
-            if raw_default is None:
-                return fallback
-            try:
-                return int(str(raw_default))
-            except (TypeError, ValueError):
-                return fallback
+        default_x = reader.get_int_from_defaults("x", 120)
+        default_y = reader.get_int_from_defaults("y", 120)
+        x = reader.get_int("x", default_x)
+        y = reader.get_int("y", default_y)
 
-        default_x = _int_from_defaults("x", 120)
-        default_y = _int_from_defaults("y", 120)
-        x = _to_int("x", default_x)
-        y = _to_int("y", default_y)
-        bubble_default_x = _int_from_defaults("bubble_x", x)
-        bubble_default_y = _int_from_defaults("bubble_y", y)
-        bubble_x = _to_int("bubble_x", bubble_default_x)
-        bubble_y = _to_int("bubble_y", bubble_default_y)
-        minimized_raw = mapping.get("minimized", defaults.get("minimized", "False"))
-        minimized = str_to_bool(str(minimized_raw), False)
-        return LauncherSettings(QPoint(x, y), QPoint(bubble_x, bubble_y), minimized)
+        bubble_default_x = reader.get_int_from_defaults("bubble_x", x)
+        bubble_default_y = reader.get_int_from_defaults("bubble_y", y)
+        bubble_x = reader.get_int("bubble_x", bubble_default_x)
+        bubble_y = reader.get_int("bubble_y", bubble_default_y)
+
+        minimized = reader.get_bool("minimized", False)
+        auto_exit_seconds = reader.get_int("auto_exit_seconds", 0, min_value=0)
+        return LauncherSettings(QPoint(x, y), QPoint(bubble_x, bubble_y), minimized, auto_exit_seconds)
 
     def to_mapping(self) -> Dict[str, str]:
         return {
@@ -2098,27 +2428,11 @@ class LauncherSettings:
             "bubble_x": str(self.bubble_position.x()),
             "bubble_y": str(self.bubble_position.y()),
             "minimized": bool_to_str(self.minimized),
+            "auto_exit_seconds": str(self.auto_exit_seconds),
         }
 
 
-@dataclass(frozen=True)
-class StartupSettings:
-    autostart_enabled: bool
-
-    @staticmethod
-    def from_mapping(
-        mapping: Mapping[str, str],
-        defaults: Mapping[str, str],
-    ) -> "StartupSettings":
-        raw_value = mapping.get("autostart_enabled", defaults.get("autostart_enabled", "False"))
-        enabled = str_to_bool(str(raw_value), False)
-        return StartupSettings(enabled)
-
-    def to_mapping(self) -> Dict[str, str]:
-        return {"autostart_enabled": bool_to_str(self.autostart_enabled)}
-
-
-# ---------- 画笔风格 ----------
+# ---------- ���ʷ�� ----------
 class PenStyle(Enum):
     CHALK = "chalk"
     HIGHLIGHTER = "highlighter"
@@ -2182,6 +2496,174 @@ class PenStyleConfig:
 
 
 _DEFAULT_PEN_STYLE = PenStyle.FOUNTAIN
+# Backward compatibility: some code paths still reference the older name without
+# a leading underscore. Keep the public alias so type evaluations during module
+# import don't raise NameError.
+DEFAULT_PEN_STYLE = _DEFAULT_PEN_STYLE
+
+
+@dataclass
+class PaintConfig:
+    """Typed configuration for overlay and paint tools."""
+
+    x: int = 260
+    y: int = 260
+    brush_size: float = 12.0
+    brush_base_size: float = 12.0
+    brush_color: str = "#ff0000"
+    brush_style: PenStyle = _DEFAULT_PEN_STYLE
+    control_ms_ppt: bool = True
+    control_ms_word: bool = False
+    control_wps_ppt: bool = True
+    control_wps_word: bool = False
+    base_size_overrides: Dict[str, float] = field(default_factory=dict)
+    opacity_overrides: Dict[str, int] = field(default_factory=dict)
+
+    @classmethod
+    def from_mapping(cls, mapping: Mapping[str, str], defaults: Mapping[str, str]) -> "PaintConfig":
+        reader = MappingReader(mapping, defaults)
+
+        style_raw = reader.get_str("brush_style", _DEFAULT_PEN_STYLE.value)
+        style = _DEFAULT_PEN_STYLE
+        if isinstance(style_raw, str):
+            with contextlib.suppress(Exception):
+                style = PenStyle(style_raw)
+        base_sizes: Dict[str, float] = {}
+        opacity_overrides: Dict[str, int] = {}
+        for key, _value in mapping.items():
+            if key.endswith("_base_size"):
+                style_name = key[: -len("_base_size")]
+                fallback_base = get_pen_style_config(_DEFAULT_PEN_STYLE).default_base
+                with contextlib.suppress(Exception):
+                    fallback_base = get_pen_style_config(PenStyle(style_name)).default_base
+                base_sizes[key] = reader.get_float(key, float(fallback_base))
+            if key.endswith("_opacity"):
+                opacity_overrides[key] = int(reader.get_float(key, 0.0))
+        return cls(
+            x=reader.get_int("x", 260),
+            y=reader.get_int("y", 260),
+            brush_size=reader.get_float("brush_size", 12.0),
+            brush_base_size=reader.get_float("brush_base_size", 12.0),
+            brush_color=reader.get_str("brush_color", "#ff0000"),
+            brush_style=style,
+            control_ms_ppt=reader.get_bool("control_ms_ppt", True),
+            control_ms_word=reader.get_bool("control_ms_word", False),
+            control_wps_ppt=reader.get_bool("control_wps_ppt", True),
+            control_wps_word=reader.get_bool("control_wps_word", False),
+            base_size_overrides=base_sizes,
+            opacity_overrides=opacity_overrides,
+        )
+
+    def to_mapping(self) -> Dict[str, str]:
+        return {
+            "x": str(int(self.x)),
+            "y": str(int(self.y)),
+            "brush_size": f"{float(self.brush_size):.2f}",
+            "brush_base_size": f"{float(self.brush_base_size):.2f}",
+            "brush_color": str(self.brush_color),
+            "brush_style": self.brush_style.value,
+            "control_ms_ppt": bool_to_str(self.control_ms_ppt),
+            "control_ms_word": bool_to_str(self.control_ms_word),
+            "control_wps_ppt": bool_to_str(self.control_wps_ppt),
+            "control_wps_word": bool_to_str(self.control_wps_word),
+            **(self.base_size_overrides or {}),
+            **(self.opacity_overrides or {}),
+        }
+
+
+@dataclass
+class RollCallTimerConfig:
+    """Typed configuration for roll call and timer settings."""
+
+    geometry: str = "480x280+180+180"
+    show_id: bool = True
+    show_name: bool = True
+    show_photo: bool = False
+    photo_duration_seconds: int = 0
+    speech_enabled: bool = False
+    speech_voice_id: str = ""
+    current_group: str = "全部"
+    timer_countdown_minutes: int = 5
+    timer_countdown_seconds: int = 0
+    timer_sound_enabled: bool = True
+    mode: str = "roll_call"
+    timer_mode: str = "countdown"
+    timer_seconds_left: int = 300
+    timer_stopwatch_seconds: int = 0
+    timer_running: bool = False
+    id_font_size: int = 48
+    name_font_size: int = 60
+    timer_font_size: int = 56
+    scoreboard_order: str = "rank"
+    current_class: str = ""
+    class_states: str = ""
+    group_remaining: str = ""
+    group_last: str = ""
+    global_drawn: str = ""
+    students_encrypted: bool = False
+
+    @classmethod
+    def from_mapping(cls, mapping: Mapping[str, str], defaults: Mapping[str, str]) -> "RollCallTimerConfig":
+        reader = MappingReader(mapping, defaults)
+
+        return cls(
+            geometry=reader.get_str("geometry", "480x280+180+180"),
+            show_id=reader.get_bool("show_id", True),
+            show_name=reader.get_bool("show_name", True),
+            show_photo=reader.get_bool("show_photo", False),
+            photo_duration_seconds=reader.get_int("photo_duration_seconds", 0, min_value=0),
+            speech_enabled=reader.get_bool("speech_enabled", False),
+            speech_voice_id=reader.get_str("speech_voice_id", ""),
+            current_group=reader.get_str("current_group", "全部"),
+            timer_countdown_minutes=reader.get_int("timer_countdown_minutes", 5),
+            timer_countdown_seconds=reader.get_int("timer_countdown_seconds", 0),
+            timer_sound_enabled=reader.get_bool("timer_sound_enabled", True),
+            mode=reader.get_str("mode", "roll_call"),
+            timer_mode=reader.get_str("timer_mode", "countdown"),
+            timer_seconds_left=reader.get_int("timer_seconds_left", 300, min_value=0),
+            timer_stopwatch_seconds=reader.get_int("timer_stopwatch_seconds", 0, min_value=0),
+            timer_running=reader.get_bool("timer_running", False),
+            id_font_size=reader.get_int("id_font_size", 48),
+            name_font_size=reader.get_int("name_font_size", 60),
+            timer_font_size=reader.get_int("timer_font_size", 56),
+            scoreboard_order=reader.get_str("scoreboard_order", "rank"),
+            current_class=reader.get_str("current_class", ""),
+            class_states=reader.get_str("class_states", ""),
+            group_remaining=reader.get_str("group_remaining", ""),
+            group_last=reader.get_str("group_last", ""),
+            global_drawn=reader.get_str("global_drawn", ""),
+            students_encrypted=reader.get_bool("students_encrypted", False),
+        )
+
+    def to_mapping(self) -> Dict[str, str]:
+        return {
+            "geometry": self.geometry,
+            "show_id": bool_to_str(self.show_id),
+            "show_name": bool_to_str(self.show_name),
+            "show_photo": bool_to_str(self.show_photo),
+            "photo_duration_seconds": str(int(self.photo_duration_seconds)),
+            "speech_enabled": bool_to_str(self.speech_enabled),
+            "speech_voice_id": self.speech_voice_id,
+            "current_group": self.current_group,
+            "timer_countdown_minutes": str(int(self.timer_countdown_minutes)),
+            "timer_countdown_seconds": str(int(self.timer_countdown_seconds)),
+            "timer_sound_enabled": bool_to_str(self.timer_sound_enabled),
+            "mode": self.mode,
+            "timer_mode": self.timer_mode,
+            "timer_seconds_left": str(int(self.timer_seconds_left)),
+            "timer_stopwatch_seconds": str(int(self.timer_stopwatch_seconds)),
+            "timer_running": bool_to_str(self.timer_running),
+            "id_font_size": str(int(self.id_font_size)),
+            "name_font_size": str(int(self.name_font_size)),
+            "timer_font_size": str(int(self.timer_font_size)),
+            "scoreboard_order": self.scoreboard_order,
+            "current_class": self.current_class,
+            "class_states": self.class_states,
+            "group_remaining": self.group_remaining,
+            "group_last": self.group_last,
+            "global_drawn": self.global_drawn,
+            "students_encrypted": bool_to_str(self.students_encrypted),
+        }
 
 
 PEN_STYLE_CONFIGS: Dict[PenStyle, PenStyleConfig] = {
@@ -2662,9 +3144,11 @@ def render_pen_preview_pixmap(
     style: PenStyle,
     base_size: float,
     *,
-    size: QSize = QSize(200, 64),
+    size: Optional[QSize] = None,
     opacity_override: Optional[int] = None,
 ) -> QPixmap:
+    if size is None:
+        size = QSize(200, 64)
     width = max(60, size.width())
     height = max(36, size.height())
     pixmap = QPixmap(width, height)
@@ -2868,7 +3352,7 @@ class PenSettingsDialog(_EnsureOnScreenMixin, QDialog):
 
         self.style_description = QLabel("", self)
         self.style_description.setWordWrap(True)
-        self.style_description.setStyleSheet("color: #5f6368; font-size: 12px;")
+        STYLE_MANAGER.apply_description_style(self.style_description)
         layout.addWidget(self.style_description)
 
         size_layout = QHBoxLayout()
@@ -3326,60 +3810,7 @@ class FloatingToolbar(_EnsureOnScreenMixin, QWidget):
         self._ensure_min_height = self.height()
 
     def _build_ui(self) -> None:
-        self.setStyleSheet(
-            """
-            #container {
-                background-color: rgba(28, 29, 32, 235);
-                border-radius: 10px;
-                border: 1px solid rgba(255, 255, 255, 45);
-            }
-            QPushButton {
-                color: #f1f3f4;
-                background: rgba(60, 64, 67, 240);
-                border: 1px solid rgba(255, 255, 255, 45);
-                border-radius: 6px;
-                padding: 3px;
-                min-width: 28px;
-                min-height: 28px;
-            }
-            QPushButton:hover {
-                background: rgba(138, 180, 248, 245);
-                border-color: rgba(138, 180, 248, 255);
-                color: #202124;
-            }
-            QPushButton:checked {
-                background: rgba(138, 180, 248, 255);
-                color: #202124;
-            }
-            QPushButton#eraserButton {
-                background: rgba(241, 243, 244, 235);
-                color: #3c4043;
-                border-color: rgba(138, 180, 248, 170);
-            }
-            QPushButton#eraserButton:hover,
-            QPushButton#eraserButton:checked {
-                background: rgba(202, 225, 255, 255);
-                border-color: #1a73e8;
-                color: #174ea6;
-            }
-            QPushButton#clearButton {
-                background: rgba(255, 236, 232, 240);
-                color: #a03a1e;
-                border-color: rgba(255, 173, 153, 230);
-            }
-            QPushButton#clearButton:hover,
-            QPushButton#clearButton:checked {
-                background: rgba(255, 210, 204, 255);
-                border-color: rgba(255, 138, 101, 255);
-                color: #5f2121;
-            }
-            #whiteboardButtonActive {
-                background: rgba(255, 214, 102, 240);
-                border-color: rgba(251, 188, 5, 255);
-                color: #202124;
-            }
-            """
-        )
+        self.setStyleSheet(StyleConfig.floating_toolbar_style())
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -3477,7 +3908,7 @@ class FloatingToolbar(_EnsureOnScreenMixin, QWidget):
         self.tool_buttons.setExclusive(True)
 
         self.btn_cursor.clicked.connect(self.overlay.toggle_cursor_mode)
-        for color_hex, button in zip([c for c, _ in brush_configs], brush_buttons):
+        for color_hex, button in zip([c for c, _ in brush_configs], brush_buttons, strict=False):
             button.clicked.connect(lambda _checked, c=color_hex: self.overlay.use_brush_color(c))
         self.btn_shape.clicked.connect(self._select_shape)
         self.btn_slide_down.clicked.connect(
@@ -4122,7 +4553,18 @@ class _PresentationWindowMixin:
         return tuple(normalized)
 
     def _normalize_process_name(self, value: Any) -> str:
-        return _normalize_text_token(value, empty_on_falsy=False)
+        if value is None:
+            return ""
+        try:
+            if isinstance(value, (bytes, bytearray, memoryview)):
+                text = bytes(value).decode("utf-8", "ignore")
+            else:
+                text = str(value)
+        except Exception:
+            return ""
+        if not text:
+            return ""
+        return _casefold_cached(text)
 
     def _normalized_process_context(
         self, process_name: Any, classes: Iterable[Any]
@@ -4183,7 +4625,7 @@ class _PresentationWindowMixin:
         cache = getattr(self, "_cached_wps_predicate_delegates", None)
         if cache is None:
             cache = {}
-            setattr(self, "_cached_wps_predicate_delegates", cache)
+            self._cached_wps_predicate_delegates = cache
         return cast(
             Dict[Tuple[Any, ...], Tuple[Tuple[str, Callable[[str], bool]], ...]],
             cache,
@@ -4351,777 +4793,6 @@ class _PresentationWindowMixin:
         except Exception:
             return None
         return candidates
-
-    @classmethod
-    def _normalize_class_hint(cls, value: Any) -> str:
-        return cls._PrefixKeywordClassifier._normalize(value)
-
-    @staticmethod
-    def _resolve_debug_logger() -> Optional[Callable[..., None]]:
-        """Return a callable debug logger suitable for predicate diagnostics."""
-
-        logger_ref = globals().get("logger")
-        debug = getattr(logger_ref, "debug", None)
-        if callable(debug):
-            return debug
-
-        logging_module = globals().get("logging")
-        if logging_module is None:  # pragma: no cover - helper extraction fallback
-            import logging as logging_module  # type: ignore[import-not-found]
-
-        fallback_logger = logging_module.getLogger(__name__)
-        debug = getattr(fallback_logger, "debug", None)
-        if callable(debug):
-            return debug
-        return None
-
-    def _wps_hint_predicate_specs(self) -> Tuple["_PredicateSpec", ...]:
-        cls = _PresentationWindowMixin
-        return (
-            self._PredicateSpec(
-                "has_slideshow",
-                self._is_wps_slideshow_class,
-                self._normalized_is_wps_slideshow_class,
-                cls._is_wps_slideshow_class,
-            ),
-            self._PredicateSpec(
-                "has_wps_presentation_signature",
-                self._class_has_wps_presentation_signature,
-                self._normalized_has_wps_presentation_signature,
-                cls._class_has_wps_presentation_signature,
-            ),
-            self._PredicateSpec(
-                "has_ms_presentation_signature",
-                self._class_has_ms_presentation_signature,
-                self._normalized_has_ms_presentation_signature,
-                cls._class_has_ms_presentation_signature,
-            ),
-            self._PredicateSpec(
-                "has_writer_signature",
-                self._class_has_wps_writer_signature,
-                self._normalized_has_wps_writer_signature,
-                cls._class_has_wps_writer_signature,
-            ),
-        )
-
-    def _normalized_is_wps_slideshow_class(self, normalized: str) -> bool:
-        if not normalized:
-            return False
-        if normalized in self._WPS_SLIDESHOW_CLASSES:
-            return True
-        return normalized.startswith("kwppshow")
-
-    def _evaluate_normalized_class(
-        self,
-        class_name: Any,
-        normalized_predicate: Callable[[str], bool],
-    ) -> bool:
-        normalized = self._normalize_class_hint(class_name)
-        if not normalized:
-            return False
-        return bool(normalized_predicate(normalized))
-
-    def _is_wps_slideshow_class(self, class_name: str) -> bool:
-        return self._evaluate_normalized_class(
-            class_name, self._normalized_is_wps_slideshow_class
-        )
-
-    def _is_word_like_class(self, class_name: str) -> bool:
-        normalized = self._normalize_class_hint(class_name)
-        if not normalized:
-            return False
-        if normalized in self._WORD_WINDOW_CLASSES:
-            return True
-        if normalized in self._WORD_CONTENT_CLASSES:
-            return True
-        if normalized in self._WORD_HOST_CLASSES:
-            return True
-        if normalized.startswith("_ww"):
-            return True
-        if "word" in normalized:
-            return True
-        return self._WPS_WRITER_CLASSIFIER.has_signature(normalized)
-
-    def _class_has_wps_writer_signature(self, class_name: str) -> bool:
-        return self._WPS_WRITER_CLASSIFIER.has_signature(class_name)
-
-    def _normalized_has_wps_writer_signature(self, normalized: str) -> bool:
-        if not normalized:
-            return False
-        return self._WPS_WRITER_CLASSIFIER.has_normalized_signature(normalized)
-
-    def _normalized_has_wps_presentation_signature(self, normalized: str) -> bool:
-        if not normalized:
-            return False
-        if self._normalized_is_wps_slideshow_class(normalized):
-            return True
-        if normalized.startswith("kwpp") or "kwpp" in normalized:
-            return True
-        if normalized.startswith("wpp") and "wps" not in normalized:
-            return True
-        if normalized.startswith("wpsshow") or "wpsshow" in normalized:
-            return True
-        return False
-
-    def _class_has_wps_presentation_signature(self, class_name: str) -> bool:
-        return self._evaluate_normalized_class(
-            class_name, self._normalized_has_wps_presentation_signature
-        )
-
-    def _normalized_has_ms_presentation_signature(self, normalized: str) -> bool:
-        if not normalized:
-            return False
-        if self._normalized_has_wps_presentation_signature(normalized):
-            return False
-        if normalized in self._SLIDESHOW_PRIORITY_CLASSES:
-            return True
-        if normalized in self._SLIDESHOW_SECONDARY_CLASSES:
-            return True
-        if normalized in self._PRESENTATION_EDITOR_CLASSES:
-            if normalized.startswith("kwpp") or normalized.startswith("kwps"):
-                return False
-            if normalized.startswith("wps"):
-                return False
-            return True
-        keywords = ("ppt", "powerpnt", "powerpoint", "screenclass")
-        return any(keyword in normalized for keyword in keywords)
-
-    def _class_has_ms_presentation_signature(self, class_name: str) -> bool:
-        return self._evaluate_normalized_class(
-            class_name, self._normalized_has_ms_presentation_signature
-        )
-
-    def _normalized_class_hints(self, *classes: Any) -> Tuple[str, ...]:
-        normalized: List[str] = []
-        for value in classes:
-            hint = self._normalize_class_hint(value)
-            if hint:
-                normalized.append(hint)
-        return tuple(normalized)
-
-    def _normalize_process_name(self, value: Any) -> str:
-        if value is None:
-            return ""
-        try:
-            if isinstance(value, (bytes, bytearray, memoryview)):
-                text = bytes(value).decode("utf-8", "ignore")
-            else:
-                text = str(value)
-        except Exception:
-            return ""
-        if not text:
-            return ""
-        return _casefold_cached(text)
-
-    def _normalized_process_context(
-        self, process_name: Any, classes: Iterable[Any]
-    ) -> Tuple[str, Tuple[str, ...]]:
-        normalized_name = self._normalize_process_name(process_name)
-        normalized_classes = self._normalized_class_hints(*classes)
-        return normalized_name, normalized_classes
-
-    def _empty_wps_process_hints(
-        self, classes: Tuple[str, ...]
-    ) -> "_PresentationWindowMixin._WPSProcessHints":
-        return self._WPSProcessHints(classes, False, False, False, False)
-
-    @staticmethod
-    def _emit_wps_debug(
-        debug: Optional[Callable[..., None]],
-        message: str,
-        *args: Any,
-        **kwargs: Any,
-    ) -> None:
-        if callable(debug):
-            debug(message, *args, **kwargs)
-
-    def _log_wps_predicate_failure(
-        self, debug: Optional[Callable[..., None]]
-    ) -> None:
-        self._emit_wps_debug(
-            debug,
-            "WPS process hint predicate failed",  # pragma: no cover - debug logging
-            exc_info=True,
-        )
-
-    def _memoize_wps_spec(
-        self,
-        spec: "_PresentationWindowMixin._PredicateSpec",
-        debug: Optional[Callable[..., None]],
-    ) -> Callable[[str], bool]:
-        normalized_impl = spec.normalized_delegate()
-        delegate: Callable[[Any], bool]
-        if normalized_impl is None:
-            delegate = spec.predicate
-        else:
-            delegate = normalized_impl
-
-        @functools.lru_cache(maxsize=None)
-        def _call(class_name: str) -> bool:
-            try:
-                return bool(delegate(class_name))
-            except Exception:
-                self._log_wps_predicate_failure(debug)
-                return False
-
-        return _call
-
-    def _resolve_wps_predicate_cache(self) -> Dict[
-        Tuple[Any, ...], Tuple[Tuple[str, Callable[[str], bool]], ...]
-    ]:
-        cache = getattr(self, "_cached_wps_predicate_delegates", None)
-        if cache is None:
-            cache = {}
-            setattr(self, "_cached_wps_predicate_delegates", cache)
-        return cast(
-            Dict[Tuple[Any, ...], Tuple[Tuple[str, Callable[[str], bool]], ...]],
-            cache,
-        )
-
-    def _debug_delegate_cache_key(
-        self, debug: Optional[Callable[..., None]]
-    ) -> Tuple[Any, Any]:
-        if not callable(debug):
-            return (None, None)
-        owner = getattr(debug, "__self__", None)
-        return (
-            owner,
-            self._unwrap_predicate_callable(debug),
-        )
-
-    def _build_wps_delegate_cache_key(
-        self,
-        debug: Optional[Callable[..., None]],
-        predicate_specs: Tuple["_PresentationWindowMixin._PredicateSpec", ...],
-    ) -> Tuple[Any, ...]:
-        debug_key = self._debug_delegate_cache_key(debug)
-        spec_keys: List[Tuple[Any, Any, Any, Any]] = []
-        for spec in predicate_specs:
-            predicate_impl = self._unwrap_predicate_callable(spec.predicate)
-            if spec.normalized_predicate is None:
-                normalized_impl: Optional[Callable[..., Any]] = None
-            else:
-                normalized_impl = self._unwrap_predicate_callable(
-                    spec.normalized_predicate
-                )
-            base_impl = self._unwrap_predicate_callable(spec.base_impl)
-            spec_keys.append(
-                (
-                    spec.flag_name,
-                    predicate_impl,
-                    normalized_impl,
-                    base_impl,
-                )
-            )
-        return (debug_key, tuple(spec_keys))
-
-    def _prepare_wps_predicate_delegates(
-        self,
-        predicate_specs: Iterable["_PresentationWindowMixin._PredicateSpec"],
-        debug: Optional[Callable[..., None]],
-    ) -> Tuple[Tuple[str, Callable[[str], bool]], ...]:
-        manager = self._WPSPredicateManager(
-            owner=self,
-            debug=debug,
-            specs=tuple(predicate_specs),
-        )
-        return manager.delegates()
-
-    def _summarize_wps_process_hints(
-        self, normalized_classes: Iterable[str]
-    ) -> "_PresentationWindowMixin._WPSProcessHints":
-        classes = tuple(normalized_classes)
-        empty_hints = self._empty_wps_process_hints(classes)
-        if not classes:
-            return empty_hints
-
-        manager = self._WPSPredicateManager(
-            owner=self,
-            debug=self._resolve_debug_logger(),
-            specs=self._wps_hint_predicate_specs(),
-        )
-        return manager.summarize(classes)
-
-    def _classify_wps_process(
-        self, process_name: Any, *classes: Any
-    ) -> Literal["presentation", "writer", "other"]:
-        name, normalized_classes = self._normalized_process_context(process_name, classes)
-        if not name:
-            return "other"
-        if name.startswith(("wpp", "wppt")) or "wpspresentation" in name:
-            return "presentation"
-
-        hints = self._summarize_wps_process_hints(normalized_classes)
-
-        presentation_detected = any(
-            (
-                hints.has_slideshow,
-                hints.has_wps_presentation_signature,
-                hints.has_ms_presentation_signature,
-            )
-        )
-        writer_detected = hints.has_writer_signature
-
-        if name.startswith("wps"):
-            if presentation_detected:
-                return "presentation"
-            if writer_detected or "wpswriter" in name:
-                return "writer"
-            return "other"
-
-        return "writer" if writer_detected else "other"
-
-    def _is_wps_presentation_process(self, process_name: str, *classes: str) -> bool:
-        return self._classify_wps_process(process_name, *classes) == "presentation"
-
-    def _is_wps_writer_process(self, process_name: str, *classes: str) -> bool:
-        return self._classify_wps_process(process_name, *classes) == "writer"
-
-    def _window_thread_id(self, hwnd: int) -> int:
-        if _USER32 is None or hwnd == 0:
-            return 0
-        pid = wintypes.DWORD()
-        try:
-            thread_id = int(_USER32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(pid)))
-        except Exception:
-            thread_id = 0
-        return thread_id
-
-    def _attach_to_target_thread(self, hwnd: int) -> Optional[Tuple[int, int]]:
-        if _USER32 is None or hwnd == 0:
-            return None
-        target_thread = self._window_thread_id(hwnd)
-        if not target_thread:
-            return None
-        try:
-            current_thread = int(_USER32.GetCurrentThreadId())
-        except Exception:
-            current_thread = 0
-        if not current_thread or current_thread == target_thread:
-            return None
-        try:
-            attached = bool(_USER32.AttachThreadInput(current_thread, target_thread, True))
-        except Exception:
-            attached = False
-        return (current_thread, target_thread) if attached else None
-
-    def _detach_from_target_thread(self, pair: Optional[Tuple[int, int]]) -> None:
-        if _USER32 is None or not pair:
-            return
-        src, dst = pair
-        if not src or not dst or src == dst:
-            return
-        try:
-            _USER32.AttachThreadInput(src, dst, False)
-        except Exception:
-            pass
-
-    def _enumerate_overlay_candidate_windows(self, overlay_hwnd: int) -> Optional[List[int]]:
-        if _USER32 is None or _WNDENUMPROC is None:
-            return None
-        candidates: List[int] = []
-
-        def _enum_callback(hwnd: int, _l_param: int) -> int:
-            if hwnd == overlay_hwnd:
-                return True
-            if self._should_ignore_window(hwnd):
-                return True
-            if not _user32_is_window_visible(hwnd) or _user32_is_window_iconic(hwnd):
-                return True
-            rect = _user32_window_rect(hwnd)
-            if not rect or not self._rect_intersects_overlay(rect):
-                return True
-            candidates.append(int(hwnd))
-            return True
-
-        enum_proc = _WNDENUMPROC(_enum_callback)
-        try:
-            _USER32.EnumWindows(enum_proc, 0)
-        except Exception:
-            return None
-        return candidates
-
-    @classmethod
-    def _normalize_class_hint(cls, value: Any) -> str:
-        return cls._PrefixKeywordClassifier._normalize(value)
-
-    @staticmethod
-    def _resolve_debug_logger() -> Optional[Callable[..., None]]:
-        """Return a callable debug logger suitable for predicate diagnostics."""
-
-        logger_ref = globals().get("logger")
-        debug = getattr(logger_ref, "debug", None)
-        if callable(debug):
-            return debug
-
-        logging_module = globals().get("logging")
-        if logging_module is None:  # pragma: no cover - helper extraction fallback
-            import logging as logging_module  # type: ignore[import-not-found]
-
-        fallback_logger = logging_module.getLogger(__name__)
-        debug = getattr(fallback_logger, "debug", None)
-        if callable(debug):
-            return debug
-        return None
-
-    def _wps_hint_predicate_specs(self) -> Tuple["_PredicateSpec", ...]:
-        cls = _PresentationWindowMixin
-        return (
-            self._PredicateSpec(
-                "has_slideshow",
-                self._is_wps_slideshow_class,
-                self._normalized_is_wps_slideshow_class,
-                cls._is_wps_slideshow_class,
-            ),
-            self._PredicateSpec(
-                "has_wps_presentation_signature",
-                self._class_has_wps_presentation_signature,
-                self._normalized_has_wps_presentation_signature,
-                cls._class_has_wps_presentation_signature,
-            ),
-            self._PredicateSpec(
-                "has_ms_presentation_signature",
-                self._class_has_ms_presentation_signature,
-                self._normalized_has_ms_presentation_signature,
-                cls._class_has_ms_presentation_signature,
-            ),
-            self._PredicateSpec(
-                "has_writer_signature",
-                self._class_has_wps_writer_signature,
-                self._normalized_has_wps_writer_signature,
-                cls._class_has_wps_writer_signature,
-            ),
-        )
-
-    def _normalized_is_wps_slideshow_class(self, normalized: str) -> bool:
-        if not normalized:
-            return False
-        if normalized in self._WPS_SLIDESHOW_CLASSES:
-            return True
-        return normalized.startswith("kwppshow")
-
-    def _evaluate_normalized_class(
-        self,
-        class_name: Any,
-        normalized_predicate: Callable[[str], bool],
-    ) -> bool:
-        normalized = self._normalize_class_hint(class_name)
-        if not normalized:
-            return False
-        return bool(normalized_predicate(normalized))
-
-    def _is_wps_slideshow_class(self, class_name: str) -> bool:
-        return self._evaluate_normalized_class(
-            class_name, self._normalized_is_wps_slideshow_class
-        )
-
-    def _is_word_like_class(self, class_name: str) -> bool:
-        normalized = self._normalize_class_hint(class_name)
-        if not normalized:
-            return False
-        if normalized in self._WORD_WINDOW_CLASSES:
-            return True
-        if normalized in self._WORD_CONTENT_CLASSES:
-            return True
-        if normalized in self._WORD_HOST_CLASSES:
-            return True
-        if normalized.startswith("_ww"):
-            return True
-        if "word" in normalized:
-            return True
-        return self._WPS_WRITER_CLASSIFIER.has_signature(normalized)
-
-    def _class_has_wps_writer_signature(self, class_name: str) -> bool:
-        return self._WPS_WRITER_CLASSIFIER.has_signature(class_name)
-
-    def _normalized_has_wps_writer_signature(self, normalized: str) -> bool:
-        if not normalized:
-            return False
-        return self._WPS_WRITER_CLASSIFIER.has_normalized_signature(normalized)
-
-    def _normalized_has_wps_presentation_signature(self, normalized: str) -> bool:
-        if not normalized:
-            return False
-        if self._normalized_is_wps_slideshow_class(normalized):
-            return True
-        if normalized.startswith("kwpp") or "kwpp" in normalized:
-            return True
-        if normalized.startswith("wpp") and "wps" not in normalized:
-            return True
-        if normalized.startswith("wpsshow") or "wpsshow" in normalized:
-            return True
-        return False
-
-    def _class_has_wps_presentation_signature(self, class_name: str) -> bool:
-        return self._evaluate_normalized_class(
-            class_name, self._normalized_has_wps_presentation_signature
-        )
-
-    def _normalized_has_ms_presentation_signature(self, normalized: str) -> bool:
-        if not normalized:
-            return False
-        if self._normalized_has_wps_presentation_signature(normalized):
-            return False
-        if normalized in self._SLIDESHOW_PRIORITY_CLASSES:
-            return True
-        if normalized in self._SLIDESHOW_SECONDARY_CLASSES:
-            return True
-        if normalized in self._PRESENTATION_EDITOR_CLASSES:
-            if normalized.startswith("kwpp") or normalized.startswith("kwps"):
-                return False
-            if normalized.startswith("wps"):
-                return False
-            return True
-        keywords = ("ppt", "powerpnt", "powerpoint", "screenclass")
-        return any(keyword in normalized for keyword in keywords)
-
-    def _class_has_ms_presentation_signature(self, class_name: str) -> bool:
-        return self._evaluate_normalized_class(
-            class_name, self._normalized_has_ms_presentation_signature
-        )
-
-    def _normalized_class_hints(self, *classes: Any) -> Tuple[str, ...]:
-        normalized: List[str] = []
-        for value in classes:
-            hint = self._normalize_class_hint(value)
-            if hint:
-                normalized.append(hint)
-        return tuple(normalized)
-
-    def _normalize_process_name(self, value: Any) -> str:
-        if value is None:
-            return ""
-        try:
-            if isinstance(value, (bytes, bytearray, memoryview)):
-                text = bytes(value).decode("utf-8", "ignore")
-            else:
-                text = str(value)
-        except Exception:
-            return ""
-        if not text:
-            return ""
-        return _casefold_cached(text)
-
-    def _normalized_process_context(
-        self, process_name: Any, classes: Iterable[Any]
-    ) -> Tuple[str, Tuple[str, ...]]:
-        normalized_name = self._normalize_process_name(process_name)
-        normalized_classes = self._normalized_class_hints(*classes)
-        return normalized_name, normalized_classes
-
-    def _empty_wps_process_hints(
-        self, classes: Tuple[str, ...]
-    ) -> "_PresentationWindowMixin._WPSProcessHints":
-        return self._WPSProcessHints(classes, False, False, False, False)
-
-    @staticmethod
-    def _emit_wps_debug(
-        debug: Optional[Callable[..., None]],
-        message: str,
-        *args: Any,
-        **kwargs: Any,
-    ) -> None:
-        if callable(debug):
-            debug(message, *args, **kwargs)
-
-    def _log_wps_predicate_failure(
-        self, debug: Optional[Callable[..., None]]
-    ) -> None:
-        self._emit_wps_debug(
-            debug,
-            "WPS process hint predicate failed",  # pragma: no cover - debug logging
-            exc_info=True,
-        )
-
-    def _memoize_wps_spec(
-        self,
-        spec: "_PresentationWindowMixin._PredicateSpec",
-        debug: Optional[Callable[..., None]],
-    ) -> Callable[[str], bool]:
-        normalized_impl = spec.normalized_delegate()
-        delegate: Callable[[Any], bool]
-        if normalized_impl is None:
-            delegate = spec.predicate
-        else:
-            delegate = normalized_impl
-
-        @functools.lru_cache(maxsize=None)
-        def _call(class_name: str) -> bool:
-            try:
-                return bool(delegate(class_name))
-            except Exception:
-                self._log_wps_predicate_failure(debug)
-                return False
-
-        return _call
-
-    def _resolve_wps_predicate_cache(self) -> Dict[
-        Tuple[Any, ...], Tuple[Tuple[str, Callable[[str], bool]], ...]
-    ]:
-        cache = getattr(self, "_cached_wps_predicate_delegates", None)
-        if cache is None:
-            cache = {}
-            setattr(self, "_cached_wps_predicate_delegates", cache)
-        return cast(
-            Dict[Tuple[Any, ...], Tuple[Tuple[str, Callable[[str], bool]], ...]],
-            cache,
-        )
-
-    def _debug_delegate_cache_key(
-        self, debug: Optional[Callable[..., None]]
-    ) -> Tuple[Any, Any]:
-        if not callable(debug):
-            return (None, None)
-        owner = getattr(debug, "__self__", None)
-        return (
-            owner,
-            self._unwrap_predicate_callable(debug),
-        )
-
-    def _build_wps_delegate_cache_key(
-        self,
-        debug: Optional[Callable[..., None]],
-        predicate_specs: Tuple["_PresentationWindowMixin._PredicateSpec", ...],
-    ) -> Tuple[Any, ...]:
-        debug_key = self._debug_delegate_cache_key(debug)
-        spec_keys: List[Tuple[Any, Any, Any, Any]] = []
-        for spec in predicate_specs:
-            predicate_impl = self._unwrap_predicate_callable(spec.predicate)
-            if spec.normalized_predicate is None:
-                normalized_impl: Optional[Callable[..., Any]] = None
-            else:
-                normalized_impl = self._unwrap_predicate_callable(
-                    spec.normalized_predicate
-                )
-            base_impl = self._unwrap_predicate_callable(spec.base_impl)
-            spec_keys.append(
-                (
-                    spec.flag_name,
-                    predicate_impl,
-                    normalized_impl,
-                    base_impl,
-                )
-            )
-        return (debug_key, tuple(spec_keys))
-
-    def _prepare_wps_predicate_delegates(
-        self,
-        predicate_specs: Iterable["_PresentationWindowMixin._PredicateSpec"],
-        debug: Optional[Callable[..., None]],
-    ) -> Tuple[Tuple[str, Callable[[str], bool]], ...]:
-        manager = self._WPSPredicateManager(
-            owner=self,
-            debug=debug,
-            specs=tuple(predicate_specs),
-        )
-        return manager.delegates()
-
-    def _summarize_wps_process_hints(
-        self, normalized_classes: Iterable[str]
-    ) -> "_PresentationWindowMixin._WPSProcessHints":
-        classes = tuple(normalized_classes)
-        empty_hints = self._empty_wps_process_hints(classes)
-        if not classes:
-            return empty_hints
-
-        manager = self._WPSPredicateManager(
-            owner=self,
-            debug=self._resolve_debug_logger(),
-            specs=self._wps_hint_predicate_specs(),
-        )
-        return manager.summarize(classes)
-
-    def _classify_wps_process(
-        self, process_name: Any, *classes: Any
-    ) -> Literal["presentation", "writer", "other"]:
-        name, normalized_classes = self._normalized_process_context(process_name, classes)
-        if not name:
-            return "other"
-        if name.startswith(("wpp", "wppt")) or "wpspresentation" in name:
-            return "presentation"
-
-        hints = self._summarize_wps_process_hints(normalized_classes)
-
-        presentation_detected = any(
-            (
-                hints.has_slideshow,
-                hints.has_wps_presentation_signature,
-                hints.has_ms_presentation_signature,
-            )
-        )
-        writer_detected = hints.has_writer_signature
-
-        if name.startswith("wps"):
-            if presentation_detected:
-                return "presentation"
-            if writer_detected or "wpswriter" in name:
-                return "writer"
-            return "other"
-
-        return "writer" if writer_detected else "other"
-
-    def _is_wps_presentation_process(self, process_name: str, *classes: str) -> bool:
-        return self._classify_wps_process(process_name, *classes) == "presentation"
-
-    def _is_wps_writer_process(self, process_name: str, *classes: str) -> bool:
-        return self._classify_wps_process(process_name, *classes) == "writer"
-
-    def _window_thread_id(self, hwnd: int) -> int:
-        if _USER32 is None or hwnd == 0:
-            return 0
-        pid = wintypes.DWORD()
-        try:
-            thread_id = int(_USER32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(pid)))
-        except Exception:
-            thread_id = 0
-        return thread_id
-
-    def _attach_to_target_thread(self, hwnd: int) -> Optional[Tuple[int, int]]:
-        if _USER32 is None or hwnd == 0:
-            return None
-        target_thread = self._window_thread_id(hwnd)
-        if not target_thread:
-            return None
-        try:
-            current_thread = int(_USER32.GetCurrentThreadId())
-        except Exception:
-            current_thread = 0
-        if not current_thread or current_thread == target_thread:
-            return None
-        try:
-            attached = bool(_USER32.AttachThreadInput(current_thread, target_thread, True))
-        except Exception:
-            attached = False
-        return (current_thread, target_thread) if attached else None
-
-    def _detach_from_target_thread(self, pair: Optional[Tuple[int, int]]) -> None:
-        if _USER32 is None or not pair:
-            return
-        src, dst = pair
-        if not src or not dst or src == dst:
-            return
-        try:
-            _USER32.AttachThreadInput(src, dst, False)
-        except Exception:
-            pass
-
-    def _enumerate_overlay_candidate_windows(self, overlay_hwnd: int) -> Optional[List[int]]:
-        if _USER32 is None or _WNDENUMPROC is None:
-            return None
-        candidates: List[int] = []
-
-        def _enum_callback(hwnd: int, _l_param: int) -> int:
-            if hwnd == overlay_hwnd:
-                return True
-            if self._should_ignore_window(hwnd):
-                return True
-            if not _user32_is_window_visible(hwnd) or _user32_is_window_iconic(hwnd):
-                return True
-            rect = _user32_window_rect(hwnd)
-            if not rect or not self._rect_intersects_overlay(rect):
-                return True
-            candidates.append(int(hwnd))
-            return True
 
     def _overlay_child_widget(self, attribute: str) -> Optional[QWidget]:
         overlay = self._overlay_widget()
@@ -5259,10 +4930,26 @@ class _PresentationWindowMixin:
 class _PresentationForwarder(_PresentationWindowMixin):
     """在绘图模式下将特定输入事件转发给下层演示窗口。"""
 
-    __slots__ = ("overlay", "_last_target_hwnd", "_child_buffer")
+    __slots__ = (
+        "overlay",
+        "_last_target_hwnd",
+        "_child_buffer",
+        "_probe_failure_count",
+        "_probe_cooldown_until",
+    )
 
     def _overlay_widget(self) -> Optional[QWidget]:
         return self.overlay
+
+    def _is_hwnd_valid(self, hwnd: int) -> bool:
+        """Return True if *hwnd* looks like a usable window handle."""
+
+        if hwnd == 0 or _USER32 is None:
+            return False
+        try:
+            return bool(_USER32.IsWindow(wintypes.HWND(hwnd)))
+        except Exception:
+            return False
 
     _SMTO_ABORTIFHUNG = 0x0002
     _MAX_CHILD_FORWARDS = 32
@@ -5366,6 +5053,8 @@ class _PresentationForwarder(_PresentationWindowMixin):
         self.overlay = overlay
         self._last_target_hwnd: Optional[int] = None
         self._child_buffer: List[int] = []
+        self._probe_failure_count = 0
+        self._probe_cooldown_until = 0.0
 
     def _log_debug(self, message: str, *args: Any) -> None:
         if logger.isEnabledFor(logging.DEBUG):
@@ -5373,6 +5062,22 @@ class _PresentationForwarder(_PresentationWindowMixin):
 
     def clear_cached_target(self) -> None:
         self._last_target_hwnd = None
+        self._probe_failure_count = 0
+        self._probe_cooldown_until = 0.0
+
+    def _register_input_activity(self) -> None:
+        self._probe_failure_count = 0
+        self._probe_cooldown_until = 0.0
+
+    def _update_probe_backoff(self, found: bool) -> None:
+        now = time.monotonic()
+        if found:
+            self._probe_failure_count = 0
+            self._probe_cooldown_until = 0.0
+            return
+        self._probe_failure_count = min(self._probe_failure_count + 1, 8)
+        delay = min(1.0, 0.1 * (2 ** self._probe_failure_count))
+        self._probe_cooldown_until = now + delay
 
     def _window_class_name(self, hwnd: int) -> str:
         if hwnd == 0:
@@ -5385,6 +5090,8 @@ class _PresentationForwarder(_PresentationWindowMixin):
         return _user32_window_class_name(hwnd)
 
     def _is_wps_slideshow_window(self, hwnd: int) -> bool:
+        if not self._is_hwnd_valid(hwnd):
+            return False
         class_name = self._window_class_name(hwnd)
         if self._is_wps_slideshow_class(class_name):
             return True
@@ -5395,7 +5102,7 @@ class _PresentationForwarder(_PresentationWindowMixin):
         return False
 
     def _is_ms_slideshow_window(self, hwnd: int) -> bool:
-        if hwnd == 0:
+        if not self._is_hwnd_valid(hwnd):
             return False
         if self._is_wps_slideshow_window(hwnd):
             return False
@@ -5408,16 +5115,19 @@ class _PresentationForwarder(_PresentationWindowMixin):
         return "powerpnt" in process_name
 
     def _is_word_window(self, hwnd: int) -> bool:
-        if hwnd == 0:
+        if not self._is_hwnd_valid(hwnd):
             return False
         class_name = self._window_class_name(hwnd)
+        top_level = self._top_level_hwnd(hwnd)
+        process_name = self._window_process_name(top_level or hwnd)
+        if process_name and process_name.startswith("wpp"):
+            return False
         if class_name in self._WORD_CONTENT_CLASSES:
             return True
         if class_name in self._WORD_WINDOW_CLASSES or class_name in self._WORD_HOST_CLASSES:
             return True
         if class_name and class_name.startswith("_ww"):
             return True
-        process_name = self._window_process_name(self._top_level_hwnd(hwnd))
         if not process_name:
             return False
         return "winword" in process_name or process_name.startswith("wps")
@@ -5470,6 +5180,7 @@ class _PresentationForwarder(_PresentationWindowMixin):
     def focus_presentation_window(self) -> bool:
         if not self.is_supported():
             return False
+        self._register_input_activity()
         target = self._resolve_presentation_target()
         if not target:
             target = self._detect_presentation_window()
@@ -5495,6 +5206,7 @@ class _PresentationForwarder(_PresentationWindowMixin):
         if not self._can_forward(allow_cursor=allow_cursor):
             self.clear_cached_target()
             return False
+        self._register_input_activity()
         delta_vec = event.angleDelta()
         delta = int(delta_vec.y() or delta_vec.x())
         if delta == 0:
@@ -5541,9 +5253,13 @@ class _PresentationForwarder(_PresentationWindowMixin):
                     delivered = True
                     if update_cache:
                         self._last_target_hwnd = target
+                    if is_wps_target:
+                        return True
                     break
             if not delivered and focus_ok:
                 delivered = self._deliver_mouse_wheel(target, w_param, l_param)
+                if delivered and is_wps_target:
+                    return True
         if not delivered:
             self.clear_cached_target()
         if logger.isEnabledFor(logging.DEBUG):
@@ -5565,6 +5281,7 @@ class _PresentationForwarder(_PresentationWindowMixin):
         if not self._can_forward(allow_cursor=allow_cursor):
             self.clear_cached_target()
             return False
+        self._register_input_activity()
         vk_code = self._resolve_vk_code(event)
         if vk_code is None:
             return False
@@ -5823,7 +5540,7 @@ class _PresentationForwarder(_PresentationWindowMixin):
                         pass
 
     def _activate_window_for_input(self, hwnd: int) -> bool:
-        if _USER32 is None or hwnd == 0:
+        if not self._is_hwnd_valid(hwnd):
             return False
         if self._is_wps_slideshow_window(hwnd):
             return True
@@ -5944,7 +5661,7 @@ class _PresentationForwarder(_PresentationWindowMixin):
         return False
 
     def _locate_word_content_window(self, hwnd: int) -> Optional[int]:
-        if win32gui is None or hwnd == 0:
+        if win32gui is None or not self._is_hwnd_valid(hwnd):
             return None
         handles: List[int] = []
         top_hwnd = self._top_level_hwnd(hwnd)
@@ -5963,34 +5680,36 @@ class _PresentationForwarder(_PresentationWindowMixin):
             return None
         seen: Set[int] = set(handles)
         buffer = self._child_buffer
-        for root in roots:
-            queue: deque[int] = deque([root])
-            while queue:
-                parent = queue.popleft()
-                buffer.clear()
 
-                def _collector(child_hwnd: int, acc: List[int]) -> bool:
-                    if child_hwnd in seen:
-                        return True
-                    seen.add(child_hwnd)
-                    acc.append(child_hwnd)
+        def _collect_children(parent: int) -> Iterable[int]:
+            buffer.clear()
+
+            def _collector(child_hwnd: int, acc: List[int]) -> bool:
+                if child_hwnd in seen:
                     return True
+                seen.add(child_hwnd)
+                acc.append(child_hwnd)
+                return True
 
-                try:
-                    win32gui.EnumChildWindows(parent, _collector, buffer)
-                except Exception:
-                    continue
-                for child in list(buffer):
-                    class_name = self._window_class_name(child)
-                    if self._is_word_content_class(class_name):
-                        if self._is_target_window_valid(child):
-                            return child
-                    if self._is_word_host_class(class_name) or self._is_word_like_class(class_name):
-                        queue.append(child)
+            try:
+                win32gui.EnumChildWindows(parent, _collector, buffer)
+            except Exception:
+                return ()
+            return tuple(buffer)
+
+        queue: deque[int] = deque(roots)
+        while queue:
+            parent = queue.popleft()
+            for child in _collect_children(parent):
+                class_name = self._window_class_name(child)
+                if self._is_word_content_class(class_name):
+                    if self._is_target_window_valid(child):
+                        return child
+                queue.append(child)
         return None
 
     def _word_host_chain(self, hwnd: int) -> Tuple[int, ...]:
-        if win32gui is None or hwnd == 0:
+        if win32gui is None or not self._is_hwnd_valid(hwnd):
             return ()
         chain: List[int] = []
         seen: Set[int] = set()
@@ -6020,7 +5739,7 @@ class _PresentationForwarder(_PresentationWindowMixin):
         return tuple(chain)
 
     def _normalize_presentation_target(self, hwnd: int) -> Optional[int]:
-        if hwnd == 0:
+        if not self._is_hwnd_valid(hwnd):
             return None
         word_hwnd = self._locate_word_content_window(hwnd)
         if word_hwnd and self._is_target_window_valid(word_hwnd):
@@ -6036,7 +5755,9 @@ class _PresentationForwarder(_PresentationWindowMixin):
     def _target_priority(self, hwnd: int, *, base: int) -> int:
         score = base
         class_name = self._window_class_name(hwnd)
-        if self._is_slideshow_class(class_name):
+        if self._is_wps_slideshow_window(hwnd) or self._is_ms_slideshow_window(hwnd):
+            score += 10000
+        elif self._is_slideshow_class(class_name):
             score += 520
         elif class_name in self._KNOWN_PRESENTATION_CLASSES:
             score += 300
@@ -6176,6 +5897,8 @@ class _PresentationForwarder(_PresentationWindowMixin):
         return l_param & 0xFFFFFFFF
 
     def _deliver_key_message(self, hwnd: int, message: int, vk_code: int, l_param: int) -> bool:
+        if not self._is_hwnd_valid(hwnd):
+            return False
         delivered = False
         if win32api is not None:
             try:
@@ -6202,7 +5925,7 @@ class _PresentationForwarder(_PresentationWindowMixin):
         return bool(sent)
 
     def _deliver_mouse_wheel(self, hwnd: int, w_param: int, l_param: int) -> bool:
-        if hwnd == 0:
+        if not self._is_hwnd_valid(hwnd):
             return False
         delivered = False
         if win32api is not None and win32con is not None:
@@ -6458,6 +6181,9 @@ class _PresentationForwarder(_PresentationWindowMixin):
     def _fallback_detect_presentation_window_user32(self) -> Optional[int]:
         if _USER32 is None:
             return None
+        now = time.monotonic()
+        if self._probe_cooldown_until and now < self._probe_cooldown_until:
+            return None
         overlay_hwnd = int(self.overlay.winId()) if self.overlay.winId() else 0
         best_hwnd: Optional[int] = None
         best_score = -1
@@ -6482,6 +6208,7 @@ class _PresentationForwarder(_PresentationWindowMixin):
             if score > best_score and self._is_control_allowed(hwnd, log=False):
                 best_score = score
                 best_hwnd = hwnd
+        self._update_probe_backoff(bool(best_hwnd))
         return best_hwnd
 
     def _is_target_window_valid(self, hwnd: int) -> bool:
@@ -6550,6 +6277,9 @@ class _PresentationForwarder(_PresentationWindowMixin):
     def _detect_presentation_window(self) -> Optional[int]:
         if win32gui is None:
             return self._fallback_detect_presentation_window_user32()
+        now = time.monotonic()
+        if self._probe_cooldown_until and now < self._probe_cooldown_until:
+            return None
         overlay_hwnd = int(self.overlay.winId()) if self.overlay.winId() else 0
         try:
             foreground = win32gui.GetForegroundWindow()
@@ -6608,6 +6338,7 @@ class _PresentationForwarder(_PresentationWindowMixin):
             if score > best_score:
                 best_score = score
                 best_hwnd = normalized
+        self._update_probe_backoff(bool(best_hwnd))
         return best_hwnd
 
     def _resolve_presentation_target(self) -> Optional[int]:
@@ -6688,6 +6419,7 @@ class _PresentationForwarder(_PresentationWindowMixin):
 class OverlayWindow(QWidget, _PresentationWindowMixin):
     _NAVIGATION_RESTORE_DELAY_MS = 600
     _NAVIGATION_HOLD_DURATION_MS = 2400
+    _WPS_NAV_DEBOUNCE_MS = 120  # suppress identical WPS导航事件的最小间隔
 
     def _overlay_widget(self) -> Optional[QWidget]:
         return self
@@ -6696,23 +6428,22 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.settings_manager = settings_manager
-        paint_settings = self.settings_manager.load_settings().get("Paint", {})
+        paint_config = self.settings_manager.get_paint_settings()
+        self.paint_config = paint_config
+        paint_mapping = paint_config.to_mapping()
         self._presentation_control_flags: Dict[str, bool] = {}
-        self._update_presentation_control_flags(paint_settings)
-        style_value = paint_settings.get("brush_style", _DEFAULT_PEN_STYLE.value)
-        try:
-            self.pen_style = PenStyle(style_value)
-        except ValueError:
-            self.pen_style = _DEFAULT_PEN_STYLE
-        base_size_value = paint_settings.get("brush_base_size")
-        if base_size_value is None:
-            base_size_value = paint_settings.get("brush_size", "12")
-        try:
-            parsed_base = float(base_size_value)
-        except (TypeError, ValueError):
-            parsed_base = 12.0
-        self.pen_base_size = clamp_base_size_for_style(self.pen_style, parsed_base)
-        color_hex = paint_settings.get("brush_color", "#ff0000")
+        self._update_presentation_control_flags(
+            {
+                "ms_ppt": paint_config.control_ms_ppt,
+                "ms_word": paint_config.control_ms_word,
+                "wps_ppt": paint_config.control_wps_ppt,
+                "wps_word": paint_config.control_wps_word,
+            }
+        )
+        self.pen_style = paint_config.brush_style
+        parsed_base = clamp_base_size_for_style(self.pen_style, float(paint_config.brush_base_size))
+        self.pen_base_size = parsed_base
+        color_hex = paint_config.brush_color
         self.pen_color = QColor(color_hex)
         if not self.pen_color.isValid():
             self.pen_color = QColor("#ff0000")
@@ -6722,7 +6453,7 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             if not config.opacity_range:
                 continue
             key = f"{style.value}_opacity"
-            raw_value = paint_settings.get(key)
+            raw_value = paint_mapping.get(key)
             if raw_value is None:
                 if config.default_opacity is not None:
                     value = int(config.default_opacity)
@@ -6740,7 +6471,7 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         for style in PEN_STYLE_ORDER:
             style_config = get_pen_style_config(style)
             key = f"{style.value}_base_size"
-            raw_base = paint_settings.get(key)
+            raw_base = paint_mapping.get(key)
             if raw_base is None:
                 if style == self.pen_style:
                     stored = float(self.pen_base_size)
@@ -6814,6 +6545,8 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         self._pending_wps_cursor_pulse = False
         self._pending_wps_cursor_reset = False
         self._wps_cursor_reset_timer: Optional[QTimer] = None
+        self._last_wps_nav_event: Optional[Tuple[int, int, float]] = None
+        self._wps_nav_block_until: float = 0.0
         base_width = self._effective_brush_width()
         self._brush_pen = QPen(
             self.pen_color,
@@ -7257,6 +6990,24 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             return 120
         return 0
 
+    def _should_suppress_wps_nav(self, code: int, target: Optional[int]) -> bool:
+        if not target or not self._is_wps_slideshow_target(target):
+            return False
+        if self._wps_nav_block_until and time.monotonic() < self._wps_nav_block_until:
+            return True
+        prev = self._last_wps_nav_event
+        if not prev:
+            return False
+        prev_code, prev_target, prev_ts = prev
+        if prev_code != code or prev_target != target:
+            return False
+        return (time.monotonic() - prev_ts) * 1000 < self._WPS_NAV_DEBOUNCE_MS
+
+    def _remember_wps_nav(self, code: int, target: Optional[int]) -> None:
+        if target and self._is_wps_slideshow_target(target):
+            self._last_wps_nav_event = (code, target, time.monotonic())
+            self._wps_nav_block_until = time.monotonic() + (self._WPS_NAV_DEBOUNCE_MS / 1000.0)
+
     def _is_presentation_category_allowed(self, category: str) -> bool:
         if not category or category == "other":
             return True
@@ -7598,6 +7349,24 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             return True
         return False
 
+    def _wps_target_has_foreground_focus(self, hwnd: Optional[int]) -> bool:
+        """Return True if the WPS放映窗口已经位于前台，可直接接收用户输入。"""
+
+        if not hwnd or _USER32 is None:
+            return False
+        if not self._is_wps_slideshow_target(hwnd):
+            return False
+        try:
+            target_top = _user32_top_level_hwnd(hwnd) or hwnd
+        except Exception:
+            target_top = hwnd
+        try:
+            foreground = _user32_get_foreground_window()
+            foreground_top = _user32_top_level_hwnd(foreground) if foreground else 0
+        except Exception:
+            return False
+        return bool(target_top and foreground_top and target_top == foreground_top)
+
     def _word_navigation_vk(self, vk_code: int, target_hwnd: Optional[int]) -> int:
         if win32con is None or not target_hwnd:
             return 0
@@ -7657,16 +7426,33 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             target_hwnd = ms_override
             effective_target = ms_override
         target_class = self._presentation_window_class(target_hwnd) if target_hwnd else ""
+        if effective_target and self._is_wps_slideshow_target(effective_target):
+            if self._should_suppress_wps_nav(vk_code, effective_target):
+                if originating_key is not None:
+                    self._release_keyboard_navigation_state(originating_key)
+                if via_toolbar:
+                    self._cancel_navigation_cursor_hold()
+                return
+            self._wps_nav_block_until = time.monotonic() + (self._WPS_NAV_DEBOUNCE_MS / 1000.0)
         if effective_target and not self._presentation_control_allowed(effective_target):
             if originating_key is not None:
                 self._release_keyboard_navigation_state(originating_key)
             if via_toolbar:
                 self._cancel_navigation_cursor_hold()
             return
+        if (
+            effective_target
+            and self._wps_target_has_foreground_focus(effective_target)
+            and not via_toolbar
+        ):
+            if originating_key is not None:
+                self._release_keyboard_navigation_state(originating_key)
+            return
         wps_slideshow_target = (
             effective_target if effective_target and self._is_wps_slideshow_target(effective_target) else None
         )
         if wps_slideshow_target and self._send_wps_slideshow_virtual_key(wps_slideshow_target, vk_code):
+            self._remember_wps_nav(vk_code, wps_slideshow_target)
             if originating_key is not None:
                 self._release_keyboard_navigation_state(originating_key)
             if via_toolbar:
@@ -7895,6 +7681,11 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                         forwarder._last_target_hwnd = target_hwnd  # type: ignore[attr-defined]
                     except Exception:
                         pass
+            suppress_code = -1 if delta < 0 else 1 if delta > 0 else 0
+            if target_hwnd and self._is_wps_slideshow_target(target_hwnd):
+                if self._should_suppress_wps_nav(suppress_code or delta, target_hwnd):
+                    return True
+                self._wps_nav_block_until = time.monotonic() + (self._WPS_NAV_DEBOUNCE_MS / 1000.0)
             if target_hwnd and not self._presentation_control_allowed(target_hwnd):
                 self._log_navigation_debug(
                     "wheel_blocked",
@@ -7903,6 +7694,9 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                     category=self._presentation_target_category(target_hwnd),
                 )
                 return False
+            if suppress_code and self._should_suppress_wps_nav(suppress_code, target_hwnd):
+                handled = True
+                return True
             if self._forwarder is not None:
                 try:
                     global_pos = QCursor.pos()
@@ -7924,11 +7718,15 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                 except Exception:
                     handled = False
             if handled:
+                if suppress_code and target_hwnd:
+                    self._remember_wps_nav(suppress_code, target_hwnd)
                 return True
             focused = self._focus_presentation_window_fallback()
             fallback = self._fallback_send_wheel(delta)
             if not fallback and not focused:
                 return False
+            if fallback and suppress_code and target_hwnd:
+                self._remember_wps_nav(suppress_code, target_hwnd)
             return fallback
         finally:
             self._set_navigation_reason("wheel", False)
@@ -7949,7 +7747,17 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             release = forwarder._deliver_key_message(hwnd, win32con.WM_KEYUP, vk_code, up_param)
         except Exception:
             return False
-        if press and release:
+        if press:
+            if not release and _USER32 is not None:
+                try:
+                    scan_code = _USER32.MapVirtualKeyW(vk_code, 0) if hasattr(_USER32, "MapVirtualKeyW") else 0
+                except Exception:
+                    scan_code = 0
+                try:
+                    flags = KEYEVENTF_EXTENDEDKEY if vk_code in _NAVIGATION_EXTENDED_KEYS else 0
+                    _USER32.keybd_event(vk_code, scan_code, flags | KEYEVENTF_KEYUP, 0)
+                except Exception:
+                    pass
             try:
                 forwarder._last_target_hwnd = hwnd
             except Exception:
@@ -8853,6 +8661,19 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                     pass
             if hasattr(self, "_last_target_hwnd"):
                 self._last_target_hwnd = None
+            try:
+                QTimer.singleShot(50, lambda: self._resolve_control_target())
+            except Exception:
+                try:
+                    self._resolve_control_target()
+                except Exception:
+                    pass
+            else:
+                if forwarder is not None:
+                    try:
+                        QTimer.singleShot(50, lambda: forwarder.get_presentation_target())
+                    except Exception:
+                        pass
         if not resolved.get("wps_ppt"):
             self._cancel_wps_slideshow_binding_retry()
         if resolved.get("wps_ppt") and not parse_bool(previous_flags.get("wps_ppt"), True):
@@ -8874,41 +8695,39 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                 pass
 
     def save_settings(self) -> None:
-        settings = self.settings_manager.load_settings()
-        paint = settings.get("Paint", {})
-        paint["brush_size"] = str(self.pen_size)
-        paint["brush_base_size"] = f"{self.pen_base_size:.2f}"
-        paint["brush_color"] = self.pen_color.name()
-        paint["brush_style"] = self.pen_style.value
-        self._style_base_sizes[self.pen_style] = float(
-            clamp_base_size_for_style(self.pen_style, float(self.pen_base_size))
-        )
+        self.paint_config.brush_size = float(self.pen_size)
+        self.paint_config.brush_base_size = float(self.pen_base_size)
+        self.paint_config.brush_color = self.pen_color.name()
+        self.paint_config.brush_style = self.pen_style
+        self.paint_config.control_ms_ppt = bool(self.control_ms_ppt)
+        self.paint_config.control_ms_word = bool(self.control_ms_word)
+        self.paint_config.control_wps_ppt = bool(self.control_wps_ppt)
+        self.paint_config.control_wps_word = bool(self.control_wps_word)
         for style in PEN_STYLE_ORDER:
             config = get_pen_style_config(style)
             base_value = clamp_base_size_for_style(
                 style,
                 float(self._style_base_sizes.get(style, float(config.default_base))),
             )
-            paint[f"{style.value}_base_size"] = f"{base_value:.2f}"
-            if not config.opacity_range:
-                continue
-            default_alpha = int(config.default_opacity or config.base_alpha)
-            value = int(self._style_opacity_overrides.get(style, default_alpha))
-            paint[f"{style.value}_opacity"] = str(value)
-        paint["control_ms_ppt"] = "True" if self.control_ms_ppt else "False"
-        paint["control_ms_word"] = "True" if self.control_ms_word else "False"
-        paint["control_wps_ppt"] = "True" if self.control_wps_ppt else "False"
-        paint["control_wps_word"] = "True" if self.control_wps_word else "False"
-        settings["Paint"] = paint
-        self.settings_manager.save_settings(settings)
+            self._style_base_sizes[style] = base_value
+            self.paint_config.base_size_overrides[f"{style.value}_base_size"] = base_value
+            if config.opacity_range:
+                default_alpha = int(config.default_opacity or config.base_alpha)
+                value = int(self._style_opacity_overrides.get(style, default_alpha))
+                self.paint_config.opacity_overrides[f"{style.value}_opacity"] = value
+        try:
+            self.settings_manager.update_paint_settings(self.paint_config)
+        except Exception:
+            logger.error("Failed to persist paint settings", exc_info=True)
 
     def save_window_position(self) -> None:
-        settings = self.settings_manager.load_settings()
-        paint = settings.get("Paint", {})
         pos = self.toolbar.pos()
-        paint["x"] = str(pos.x()); paint["y"] = str(pos.y())
-        settings["Paint"] = paint
-        self.settings_manager.save_settings(settings)
+        self.paint_config.x = int(pos.x())
+        self.paint_config.y = int(pos.y())
+        try:
+            self.settings_manager.update_paint_settings(self.paint_config)
+        except Exception:
+            logger.error("Failed to persist paint window position", exc_info=True)
 
     # ---- 画图事件 ----
     def wheelEvent(self, e) -> None:
@@ -8917,6 +8736,9 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         allow_cursor = self.mode == "cursor" or self.navigation_active
         target = self._resolve_control_target()
         if target and not self._presentation_control_allowed(target):
+            super().wheelEvent(e)
+            return
+        if self._wps_target_has_foreground_focus(target):
             super().wheelEvent(e)
             return
         if (
@@ -9550,6 +9372,13 @@ class TTSManager(QObject):
         self._queue: Queue[str] = Queue()
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._pump)
+        self._preferred_voice_id = preferred_voice_id
+        self._initialized = False
+
+    def _lazy_init(self) -> None:
+        if self._initialized:
+            return
+        self._initialized = True
         missing_reason = ""
         if pyttsx3 is not None:
             try:
@@ -9562,9 +9391,8 @@ class TTSManager(QObject):
                     self.engine = None
                 else:
                     self.default_voice_id = self.voice_ids[0]
-                    self.current_voice_id = (
-                        preferred_voice_id if preferred_voice_id in self.voice_ids else self.default_voice_id
-                    )
+                    preferred = self._preferred_voice_id or self.default_voice_id
+                    self.current_voice_id = preferred if preferred in self.voice_ids else self.default_voice_id
                     if self.current_voice_id:
                         try:
                             self.engine.setProperty("voice", self.current_voice_id)
@@ -9604,9 +9432,11 @@ class TTSManager(QObject):
 
     @property
     def available(self) -> bool:
+        self._lazy_init()
         return self._mode in {"pyttsx3", "powershell"}
 
     def diagnostics(self) -> tuple[str, List[str]]:
+        self._lazy_init()
         reason = self.failure_reason
         suggestions = list(self.failure_suggestions)
         env_reason, env_suggestions = detect_speech_environment_issues()
@@ -9672,6 +9502,7 @@ class TTSManager(QObject):
         self.failure_suggestions = suggestions
 
     def set_voice(self, voice_id: str) -> None:
+        self._lazy_init()
         if not self.supports_voice_selection:
             return
         if voice_id in self.voice_ids:
@@ -9683,6 +9514,7 @@ class TTSManager(QObject):
                     pass
 
     def speak(self, text: str) -> None:
+        self._lazy_init()
         if not self.available:
             return
         while not self._queue.empty():
@@ -9761,6 +9593,7 @@ class TTSManager(QObject):
         self._mode = "none"
         self._powershell_busy = False
         self._timer.stop()
+        self._initialized = False
 
 
 # ---------- 点名/计时 ----------
@@ -10815,46 +10648,52 @@ class RollCallTimerWindow(QWidget):
         self.setWindowFlags(flags)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.settings_manager = settings_manager
+        self._plain_file_path = self.STUDENT_FILE
         self._encrypted_file_path = self.ENCRYPTED_STUDENT_FILE
         self.student_workbook: Optional[StudentWorkbook] = student_workbook
+        plain_exists, encrypted_exists = self._refresh_student_file_paths()
         base_dataframe: Optional[PandasDataFrame] = None
         if PANDAS_READY and self.student_workbook is not None:
             try:
                 base_dataframe = self.student_workbook.get_active_dataframe()
             except Exception:
-                base_dataframe = pd.DataFrame(columns=["学号", "姓名", "分组", "成绩"])
+                base_dataframe = _new_student_dataframe() or pd.DataFrame(columns=DEFAULT_STUDENT_COLUMNS)
         if base_dataframe is None and PANDAS_READY:
-            base_dataframe = pd.DataFrame(columns=["学号", "姓名", "分组", "成绩"])
+            base_dataframe = _new_student_dataframe() or pd.DataFrame(columns=DEFAULT_STUDENT_COLUMNS)
         self.student_data = base_dataframe
         self._student_data_pending_load = False
         encrypted_state, encrypted_password = _get_session_student_encryption()
         self._student_file_encrypted = bool(encrypted_state)
         self._student_password = encrypted_password
-        if defer_password_prompt:
+        # 如果只有加密文件且没有明文，不要自动解密，保持待加载状态，等用户点击“解密”
+        only_encrypted = plain_exists is None and encrypted_exists is not None
+        if only_encrypted:
+            self._student_file_encrypted = True
+            self._student_data_pending_load = True
+            self._student_password = None
+            if self.student_data is None and PANDAS_READY:
+                self.student_data = _new_student_dataframe() or pd.DataFrame(columns=DEFAULT_STUDENT_COLUMNS)
+        elif defer_password_prompt:
             base_empty = True
             if PANDAS_READY and isinstance(self.student_data, pd.DataFrame):
                 base_empty = getattr(self.student_data, "empty", True)
             elif self.student_data is not None:
                 base_empty = False
             if base_empty:
-                has_plain = _any_existing_path(self.STUDENT_FILE_CANDIDATES) is not None
-                has_encrypted = _any_existing_path(self.ENCRYPTED_STUDENT_FILE_CANDIDATES) is not None
+                has_plain = plain_exists is not None
+                has_encrypted = encrypted_exists is not None
                 if has_plain or has_encrypted:
                     self._student_data_pending_load = True
                     if self.student_data is None and PANDAS_READY:
-                        self.student_data = pd.DataFrame(columns=["学号", "姓名", "分组", "成绩"])
+                        self.student_data = _new_student_dataframe() or pd.DataFrame(columns=DEFAULT_STUDENT_COLUMNS)
         try:
             self._rng = random.SystemRandom()
         except NotImplementedError:
             self._rng = random.Random()
 
-        s = self.settings_manager.load_settings().get("RollCallTimer", {})
-        def _get_int(key: str, default: int) -> int:
-            try:
-                return int(s.get(key, str(default)))
-            except (TypeError, ValueError):
-                return default
-        apply_geometry_from_text(self, s.get("geometry", "420x240+180+180"))
+        self.roll_call_config = self.settings_manager.get_roll_call_settings()
+        config = self.roll_call_config
+        apply_geometry_from_text(self, config.geometry)
         self.setMinimumSize(260, 160)
         # 记录初始最小宽高，供后续还原窗口尺寸时使用
         self._base_minimum_width = self.minimumWidth()
@@ -10862,19 +10701,21 @@ class RollCallTimerWindow(QWidget):
         self._ensure_min_width = self._base_minimum_width
         self._ensure_min_height = self._base_minimum_height
 
-        self.mode = s.get("mode", "roll_call") if s.get("mode", "roll_call") in {"roll_call", "timer"} else "roll_call"
+        # 打开窗口默认进入点名模式，避免因计时模式触发延迟加载的重复密码提示
+        saved_mode = str(config.mode).strip().lower()
+        self.mode = saved_mode if saved_mode in {"roll_call", "timer"} else "roll_call"
         self.timer_modes = ["countdown", "stopwatch", "clock"]
-        self.timer_mode_index = self.timer_modes.index(s.get("timer_mode", "countdown")) if s.get("timer_mode", "countdown") in self.timer_modes else 0
+        self.timer_mode_index = self.timer_modes.index(config.timer_mode) if config.timer_mode in self.timer_modes else 0
         self._active_timer_mode: Optional[str] = None
 
-        self.timer_countdown_minutes = _get_int("timer_countdown_minutes", 5)
-        self.timer_countdown_seconds = _get_int("timer_countdown_seconds", 0)
-        self.timer_sound_enabled = str_to_bool(s.get("timer_sound_enabled", "True"), True)
+        self.timer_countdown_minutes = config.timer_countdown_minutes
+        self.timer_countdown_seconds = config.timer_countdown_seconds
+        self.timer_sound_enabled = config.timer_sound_enabled
 
-        self.show_id = str_to_bool(s.get("show_id", "True"), True)
-        self.show_name = str_to_bool(s.get("show_name", "True"), True)
-        self.show_photo = str_to_bool(s.get("show_photo", "False"), False)
-        self.photo_duration_seconds = max(0, _get_int("photo_duration_seconds", 0))
+        self.show_id = config.show_id
+        self.show_name = config.show_name
+        self.show_photo = config.show_photo
+        self.photo_duration_seconds = max(0, config.photo_duration_seconds)
         if not (self.show_id or self.show_name):
             self.show_name = True
 
@@ -10885,8 +10726,8 @@ class RollCallTimerWindow(QWidget):
         self._photo_manual_hidden = False
         self._ensure_photo_root_directory()
 
-        self.current_class_name = str(s.get("current_class", "")).strip()
-        self.current_group_name = s.get("current_group", "全部")
+        self.current_class_name = str(config.current_class).strip()
+        self.current_group_name = config.current_group
         self.groups = ["全部"]
 
         self.current_student_index: Optional[int] = None
@@ -10902,41 +10743,46 @@ class RollCallTimerWindow(QWidget):
         self._global_drawn_students: set[int] = set()
         self._student_groups: Dict[int, set[str]] = {}
         self._class_roll_states: Dict[str, ClassRollState] = {}
-        self.timer_seconds_left = max(0, _get_int("timer_seconds_left", self.timer_countdown_minutes * 60 + self.timer_countdown_seconds))
-        self.timer_stopwatch_seconds = max(0, _get_int("timer_stopwatch_seconds", 0))
-        self.timer_running = str_to_bool(s.get("timer_running", "False"), False)
+        self.timer_seconds_left = max(0, config.timer_seconds_left)
+        self.timer_stopwatch_seconds = max(0, config.timer_stopwatch_seconds)
+        self.timer_running = bool(config.timer_running)
 
-        order_value = str(s.get("scoreboard_order", "rank")).strip().lower()
+        order_value = str(config.scoreboard_order).strip().lower()
         self.scoreboard_order = order_value if order_value in {"rank", "id"} else "rank"
-        saved_encrypted = str_to_bool(s.get("students_encrypted", bool_to_str(self._student_file_encrypted)), self._student_file_encrypted)
+        saved_encrypted = bool(config.students_encrypted)
         plain_exists = _any_existing_path(self.STUDENT_FILE_CANDIDATES) is not None
         encrypted_exists = _any_existing_path(self.ENCRYPTED_STUDENT_FILE_CANDIDATES) is not None
-        disk_encrypted = encrypted_exists and not plain_exists
+        disk_encrypted = encrypted_exists
         if disk_encrypted:
             self._student_file_encrypted = True
         elif not saved_encrypted:
             self._student_file_encrypted = False
             self._student_password = None
 
-        self.last_id_font_size = max(self.MIN_FONT_SIZE, _get_int("id_font_size", 48))
-        self.last_name_font_size = max(self.MIN_FONT_SIZE, _get_int("name_font_size", 60))
-        self.last_timer_font_size = max(self.MIN_FONT_SIZE, _get_int("timer_font_size", 56))
+        self.last_id_font_size = max(self.MIN_FONT_SIZE, int(config.id_font_size))
+        self.last_name_font_size = max(self.MIN_FONT_SIZE, int(config.name_font_size))
+        self.last_timer_font_size = max(self.MIN_FONT_SIZE, int(config.timer_font_size))
 
         self.count_timer = QTimer(self); self.count_timer.setInterval(1000); self.count_timer.timeout.connect(self._on_count_timer)
         self.clock_timer = QTimer(self); self.clock_timer.setInterval(1000); self.clock_timer.timeout.connect(self._update_clock)
 
         self.tts_manager: Optional[TTSManager] = None
-        self.speech_enabled = str_to_bool(s.get("speech_enabled", "False"), False)
-        self.selected_voice_id = s.get("speech_voice_id", "")
-        manager = TTSManager(self.selected_voice_id, parent=self)
-        self.tts_manager = manager
-        if not manager.available:
-            self.speech_enabled = False
+        self.speech_enabled = bool(config.speech_enabled)
+        self.selected_voice_id = config.speech_voice_id
+        self.tts_manager = None
+        if self.speech_enabled:
+            manager = TTSManager(self.selected_voice_id, parent=self)
+            self.tts_manager = manager
+            if not manager.available:
+                self.speech_enabled = False
         self._speech_issue_reported = False
         self._speech_check_scheduled = False
         self._pending_passive_student: Optional[int] = None
         self._score_persist_failed = False
-        self._score_write_lock = threading.Lock()
+        self._score_write_lock = QMutex()
+        self._settings_write_lock = QMutex()
+        self._student_data_loading = False
+        self._io_pool = QThreadPool.globalInstance()
 
         # QFontDatabase 在 Qt 6 中以静态方法为主，这里直接调用类方法避免实例化失败
         families_list = []
@@ -10966,7 +10812,7 @@ class RollCallTimerWindow(QWidget):
             self._set_student_dataframe(self.student_data, propagate=False)
         self._apply_saved_fonts()
         self._update_menu_state()
-        self._restore_group_state(s)
+        self._restore_group_state(config.to_mapping())
         self.update_mode_ui(force_timer_reset=self.mode == "timer")
         self.on_group_change(initial=True)
         self.display_current_student()
@@ -11062,7 +10908,7 @@ class RollCallTimerWindow(QWidget):
 
         self.menu_button = QToolButton(); self.menu_button.setText("..."); self.menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.menu_button.setFixedSize(toolbar_height, toolbar_height)
-        self.menu_button.setStyleSheet("font-size: 18px; padding-bottom: 6px;")
+        self.menu_button.setStyleSheet(StyleConfig.MENU_BUTTON_STYLE)
         self.main_menu = self._build_menu(); self.menu_button.setMenu(self.main_menu)
         top.addWidget(self.menu_button, 0, Qt.AlignmentFlag.AlignRight)
         toolbar_layout.addLayout(top)
@@ -11166,9 +11012,9 @@ class RollCallTimerWindow(QWidget):
     def _update_encryption_button(self) -> None:
         if not hasattr(self, "encrypt_button"):
             return
-        plain_exists = _any_existing_path(self.STUDENT_FILE_CANDIDATES) is not None
-        encrypted_exists = _any_existing_path(self.ENCRYPTED_STUDENT_FILE_CANDIDATES) is not None
-        disk_encrypted = encrypted_exists and not plain_exists
+        plain_exists, encrypted_exists = self._refresh_student_file_paths()
+        encrypted_exists = encrypted_exists is not None
+        disk_encrypted = encrypted_exists
         if disk_encrypted and not self._student_file_encrypted:
             self._student_file_encrypted = True
         elif not disk_encrypted and self._student_file_encrypted and not encrypted_exists:
@@ -11179,6 +11025,63 @@ class RollCallTimerWindow(QWidget):
             self.encrypt_button.setToolTip("当前学生数据已加密，点击输入密码以解密或更新。")
         else:
             self.encrypt_button.setToolTip("点击为 students.xlsx 设置密码并生成加密文件。")
+
+    def _refresh_student_file_paths(self) -> tuple[Optional[str], Optional[str]]:
+        def _prefer_dir(target_dir: str, paths: tuple[str, ...]) -> Optional[str]:
+            target = os.path.normcase(os.path.abspath(target_dir))
+            for path in paths:
+                if path and os.path.exists(path):
+                    if os.path.normcase(os.path.dirname(os.path.abspath(path))) == target:
+                        return path
+            return None
+
+        module_dir = os.path.dirname(os.path.abspath(__file__))
+        cwd = os.path.abspath(os.getcwd())
+
+        existing_encrypted = (
+            _prefer_dir(module_dir, self.ENCRYPTED_STUDENT_FILE_CANDIDATES)
+            or _prefer_dir(cwd, self.ENCRYPTED_STUDENT_FILE_CANDIDATES)
+            or _any_existing_path(self.ENCRYPTED_STUDENT_FILE_CANDIDATES)
+        )
+
+        existing_plain = (
+            _prefer_dir(module_dir, self.STUDENT_FILE_CANDIDATES)
+            or _prefer_dir(cwd, self.STUDENT_FILE_CANDIDATES)
+            or _any_existing_path(self.STUDENT_FILE_CANDIDATES)
+        )
+
+        def _writable_target(path: str) -> bool:
+            directory = os.path.dirname(path) or os.getcwd()
+            return _ensure_writable_directory(directory)
+
+        plain_path = self.STUDENT_FILE
+        if existing_plain and _writable_target(existing_plain):
+            plain_path = existing_plain
+
+        encrypted_name = os.path.basename(self.ENCRYPTED_STUDENT_FILE)
+        encrypted_default_dir = os.path.dirname(plain_path) or os.getcwd()
+        encrypted_candidate = os.path.join(encrypted_default_dir, encrypted_name)
+        encrypted_path = self.ENCRYPTED_STUDENT_FILE
+        if existing_encrypted and _writable_target(existing_encrypted):
+            encrypted_path = existing_encrypted
+        elif _writable_target(encrypted_candidate):
+            encrypted_path = encrypted_candidate
+
+        plain_dir = os.path.dirname(plain_path) or os.getcwd()
+        if not _ensure_writable_directory(plain_dir):
+            fallback_plain = os.path.join(os.getcwd(), os.path.basename(self.STUDENT_FILE))
+            if _ensure_writable_directory(os.path.dirname(fallback_plain) or os.getcwd()):
+                plain_path = fallback_plain
+
+        encrypted_dir = os.path.dirname(encrypted_path) or os.getcwd()
+        if not _ensure_writable_directory(encrypted_dir):
+            fallback_encrypted = os.path.join(os.getcwd(), os.path.basename(self.ENCRYPTED_STUDENT_FILE))
+            if _ensure_writable_directory(os.path.dirname(fallback_encrypted) or os.getcwd()):
+                encrypted_path = fallback_encrypted
+
+        self._plain_file_path = plain_path
+        self._encrypted_file_path = encrypted_path
+        return existing_plain, existing_encrypted
 
     def _on_encrypt_button_clicked(self) -> None:
         if self._student_file_encrypted:
@@ -11218,25 +11121,46 @@ class RollCallTimerWindow(QWidget):
         show_quiet_information(self, "密码输入次数过多，操作已取消。")
         return None
 
+    def _collect_group_names(self, df: PandasDataFrame) -> List[str]:
+        """Extract and normalize unique group names from the '分组' column."""
+
+        if df is None or df.empty:
+            return []
+        if "分组" not in df.columns:
+            return []
+        try:
+            group_series = df["分组"].dropna()
+        except Exception:
+            return []
+        if group_series.empty:
+            return []
+        try:
+            normalized = group_series.astype(str).str.strip().str.upper()
+            group_values = [g for g in normalized if g]
+        except Exception:
+            group_values = [
+                str(g).strip().upper()
+                for g in group_series
+                if str(g).strip()
+            ]
+        return sorted(set(group_values))
+
     def _set_student_dataframe(self, df: Optional[PandasDataFrame], *, propagate: bool = True) -> None:
         if not PANDAS_READY:
             self.student_data = df
             return
         if df is None:
-            df = pd.DataFrame(columns=["学号", "姓名", "分组", "成绩"])
+            df = _new_student_dataframe() or pd.DataFrame(columns=DEFAULT_STUDENT_COLUMNS)
         try:
             working = df.copy()
         except Exception:
             working = pd.DataFrame(df)
         self.student_data = working
         self.groups = ["全部"]
-        if not working.empty:
-            group_values = {
-                str(g).strip().upper()
-                for g in working.get("分组", pd.Series([], dtype="object")).dropna()
-                if str(g).strip()
-            }
-            self.groups.extend(sorted(group_values))
+        group_values = self._collect_group_names(working)
+        if group_values:
+            self.groups.extend(group_values)
+
         if self.current_group_name not in self.groups:
             self.current_group_name = "全部"
         self._group_all_indices = {}
@@ -11265,9 +11189,15 @@ class RollCallTimerWindow(QWidget):
             self.current_class_name = workbook.active_class
             self.student_data = None
             return
-        if self.current_class_name:
-            workbook.set_active_class(self.current_class_name)
-        self.current_class_name = workbook.active_class
+        # 优先使用当前窗口或配置中记录的班级名称，避免每次都回落到第一个工作表
+        target_class = (self.current_class_name or getattr(self, "roll_call_config", None).current_class if hasattr(self, "roll_call_config") else "")  # type: ignore[attr-defined]
+        target_class = str(target_class or "").strip()
+        if target_class and target_class in workbook.class_names():
+            workbook.set_active_class(target_class)
+        else:
+            # 没有有效记录时，保持 workbook 自身的 active_class
+            target_class = workbook.active_class
+        self.current_class_name = target_class
         df = workbook.get_active_dataframe()
         self._set_student_dataframe(df, propagate=propagate)
 
@@ -11630,13 +11560,10 @@ class RollCallTimerWindow(QWidget):
         if not self._ensure_student_data_ready():
             return
         self._snapshot_current_class()
+        # 通过统一的 apply 流程切换班级，确保状态与 UI 同步
         self.student_workbook.set_active_class(target)
         self.current_class_name = target
-        if PANDAS_READY:
-            df = self.student_workbook.get_active_dataframe()
-        else:
-            df = None
-        self._set_student_dataframe(df, propagate=True)
+        self._apply_student_workbook(self.student_workbook, propagate=True)
         self._schedule_save()
 
     def _create_new_class(self) -> None:
@@ -11665,25 +11592,63 @@ class RollCallTimerWindow(QWidget):
         self._update_class_button_label()
 
     def _load_student_data_if_needed(self) -> bool:
+        if self.student_workbook is not None:
+            return True
         if not self._student_data_pending_load:
             return True
+        if self._student_data_loading:
+            return False
         if not (PANDAS_AVAILABLE and OPENPYXL_AVAILABLE):
             return False
-        workbook = load_student_data(self)
-        if workbook is None:
-            return False
-        self._student_data_pending_load = False
-        self._apply_student_workbook(workbook, propagate=True)
-        encrypted_state, encrypted_password = _get_session_student_encryption()
-        self._student_file_encrypted = bool(encrypted_state)
-        self._student_password = encrypted_password
-        saved = self.settings_manager.load_settings().get("RollCallTimer", {})
-        self._restore_group_state(saved)
-        self._update_encryption_button()
-        self._update_class_button_label()
-        self.display_current_student()
-        self._schedule_save()
-        return True
+        existing_plain, existing_encrypted = self._refresh_student_file_paths()
+        password: Optional[str] = None
+        if existing_plain is None and existing_encrypted is not None:
+            password = self._prompt_existing_encryption_password("解密学生数据")
+            if not password:
+                return False
+
+        def _on_success(result: object) -> None:
+            self._student_data_loading = False
+            if not isinstance(result, tuple) or len(result) != 4:
+                return
+            workbook, encrypted_state, encrypted_password, created = result
+            if workbook is None:
+                return
+            # 尝试恢复当前班级
+            saved_class = str(self.current_class_name or "").strip()
+            if saved_class and saved_class in workbook.class_names():
+                workbook.set_active_class(saved_class)
+            self._student_data_pending_load = False
+            self._apply_student_workbook(workbook, propagate=True)
+            self._student_file_encrypted = bool(encrypted_state)
+            self._student_password = encrypted_password
+            saved = self.roll_call_config.to_mapping()
+            self._restore_group_state(saved)
+            self._update_encryption_button()
+            self._update_class_button_label()
+            self.display_current_student()
+            if created:
+                show_quiet_information(self, f"未找到学生名单，已为您创建模板文件：{self._plain_file_path}")
+            self._schedule_save()
+
+        def _on_error(message: str, _exc: object) -> None:
+            self._student_data_loading = False
+            if message:
+                show_quiet_information(self, f"加载学生数据失败：{message}")
+
+        worker = _IOWorker(
+            _read_student_workbook,
+            existing_plain,
+            existing_encrypted,
+            self._encrypted_file_path,
+            self._plain_file_path,
+            password,
+        )
+        worker.signals.finished.connect(_on_success)
+        worker.signals.error.connect(_on_error)
+        self._student_data_loading = True
+        self._io_pool.start(worker)
+        return False
 
     def _handle_encrypt_student_file(self) -> None:
         if not PANDAS_READY:
@@ -11694,6 +11659,7 @@ class RollCallTimerWindow(QWidget):
             return
         if not self._ensure_student_data_ready():
             return
+        self._refresh_student_file_paths()
         if self.student_workbook is None:
             if self.student_data is None or not isinstance(self.student_data, pd.DataFrame):
                 show_quiet_information(self, "没有可加密的学生数据。")
@@ -11714,7 +11680,7 @@ class RollCallTimerWindow(QWidget):
             data = self.student_workbook.as_dict()
             _save_student_workbook(
                 data,
-                self.STUDENT_FILE,
+                self._plain_file_path,
                 self._encrypted_file_path,
                 encrypted=True,
                 password=password,
@@ -11731,6 +11697,7 @@ class RollCallTimerWindow(QWidget):
             show_quiet_information(self, f"加密失败：{exc}")
 
     def _handle_decrypt_student_file(self) -> None:
+        self._refresh_student_file_paths()
         encrypted_path = self._encrypted_file_path
         if not os.path.exists(encrypted_path):
             show_quiet_information(self, "未找到加密文件，无法解密。")
@@ -11757,7 +11724,7 @@ class RollCallTimerWindow(QWidget):
         try:
             _save_student_workbook(
                 workbook.as_dict(),
-                self.STUDENT_FILE,
+                self._plain_file_path,
                 self._encrypted_file_path,
                 encrypted=False,
                 password=None,
@@ -11785,12 +11752,12 @@ class RollCallTimerWindow(QWidget):
             return
         if hasattr(parent, "student_data"):
             try:
-                setattr(parent, "student_data", self.student_data)
+                parent.student_data = self.student_data  # type: ignore[assignment]
             except Exception:
                 pass
         if hasattr(parent, "student_workbook"):
             try:
-                setattr(parent, "student_workbook", self.student_workbook)
+                parent.student_workbook = self.student_workbook  # type: ignore[assignment]
             except Exception:
                 pass
 
@@ -12216,6 +12183,19 @@ class RollCallTimerWindow(QWidget):
             return
         if not self._ensure_student_data_ready():
             return
+        if self._student_file_encrypted and not self._student_password:
+            # 尝试复用会话缓存的密码，避免重复弹窗
+            cached_encrypted, cached_password = _get_session_student_encryption()
+            if cached_encrypted and cached_password:
+                self._student_password = cached_password
+            else:
+                password = self._prompt_existing_encryption_password("解密学生数据")
+                if not password:
+                    show_quiet_information(self, "缺少加密密码，已取消保存。")
+                    return
+                self._student_password = password
+                _set_session_student_encryption(True, password)
+        self._refresh_student_file_paths()
         if self.student_workbook is None:
             if self.student_data is None or not isinstance(self.student_data, pd.DataFrame):
                 return
@@ -12234,21 +12214,42 @@ class RollCallTimerWindow(QWidget):
         if self.student_workbook is None:
             return
         try:
-            with self._score_write_lock:
-                data = self.student_workbook.as_dict()
+            locker = QMutexLocker(self._score_write_lock)
+            data = self.student_workbook.as_dict()
+            locker.unlock()
+        except Exception as exc:
+            logger.debug("Failed to snapshot student workbook: %s", exc, exc_info=True)
+            return
+
+        def _write_scores(payload: Dict[str, Dict[str, list]]) -> bool:
+            locker_inner = QMutexLocker(self._score_write_lock)
+            try:
                 _save_student_workbook(
-                    data,
-                    self.STUDENT_FILE,
+                    payload,
+                    self._plain_file_path,
                     self._encrypted_file_path,
                     encrypted=self._student_file_encrypted,
                     password=self._student_password,
                 )
+            finally:
+                del locker_inner
+            return True
+
+        worker = _IOWorker(_write_scores, data)
+
+        def _on_success(_result: object) -> None:
             self._score_persist_failed = False
             self._update_class_button_label()
-        except Exception as exc:
+
+        def _on_error(message: str, _exc: object) -> None:
             if not self._score_persist_failed:
-                show_quiet_information(self, f"保存成绩失败：{exc}")
+                show_quiet_information(self, f"保存成绩失败：{message}")
                 self._score_persist_failed = True
+            logger.debug("Failed to persist student scores: %s", message, exc_info=True)
+
+        worker.signals.finished.connect(_on_success)
+        worker.signals.error.connect(_on_error)
+        self._io_pool.start(worker)
 
     def toggle_mode(self) -> None:
         self.mode = "timer" if self.mode == "roll_call" else "roll_call"
@@ -12865,7 +12866,7 @@ class RollCallTimerWindow(QWidget):
         self._global_drawn_students = set(new_global)
         self._group_drawn_history["全部"] = self._global_drawn_students
 
-        for group, (base_list, base_set) in subgroup_base.items():
+        for group, (_base_list, base_set) in subgroup_base.items():
             pool = subgroup_remaining.get(group, [])
             filtered = [idx for idx in pool if idx in base_set and idx not in self._global_drawn_students]
             if filtered != pool:
@@ -13225,41 +13226,58 @@ class RollCallTimerWindow(QWidget):
             self._save_timer.stop()
         self._save_timer.start()
 
+    def _threaded_save_settings(self, payload: Dict[str, Dict[str, str]]) -> bool:
+        locker = QMutexLocker(self._settings_write_lock)
+        try:
+            self.settings_manager.save_settings(payload)
+        finally:
+            del locker
+        return True
+
+    def _queue_settings_save(self, settings: Dict[str, Dict[str, str]]) -> None:
+        worker = _IOWorker(self._threaded_save_settings, settings)
+
+        def _log_error(message: str, _exc: object) -> None:
+            logger.error("Failed to persist settings: %s", message)
+
+        worker.signals.error.connect(_log_error)
+        self._io_pool.start(worker)
+
     def save_settings(self) -> None:
         if self._save_timer.isActive():
             self._save_timer.stop()
-        settings = self.settings_manager.load_settings()
-        sec = settings.get("RollCallTimer", {})
-        sec["geometry"] = geometry_to_text(self)
-        sec["show_id"] = bool_to_str(self.show_id)
-        sec["show_name"] = bool_to_str(self.show_name)
-        sec["show_photo"] = bool_to_str(self.show_photo)
-        sec["photo_duration_seconds"] = str(int(self.photo_duration_seconds))
-        sec["speech_enabled"] = bool_to_str(self.speech_enabled)
-        sec["speech_voice_id"] = self.selected_voice_id
-        sec["current_class"] = self.current_class_name
-        sec["current_group"] = self.current_group_name
-        sec["timer_countdown_minutes"] = str(self.timer_countdown_minutes)
-        sec["timer_countdown_seconds"] = str(self.timer_countdown_seconds)
-        sec["timer_sound_enabled"] = bool_to_str(self.timer_sound_enabled)
-        sec["mode"] = self.mode
-        sec["timer_mode"] = self.timer_modes[self.timer_mode_index]
-        sec["timer_seconds_left"] = str(self.timer_seconds_left)
-        sec["timer_stopwatch_seconds"] = str(self.timer_stopwatch_seconds)
-        sec["timer_running"] = bool_to_str(self.timer_running)
-        sec["id_font_size"] = str(self.last_id_font_size)
-        sec["name_font_size"] = str(self.last_name_font_size)
-        sec["timer_font_size"] = str(self.last_timer_font_size)
-        sec["scoreboard_order"] = self.scoreboard_order
-        sec["students_encrypted"] = bool_to_str(self._student_file_encrypted)
+        self.roll_call_config.geometry = geometry_to_text(self)
+        self.roll_call_config.show_id = bool(self.show_id)
+        self.roll_call_config.show_name = bool(self.show_name)
+        self.roll_call_config.show_photo = bool(self.show_photo)
+        self.roll_call_config.photo_duration_seconds = int(self.photo_duration_seconds)
+        self.roll_call_config.speech_enabled = bool(self.speech_enabled)
+        self.roll_call_config.speech_voice_id = self.selected_voice_id
+        self.roll_call_config.current_class = self.current_class_name
+        self.roll_call_config.current_group = self.current_group_name
+        self.roll_call_config.timer_countdown_minutes = int(self.timer_countdown_minutes)
+        self.roll_call_config.timer_countdown_seconds = int(self.timer_countdown_seconds)
+        self.roll_call_config.timer_sound_enabled = bool(self.timer_sound_enabled)
+        self.roll_call_config.mode = self.mode
+        self.roll_call_config.timer_mode = self.timer_modes[self.timer_mode_index]
+        self.roll_call_config.timer_seconds_left = int(self.timer_seconds_left)
+        self.roll_call_config.timer_stopwatch_seconds = int(self.timer_stopwatch_seconds)
+        self.roll_call_config.timer_running = bool(self.timer_running)
+        self.roll_call_config.id_font_size = int(self.last_id_font_size)
+        self.roll_call_config.name_font_size = int(self.last_name_font_size)
+        self.roll_call_config.timer_font_size = int(self.last_timer_font_size)
+        self.roll_call_config.scoreboard_order = self.scoreboard_order
+        self.roll_call_config.students_encrypted = bool(self._student_file_encrypted)
         self._prune_orphan_class_states()
         if not self._student_data_pending_load:
             self._store_active_class_state()
-        sec["class_states"] = self._encode_class_states()
+        self.roll_call_config.class_states = self._encode_class_states()
         if self._student_data_pending_load:
             # 在尚未加载真实名单数据时，保留磁盘上已有的未点名状态，避免误把占位空列表写回
             # 此时直接返回，保持上一轮保存的名单信息不被覆盖。
-            settings["RollCallTimer"] = sec
+            payload = self.roll_call_config.to_mapping()
+            settings = self.settings_manager.load_settings()
+            settings["RollCallTimer"] = payload
             self.settings_manager.save_settings(settings)
             return
 
@@ -13285,20 +13303,21 @@ class RollCallTimerWindow(QWidget):
                 except (TypeError, ValueError):
                     last_payload[group] = None
         try:
-            sec["group_remaining"] = json.dumps(remaining_payload, ensure_ascii=False)
+            self.roll_call_config.group_remaining = json.dumps(remaining_payload, ensure_ascii=False)
         except TypeError:
-            sec["group_remaining"] = json.dumps({}, ensure_ascii=False)
+            self.roll_call_config.group_remaining = json.dumps({}, ensure_ascii=False)
         try:
-            sec["group_last"] = json.dumps(last_payload, ensure_ascii=False)
+            self.roll_call_config.group_last = json.dumps(last_payload, ensure_ascii=False)
         except TypeError:
-            sec["group_last"] = json.dumps({}, ensure_ascii=False)
+            self.roll_call_config.group_last = json.dumps({}, ensure_ascii=False)
         try:
             global_drawn_payload = sorted(int(idx) for idx in self._global_drawn_students)
-            sec["global_drawn"] = json.dumps(global_drawn_payload, ensure_ascii=False)
+            self.roll_call_config.global_drawn = json.dumps(global_drawn_payload, ensure_ascii=False)
         except TypeError:
-            sec["global_drawn"] = json.dumps([], ensure_ascii=False)
-        settings["RollCallTimer"] = sec
-        self.settings_manager.save_settings(settings)
+            self.roll_call_config.global_drawn = json.dumps([], ensure_ascii=False)
+        settings = self.settings_manager.load_settings()
+        settings["RollCallTimer"] = self.roll_call_config.to_mapping()
+        self._queue_settings_save(settings)
 
 
 # ---------- 关于 ----------
@@ -13363,7 +13382,7 @@ def _encrypt_student_bytes(password: str, data: bytes) -> bytes:
     salt = os.urandom(16)
     stream_key, mac_key = _derive_stream_keys(password, salt)
     keystream = _generate_keystream(stream_key, len(data))
-    cipher = bytes(b ^ k for b, k in zip(data, keystream))
+    cipher = bytes(b ^ k for b, k in zip(data, keystream, strict=False))
     tag = hmac.new(mac_key, cipher, hashlib.sha256).digest()
     return _ENCRYPTED_MAGIC + salt + tag + cipher
 
@@ -13379,7 +13398,7 @@ def _decrypt_student_bytes(password: str, blob: bytes) -> bytes:
     if not hmac.compare_digest(expected_tag, tag):
         raise ValueError("密码错误或文件已损坏")
     keystream = _generate_keystream(stream_key, len(cipher))
-    return bytes(b ^ k for b, k in zip(cipher, keystream))
+    return bytes(b ^ k for b, k in zip(cipher, keystream, strict=False))
 
 
 def _normalize_text(value: object) -> str:
@@ -13413,7 +13432,6 @@ def _normalize_student_dataframe(
         if column not in normalized.columns:
             normalized[column] = pd.NA
 
-    normalized["姓名"] = normalized["姓名"].apply(lambda v: re.sub(r"\s+", "", _normalize_text(v)))
     normalized["分组"] = normalized["分组"].apply(lambda v: re.sub(r"\s+", "", _normalize_text(v))).str.upper()
 
     id_series = normalized["学号"].apply(lambda v: re.sub(r"\s+", "", _normalize_text(v)))
@@ -13433,7 +13451,7 @@ def _normalize_student_dataframe(
             continue
         normalized[column] = normalized[column].apply(_normalize_text)
 
-    ordered_columns = [col for col in ["学号", "姓名", "分组", "成绩"] if col in normalized.columns]
+    ordered_columns = [col for col in DEFAULT_STUDENT_COLUMNS if col in normalized.columns]
     extra_columns = [col for col in normalized.columns if col not in ordered_columns]
     normalized = normalized[ordered_columns + extra_columns]
 
@@ -13447,8 +13465,13 @@ def _normalize_student_dataframe(
 def _empty_student_dataframe() -> PandasDataFrame:
     if not PANDAS_READY:
         raise RuntimeError("Pandas support is required to create student data tables.")
-    template = pd.DataFrame({"学号": [], "姓名": [], "分组": [], "成绩": []})
-    return _normalize_student_dataframe(template, drop_incomplete=False)
+    global _EMPTY_STUDENT_TEMPLATE
+    if _EMPTY_STUDENT_TEMPLATE is not None:
+        return _EMPTY_STUDENT_TEMPLATE.copy(deep=True)
+    template = pd.DataFrame({column: [] for column in DEFAULT_STUDENT_COLUMNS})
+    normalized = _normalize_student_dataframe(template, drop_incomplete=False)
+    _EMPTY_STUDENT_TEMPLATE = normalized.copy(deep=True)
+    return normalized
 
 
 def _sanitize_sheet_name(name: str, fallback: str) -> str:
@@ -13549,40 +13572,140 @@ class StudentWorkbook:
         return ordered
 
 
-def _write_student_workbook(file_path: str, data: Mapping[str, PandasDataFrame]) -> None:
-    payload = _export_student_workbook_bytes(data)
+def _atomic_write_bytes(
+    file_path: str,
+    payload: bytes,
+    *,
+    suffix: str,
+    description: str,
+) -> None:
+    """Persist *payload* to *file_path* atomically to avoid partial writes."""
+
     target_dir = os.path.dirname(os.path.abspath(file_path))
     if target_dir and not _ensure_directory(target_dir):
         target_dir = os.getcwd()
     tmp_dir = target_dir or "."
-    fd, tmp_path = tempfile.mkstemp(suffix=".xlsx", dir=tmp_dir)
+    fd: Optional[int] = None
+    tmp_path = ""
     try:
+        fd, tmp_path = tempfile.mkstemp(suffix=suffix, dir=tmp_dir)
         with os.fdopen(fd, "wb") as tmp_file:
             tmp_file.write(payload)
         os.replace(tmp_path, file_path)
+    except OSError as exc:
+        raise OSError(f"Failed to write {description} to {file_path!r}: {exc}") from exc
     finally:
-        with contextlib.suppress(FileNotFoundError):
-            os.remove(tmp_path)
+        if fd is not None:
+            with contextlib.suppress(Exception):
+                os.close(fd)
+        if tmp_path:
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(tmp_path)
+
+
+def _write_student_workbook(file_path: str, data: Mapping[str, PandasDataFrame]) -> None:
+    """Write the provided workbook mapping to *file_path* atomically."""
+
+    payload = _export_student_workbook_bytes(data)
+    _atomic_write_bytes(file_path, payload, suffix=".xlsx", description="workbook")
 
 
 def _write_encrypted_student_workbook(file_path: str, data: Mapping[str, PandasDataFrame], password: str) -> None:
+    """Write workbook bytes encrypted with *password* to *file_path*."""
+
     payload = _export_student_workbook_bytes(data)
     encrypted = _encrypt_student_bytes(password, payload)
-    target_dir = os.path.dirname(os.path.abspath(file_path))
-    if target_dir and not _ensure_directory(target_dir):
-        target_dir = os.getcwd()
-    tmp_dir = target_dir or "."
-    fd, tmp_path = tempfile.mkstemp(suffix=".enc", dir=tmp_dir)
+    _atomic_write_bytes(file_path, encrypted, suffix=".enc", description="encrypted workbook")
+
+
+def _read_student_workbook(
+    existing_plain: Optional[str],
+    existing_encrypted: Optional[str],
+    encrypted_file_path: str,
+    plain_file_path: str,
+    password: Optional[str],
+) -> Tuple[Optional[StudentWorkbook], bool, Optional[str], bool]:
+    """Load student data and report encryption state."""
+
+    if not (PANDAS_AVAILABLE and OPENPYXL_AVAILABLE):
+        raise RuntimeError("缺少 pandas 和 openpyxl")
+
+    def _ensure_readable_student_file(path: Optional[str], label: str) -> str:
+        normalized = os.path.abspath(path or "")
+        if not path or not os.path.isfile(normalized):
+            raise FileNotFoundError(f"{label}不存在或不可访问: {normalized}")
+        return normalized
+
+    created_template = False
+    if existing_plain is None and existing_encrypted is None:
+        template = pd.DataFrame(
+            {
+                "学号": [101, 102, 103],
+                "姓名": ["张三", "李四", "王五"],
+                "班级": ["A", "B", "A"],
+                "成绩": [0, 0, 0],
+            }
+        )
+        workbook = StudentWorkbook(OrderedDict({"班级1": template}), active_class="班级1")
+        _save_student_workbook(
+            workbook.as_dict(),
+            plain_file_path,
+            encrypted_file_path,
+            encrypted=False,
+            password=None,
+        )
+        created_template = True
+        return workbook, False, None, created_template
+
+    if existing_plain is None and existing_encrypted is not None:
+        if not password:
+            raise ValueError("缺少加密密码")
+        encrypted_source = _ensure_readable_student_file(existing_encrypted, "加密学生文件")
+        with open(encrypted_source, "rb") as fh:
+            payload = fh.read()
+        try:
+            plain_bytes = _decrypt_student_bytes(password, payload)
+        except Exception as exc:
+            raise RuntimeError("无法解密学生数据") from exc
+        buffer = io.BytesIO(plain_bytes)
+        try:
+            raw_data = pd.read_excel(buffer, sheet_name=None)
+        except Exception as exc:
+            raise RuntimeError(f"无法读取解密后的学生数据: {exc}") from exc
+        workbook = StudentWorkbook(OrderedDict(raw_data), active_class="")
+        # Use decrypted data in-memory without immediately writing to disk
+        return workbook, True, password, created_template
+
+    read_path: Optional[str] = None
+    for candidate in (existing_plain, plain_file_path):
+        try:
+            read_path = _ensure_readable_student_file(candidate, "学生数据文件")
+            break
+        except FileNotFoundError:
+            continue
+    if read_path is None:
+        raise FileNotFoundError("未找到可用的学生数据文件")
+
     try:
-        with os.fdopen(fd, "wb") as tmp_file:
-            tmp_file.write(encrypted)
-        os.replace(tmp_path, file_path)
-    finally:
-        with contextlib.suppress(FileNotFoundError):
-            os.remove(tmp_path)
+        raw_data = pd.read_excel(read_path, sheet_name=None)
+    except Exception as exc:
+        raise RuntimeError(f"无法读取学生数据文件 {read_path}: {exc}") from exc
+
+    workbook = StudentWorkbook(OrderedDict(raw_data), active_class="")
+    _save_student_workbook(
+        workbook.as_dict(),
+        plain_file_path,
+        encrypted_file_path,
+        encrypted=False,
+        password=None,
+    )
+    return workbook, False, None, created_template
+
 
 
 def _export_student_workbook_bytes(data: Mapping[str, PandasDataFrame]) -> bytes:
+    """Normalize the workbook mapping and render it to Excel bytes."""
+
     normalized: "OrderedDict[str, PandasDataFrame]" = OrderedDict()
     for idx, (name, df) in enumerate(data.items(), start=1):
         fallback = f"班级{idx}" if idx > 1 else "班级1"
@@ -13603,11 +13726,18 @@ def _export_student_workbook_bytes(data: Mapping[str, PandasDataFrame]) -> bytes
                 df.to_excel(writer, sheet_name=sheet_name, index=False)
         buffer.seek(0)
         return buffer.getvalue()
-    except Exception:
-        buffer.seek(0)
-        first = next(iter(normalized.values()))
-        first.to_excel(buffer, index=False)
-        return buffer.getvalue()
+    except Exception as exc:
+        buffer = io.BytesIO()
+        try:
+            fallback_engine = None if engine else ("openpyxl" if OPENPYXL_AVAILABLE else None)
+            with pd.ExcelWriter(buffer, engine=fallback_engine) as writer:  # type: ignore[call-arg]
+                for sheet_name, df in normalized.items():
+                    df.to_excel(writer, sheet_name=sheet_name, index=False)
+            buffer.seek(0)
+            return buffer.getvalue()
+        except Exception:
+            raise RuntimeError(f"Failed to export student workbook: {exc}") from exc
+
 
 
 def _save_student_workbook(
@@ -13618,6 +13748,8 @@ def _save_student_workbook(
     encrypted: bool,
     password: Optional[str],
 ) -> None:
+    """Persist the workbook to disk and clean up duplicate candidate files."""
+
     if encrypted:
         if not password:
             raise ValueError("缺少加密密码")
@@ -13628,6 +13760,9 @@ def _save_student_workbook(
         _write_student_workbook(file_path, data)
         with contextlib.suppress(FileNotFoundError):
             os.remove(encrypted_file_path)
+    keep_plain = file_path if os.path.exists(file_path) else None
+    keep_encrypted = encrypted_file_path if os.path.exists(encrypted_file_path) else None
+    _cleanup_student_candidates(keep_plain, keep_encrypted)
 
 
 def load_student_data(parent: Optional[QWidget]) -> Optional[StudentWorkbook]:
@@ -13642,68 +13777,70 @@ def load_student_data(parent: Optional[QWidget]) -> Optional[StudentWorkbook]:
     existing_plain = _any_existing_path(resources.plain_candidates)
     existing_encrypted = _any_existing_path(resources.encrypted_candidates)
 
-    if existing_plain is None and existing_encrypted is not None:
+    if existing_encrypted is not None:
         attempts = 0
-        encrypted_source = existing_encrypted
         while attempts < 3:
             password, ok = PasswordPromptDialog.get_password(
                 parent,
-                "解密学生数据",
-                "检测到已加密的学生名单，请输入密码：",
+                "解锁学生数据",
+                "检测到已加密的学生数据文件，请输入密码：",
                 allow_empty=False,
             )
             if not ok:
-                QMessageBox.information(parent, "提示", "已取消加载加密的学生名单。")
-                return None
+                break
             password = password.strip()
             if not password:
                 QMessageBox.warning(parent, "提示", "密码不能为空，请重新输入。")
                 attempts += 1
                 continue
             try:
-                with open(encrypted_source, "rb") as fh:
-                    payload = fh.read()
-                plain_bytes = _decrypt_student_bytes(password, payload)
-                buffer = io.BytesIO(plain_bytes)
-                raw_data = pd.read_excel(buffer, sheet_name=None)
-                workbook = StudentWorkbook(OrderedDict(raw_data), active_class="")
-                _set_session_student_encryption(True, password)
-                try:
-                    _write_student_workbook(file_path, workbook.as_dict())
-                except Exception:
-                    logger.debug("Failed to persist decrypted workbook to %s", file_path, exc_info=True)
+                workbook, encrypted, pwd, _created = _read_student_workbook(
+                    existing_plain,
+                    existing_encrypted,
+                    resources.encrypted,
+                    file_path,
+                    password,
+                )
+                if workbook is None:
+                    return None
+                _update_encryption_state(encrypted, pwd)
                 return workbook
             except Exception as exc:
                 attempts += 1
                 QMessageBox.warning(parent, "提示", f"解密失败：{exc}")
-        QMessageBox.critical(parent, "错误", "多次输入密码失败，无法加载学生名单。")
-        return None
-
-    if existing_plain is None:
-        try:
-            template = pd.DataFrame(
-                {"学号": [101, 102, 103], "姓名": ["张三", "李四", "王五"], "分组": ["A", "B", "A"], "成绩": [0, 0, 0]}
-            )
-            workbook = StudentWorkbook(OrderedDict({"班级1": template}), active_class="班级1")
-            _write_student_workbook(file_path, workbook.as_dict())
-            show_quiet_information(parent, f"未找到学生名单，已为您创建模板文件：{file_path}")
-            _set_session_student_encryption(False, None)
-            existing_plain = file_path
-        except Exception as exc:
-            QMessageBox.critical(parent, "错误", f"创建模板文件失败：{exc}")
+        if existing_plain is None:
+            QMessageBox.critical(parent, "提示", "解密失败，无法使用学生数据")
             return None
+        choice = QMessageBox.question(
+            parent,
+            "提示",
+            "解密失败或已取消，是否使用未加密的学生数据?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if choice != QMessageBox.StandardButton.Yes:
+            return None
+        existing_encrypted = None  # 切换使用未加密数据
 
     try:
-        read_path = existing_plain if existing_plain and os.path.exists(existing_plain) else file_path
-        raw_data = pd.read_excel(read_path, sheet_name=None)
-        workbook = StudentWorkbook(OrderedDict(raw_data), active_class="")
-        _write_student_workbook(file_path, workbook.as_dict())
-        _set_session_student_encryption(False, None)
-        if _any_existing_path(resources.encrypted_candidates):
-            show_quiet_information(parent, "检测到同时存在加密文件，将优先使用明文 students.xlsx。")
+        workbook, encrypted, pwd, created = _read_student_workbook(
+            existing_plain,
+            None,
+            resources.encrypted,
+            file_path,
+            None,
+        )
+        if workbook is None:
+            return None
+        _update_encryption_state(encrypted, pwd)
+        if created:
+            show_quiet_information(parent, f"未找到学生数据，已为你创建模板文件：{file_path}")
+        plain_exists = os.path.exists(file_path)
+        encrypted_exists = _any_existing_path(resources.encrypted_candidates) is not None
+        if plain_exists and encrypted_exists and not encrypted:
+            show_quiet_information(parent, "检测到同时存在加密文件，已默认使用未加密的 students.xlsx。")
         return workbook
     except Exception as exc:
-        QMessageBox.critical(parent, "错误", f"无法加载学生名单，请检查文件格式。\n错误：{exc}")
+        QMessageBox.critical(parent, "错误", f"无法加载学生数据，文件格式异常\n详情: {exc}")
         return None
 
 
@@ -13838,7 +13975,7 @@ class LauncherWindow(QWidget):
             try:
                 self.student_data = student_workbook.get_active_dataframe()
             except Exception:
-                self.student_data = pd.DataFrame(columns=["学号", "姓名", "分组", "成绩"])
+                self.student_data = _new_student_dataframe() or pd.DataFrame(columns=DEFAULT_STUDENT_COLUMNS)
         self.overlay: Optional[OverlayWindow] = None
         self.roll_call_window: Optional[RollCallTimerWindow] = None
         self._dragging = False
@@ -13848,6 +13985,10 @@ class LauncherWindow(QWidget):
         self._bubble_position = QPoint()
         self._minimized = False
         self._minimized_on_start = False
+        self._auto_exit_seconds = 0
+        self._auto_exit_timer = QTimer(self)
+        self._auto_exit_timer.setSingleShot(True)
+        self._auto_exit_timer.timeout.connect(self.request_exit)
 
     def _configure_window(self) -> None:
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
@@ -13940,15 +14081,15 @@ class LauncherWindow(QWidget):
         self.minimize_button.clicked.connect(self.minimize_launcher)
         bottom_row.addWidget(self.minimize_button)
 
-        self.autostart_check = QCheckBox("开机启动")
-        self.autostart_check.stateChanged.connect(self.toggle_autostart)
-        bottom_row.addWidget(self.autostart_check)
-
         bottom_row.addStretch(1)
 
         self.about_button = QPushButton("关于")
         self.about_button.clicked.connect(self.show_about)
         bottom_row.addWidget(self.about_button)
+
+        self.settings_button = QPushButton("设置")
+        self.settings_button.clicked.connect(self.show_settings_dialog)
+        bottom_row.addWidget(self.settings_button)
 
         self.exit_button = QPushButton("退出")
         self.exit_button.clicked.connect(self.request_exit)
@@ -13966,17 +14107,22 @@ class LauncherWindow(QWidget):
         auxiliary_width = max(self.minimize_button.sizeHint().width(), 52)
         self.minimize_button.setFixedWidth(auxiliary_width)
 
-        about_width = max(self.about_button.sizeHint().width(), 52)
-        self.about_button.setFixedWidth(about_width)
-
-        exit_width = max(self.exit_button.sizeHint().width(), 52)
-        self.exit_button.setFixedWidth(exit_width)
+        info_width = max(
+            self.about_button.sizeHint().width(),
+            self.settings_button.sizeHint().width(),
+            self.exit_button.sizeHint().width(),
+            52,
+        )
+        self.about_button.setFixedWidth(info_width)
+        self.settings_button.setFixedWidth(info_width)
+        self.exit_button.setFixedWidth(info_width)
 
         button_heights = [
             self.paint_button.sizeHint().height(),
             self.roll_call_button.sizeHint().height(),
             self.minimize_button.sizeHint().height(),
             self.about_button.sizeHint().height(),
+            self.settings_button.sizeHint().height(),
             self.exit_button.sizeHint().height(),
         ]
         target_height = max(button_heights)
@@ -13985,6 +14131,7 @@ class LauncherWindow(QWidget):
             self.roll_call_button,
             self.minimize_button,
             self.about_button,
+            self.settings_button,
             self.exit_button,
         ):
             button.setFixedHeight(target_height)
@@ -13996,7 +14143,6 @@ class LauncherWindow(QWidget):
             self.paint_button,
             self.roll_call_button,
             self.minimize_button,
-            self.autostart_check,
         ):
             widget.installEventFilter(self)
 
@@ -14008,7 +14154,7 @@ class LauncherWindow(QWidget):
         self._ensure_min_height = self.height()
 
     def _apply_saved_state(self) -> None:
-        launcher_settings, startup_settings = self.settings_manager.get_launcher_state()
+        launcher_settings = self.settings_manager.get_launcher_state()
 
         position = QPoint(launcher_settings.position)
         self.move(position)
@@ -14021,10 +14167,13 @@ class LauncherWindow(QWidget):
 
         self._minimized = launcher_settings.minimized
         self._minimized_on_start = launcher_settings.minimized
+        self._auto_exit_seconds = max(0, int(launcher_settings.auto_exit_seconds))
+        self._schedule_auto_exit_timer()
 
-        autostart_enabled = startup_settings.autostart_enabled and WINREG_AVAILABLE
-        self.autostart_check.setChecked(autostart_enabled)
-        self.autostart_check.setEnabled(WINREG_AVAILABLE)
+    def _schedule_auto_exit_timer(self) -> None:
+        self._auto_exit_timer.stop()
+        if self._auto_exit_seconds > 0:
+            self._auto_exit_timer.start(self._auto_exit_seconds * 1000)
 
     def _enforce_feature_availability(self) -> None:
         if not (PANDAS_AVAILABLE and OPENPYXL_AVAILABLE):
@@ -14073,9 +14222,27 @@ class LauncherWindow(QWidget):
             position=position,
             bubble_position=bubble_position,
             minimized=self._minimized,
+            auto_exit_seconds=self._auto_exit_seconds,
         )
-        startup_settings = StartupSettings(autostart_enabled=self.autostart_check.isChecked())
-        self.settings_manager.update_launcher_settings(launcher_settings, startup_settings)
+        self.settings_manager.update_launcher_settings(launcher_settings)
+
+
+    def show_settings_dialog(self) -> None:
+        current_minutes = max(0, int(round(self._auto_exit_seconds / 60)))
+        minutes, ok = QInputDialog.getInt(
+            self,
+            "设置自动关闭",
+            "启动器运行后自动关闭整个软件的时间（分，0 表示不自动关闭）：",
+            current_minutes or 40,
+            0,
+            1440,
+            1,
+        )
+        if not ok:
+            return
+        self._auto_exit_seconds = max(0, int(minutes)) * 60
+        self._schedule_auto_exit_timer()
+        self.save_position()
 
     def toggle_paint(self) -> None:
         """打开或隐藏屏幕画笔覆盖层。"""
@@ -14091,20 +14258,24 @@ class LauncherWindow(QWidget):
             if not PANDAS_AVAILABLE or not OPENPYXL_AVAILABLE:
                 QMessageBox.warning(self, "提示", "未安装 pandas/openpyxl，点名功能不可用。")
                 return
-            settings = self.settings_manager.load_settings().get("RollCallTimer", {})
-            initial_mode = settings.get("mode", "roll_call")
-            defer_prompt = initial_mode == "timer"
-            if self.student_workbook is None and not defer_prompt:
+            config = self.settings_manager.get_roll_call_settings()
+            initial_mode = "roll_call"
+            defer_prompt = False
+            if self.student_workbook is None:
                 workbook = load_student_data(self)
                 if workbook is None:
                     QMessageBox.warning(self, "提示", "学生数据加载失败，无法打开点名器。")
                     return
+                # 使用上次保存的班级作为初始 active_class，避免默认落到第一张表
+                saved_class = str(config.current_class).strip()
+                if saved_class and saved_class in workbook.class_names():
+                    workbook.set_active_class(saved_class)
                 self.student_workbook = workbook
                 if PANDAS_READY:
                     try:
                         self.student_data = workbook.get_active_dataframe()
                     except Exception:
-                        self.student_data = pd.DataFrame(columns=["学号", "姓名", "分组", "成绩"])
+                        self.student_data = _new_student_dataframe() or pd.DataFrame(columns=DEFAULT_STUDENT_COLUMNS)
             self.roll_call_window = RollCallTimerWindow(
                 self.settings_manager,
                 self.student_workbook,
@@ -14137,11 +14308,6 @@ class LauncherWindow(QWidget):
 
     def on_roll_call_visibility_changed(self, visible: bool) -> None:
         self.roll_call_button.setText("隐藏点名" if visible else "显示点名")
-
-    def toggle_autostart(self) -> None:
-        if not WINREG_AVAILABLE: return
-        enabled = self.autostart_check.isChecked()
-        self.set_autostart(enabled); self.save_position()
 
     def request_exit(self) -> None:
         """优雅地关闭应用程序，确保所有窗口在退出前持久化状态。"""
@@ -14247,32 +14413,6 @@ class LauncherWindow(QWidget):
         self._bubble_position = QPoint(pos.x(), pos.y())
         if self._minimized:
             self.save_position()
-
-    def set_autostart(self, enabled: bool) -> None:
-        if not WINREG_AVAILABLE: return
-        key_path = r"Software\\Microsoft\\Windows\\CurrentVersion\\Run"
-        try:
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as key:
-                if enabled:
-                    script_path = self.get_script_path()
-                    if script_path.lower().endswith((".py", ".pyw")):
-                        pythonw = os.path.join(sys.prefix, "pythonw.exe")
-                        if not os.path.exists(pythonw): pythonw = sys.executable
-                        value = f'"{pythonw}" "{script_path}"'
-                    else:
-                        value = f'"{script_path}"'
-                    winreg.SetValueEx(key, "ClassroomTools", 0, winreg.REG_SZ, value)
-                else:
-                    try: winreg.DeleteValue(key, "ClassroomTools")
-                    except FileNotFoundError: pass
-        except PermissionError:
-            QMessageBox.warning(self, "提示", "写入开机启动失败，请以管理员身份运行。")
-        except Exception as exc:
-            QMessageBox.warning(self, "提示", f"设置开机启动失败：{exc}")
-
-    def get_script_path(self) -> str:
-        if getattr(sys, "frozen", False): return sys.executable
-        return os.path.abspath(sys.argv[0])
 
     def show_about(self) -> None:
         AboutDialog(self).exec()
