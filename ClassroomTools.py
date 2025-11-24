@@ -11384,6 +11384,13 @@ class RollCallTimerWindow(QWidget):
     def _store_active_class_state(self, class_name: Optional[str] = None) -> None:
         if not PANDAS_READY:
             return
+
+        # --- 核心修复：如果处于“等待加载”状态，绝对禁止保存当前状态 ---
+        # 原因：此时内存中的是空白模板数据，保存它会覆盖掉配置文件中读取的真实历史记录。
+        if getattr(self, "_student_data_pending_load", False):
+            return
+        # ---------------------------------------------------------
+
         self._prune_orphan_class_states()
         target = (class_name or self._resolve_active_class_name()).strip()
         if not target:
@@ -11396,9 +11403,10 @@ class RollCallTimerWindow(QWidget):
     def _prune_orphan_class_states(self) -> None:
         if not self._class_roll_states:
             return
-        # 数据尚未解密/加载时无法判定班级有效性，提前退出以避免误删历史点名状态
+        # 修复：数据未加载时，不知道哪些班级有效，禁止清理以保护历史记录
         if getattr(self, "_student_data_pending_load", False):
             return
+
         workbook = self.student_workbook
         if workbook is None:
             return
