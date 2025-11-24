@@ -59,6 +59,7 @@ def _load_helper_module() -> types.ModuleType:
         "_TRUE_STRINGS",
         "_FALSE_STRINGS",
         "_BooleanParseResult",
+        "_coerce_to_text",
         "_coerce_bool",
         "_casefold_cached",
         "_normalize_text_token",
