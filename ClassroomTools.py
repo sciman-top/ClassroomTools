@@ -937,6 +937,7 @@ else:
 
 _SESSION_STUDENT_PASSWORD: Optional[str] = None
 _SESSION_STUDENT_FILE_ENCRYPTED: bool = False
+_EMBEDDED_ROLL_STATE: Optional[str] = None
 
 
 def _set_session_student_encryption(encrypted: bool, password: Optional[str]) -> None:
@@ -954,6 +955,18 @@ def _update_encryption_state(encrypted: bool, password: Optional[str]) -> None:
 
     password_value = password if encrypted else None
     _set_session_student_encryption(encrypted, password_value)
+
+
+def _set_embedded_roll_state(state: Optional[str]) -> None:
+    global _EMBEDDED_ROLL_STATE
+    _EMBEDDED_ROLL_STATE = state if state else None
+
+
+def _consume_embedded_roll_state() -> Optional[str]:
+    global _EMBEDDED_ROLL_STATE
+    state = _EMBEDDED_ROLL_STATE
+    _EMBEDDED_ROLL_STATE = None
+    return state
 
 # ---------- 缓存 ----------
 _SPEECH_ENV_CACHE: tuple[float, str, List[str]] = (0.0, "", [])
@@ -9666,7 +9679,7 @@ def preferred_calligraphy_font(default: str = "Microsoft YaHei UI") -> str:
 
 
 class StudentListDialog(QDialog):
-    def __init__(self, parent: Optional[QWidget], students: List[tuple[str, str, int]]) -> None:
+    def __init__(self, parent: Optional[QWidget], students: List[tuple[str, str, int, bool]]) -> None:
         super().__init__(parent)
         self.setWindowTitle("学生名单")
         self.setModal(True)
@@ -9684,7 +9697,19 @@ class StudentListDialog(QDialog):
 
         button_font = QFont("Microsoft YaHei UI", 10, QFont.Weight.Medium)
         metrics = QFontMetrics(button_font)
-        max_text = max((metrics.horizontalAdvance(f"{sid} {name}") for sid, name, _ in students), default=120)
+
+        def _format_entry_text(sid: str, name: str) -> str:
+            return f"{sid} {name}".strip()
+
+        def _measure_text(sid: str, name: str, called: bool) -> int:
+            base = f"{sid} {name}".strip()
+            extra = metrics.horizontalAdvance(" ●") if not called else 0
+            return metrics.horizontalAdvance(base) + extra
+
+        max_text = max(
+            (_measure_text(sid, name, called) for sid, name, _, called in students),
+            default=120,
+        )
         min_button_width = max(120, max_text + 24)
         button_height = recommended_control_height(button_font, extra=16, minimum=38)
 
@@ -9704,18 +9729,38 @@ class StudentListDialog(QDialog):
             grid.setRowStretch(row, 0)
             grid.setRowMinimumHeight(row, button_height)
 
-        for position, (sid, name, data_index) in enumerate(students):
+        dot_size = 10
+        dot_pixmap = QPixmap(dot_size, dot_size)
+        dot_pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(dot_pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setBrush(QColor("#d93025"))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(1, 1, dot_size - 2, dot_size - 2)
+        painter.end()
+        dot_icon = QIcon(dot_pixmap)
+
+        for position, (sid, name, data_index, called) in enumerate(students):
             row = position // 10
             column = position % 10
-            button = QPushButton(f"{sid} {name}")
+            button = QPushButton(_format_entry_text(sid, name))
             button.setFont(button_font)
             button.setFixedSize(button_size)
             button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             apply_button_style(button, ButtonStyles.GRID, height=button_height)
+            button.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+            button.setIcon(dot_icon if not called else QIcon())
+            button.setIconSize(dot_pixmap.size())
+            button.setToolTip("本轮已点名" if called else "本轮未点名")
             button.clicked.connect(lambda _checked=False, value=data_index: self._select_student(value))
             grid.addWidget(button, row, column, Qt.AlignmentFlag.AlignCenter)
 
         layout.addLayout(grid)
+
+        legend = QLabel("红点标记本轮未点名（无标记即已点名）")
+        legend.setStyleSheet("color: #5f6368;")
+        legend.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(legend)
 
         box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=self)
         box.rejected.connect(self.reject)
@@ -10810,6 +10855,9 @@ class RollCallTimerWindow(QWidget):
             self._apply_student_workbook(self.student_workbook, propagate=False)
         else:
             self._set_student_dataframe(self.student_data, propagate=False)
+        embedded_state = _consume_embedded_roll_state()
+        if embedded_state:
+            self.roll_call_config.class_states = embedded_state
         self._apply_saved_fonts()
         self._update_menu_state()
         self._restore_group_state(config.to_mapping())
@@ -11038,14 +11086,28 @@ class RollCallTimerWindow(QWidget):
         module_dir = os.path.dirname(os.path.abspath(__file__))
         cwd = os.path.abspath(os.getcwd())
 
+        # 若已有已选定的路径且可写，优先沿用，避免读写指向不同目录
+        existing_plain_current = getattr(self, "_plain_file_path", None)
+        if existing_plain_current and os.path.exists(existing_plain_current) and _ensure_writable_directory(os.path.dirname(existing_plain_current) or os.getcwd()):
+            current_plain = os.path.abspath(existing_plain_current)
+        else:
+            current_plain = None
+        existing_encrypted_current = getattr(self, "_encrypted_file_path", None)
+        if existing_encrypted_current and os.path.exists(existing_encrypted_current) and _ensure_writable_directory(os.path.dirname(existing_encrypted_current) or os.getcwd()):
+            current_encrypted = os.path.abspath(existing_encrypted_current)
+        else:
+            current_encrypted = None
+
         existing_encrypted = (
-            _prefer_dir(module_dir, self.ENCRYPTED_STUDENT_FILE_CANDIDATES)
+            current_encrypted
+            or _prefer_dir(module_dir, self.ENCRYPTED_STUDENT_FILE_CANDIDATES)
             or _prefer_dir(cwd, self.ENCRYPTED_STUDENT_FILE_CANDIDATES)
             or _any_existing_path(self.ENCRYPTED_STUDENT_FILE_CANDIDATES)
         )
 
         existing_plain = (
-            _prefer_dir(module_dir, self.STUDENT_FILE_CANDIDATES)
+            current_plain
+            or _prefer_dir(module_dir, self.STUDENT_FILE_CANDIDATES)
             or _prefer_dir(cwd, self.STUDENT_FILE_CANDIDATES)
             or _any_existing_path(self.STUDENT_FILE_CANDIDATES)
         )
@@ -11057,6 +11119,10 @@ class RollCallTimerWindow(QWidget):
         plain_path = self.STUDENT_FILE
         if existing_plain and _writable_target(existing_plain):
             plain_path = existing_plain
+        elif existing_encrypted and not existing_plain:
+            same_dir_plain = os.path.join(os.path.dirname(existing_encrypted), os.path.basename(self.STUDENT_FILE))
+            if _writable_target(same_dir_plain):
+                plain_path = same_dir_plain
 
         encrypted_name = os.path.basename(self.ENCRYPTED_STUDENT_FILE)
         encrypted_default_dir = os.path.dirname(plain_path) or os.getcwd()
@@ -11175,7 +11241,7 @@ class RollCallTimerWindow(QWidget):
         self._ensure_group_pool(self.current_group_name, force_reset=True)
         self.current_student_index = None
         self._pending_passive_student = None
-        self._restore_active_class_state()
+        self._restore_active_class_state(restore_current_student=False)
         self._store_active_class_state()
         self._update_class_button_label()
         if propagate:
@@ -11330,6 +11396,9 @@ class RollCallTimerWindow(QWidget):
     def _prune_orphan_class_states(self) -> None:
         if not self._class_roll_states:
             return
+        # 数据尚未解密/加载时无法判定班级有效性，提前退出以避免误删历史点名状态
+        if getattr(self, "_student_data_pending_load", False):
+            return
         workbook = self.student_workbook
         if workbook is None:
             return
@@ -11385,7 +11454,7 @@ class RollCallTimerWindow(QWidget):
         }
         return ClassRollState.from_mapping(payload_map)
 
-    def _restore_active_class_state(self) -> None:
+    def _restore_active_class_state(self, *, restore_current_student: bool = False) -> None:
         if not PANDAS_READY:
             return
         class_name = self._resolve_active_class_name()
@@ -11394,7 +11463,7 @@ class RollCallTimerWindow(QWidget):
         snapshot = self._class_roll_states.get(class_name)
         if snapshot is None:
             return
-        self._apply_roll_state(snapshot)
+        self._apply_roll_state(snapshot, restore_current_student=restore_current_student)
 
     def _can_apply_roll_state(self) -> bool:
         """检查当前是否具备恢复点名状态所需的数据上下文。"""
@@ -11405,7 +11474,7 @@ class RollCallTimerWindow(QWidget):
             return False
         return isinstance(self.student_data, pd.DataFrame)
 
-    def _apply_roll_state(self, snapshot: ClassRollState) -> None:
+    def _apply_roll_state(self, snapshot: ClassRollState, *, restore_current_student: bool = True) -> None:
         if not self._can_apply_roll_state():
             return
 
@@ -11490,8 +11559,12 @@ class RollCallTimerWindow(QWidget):
                 return None
             return idx
 
-        self.current_student_index = _valid_index(snapshot.current_student)
-        self._pending_passive_student = _valid_index(snapshot.pending_student)
+        if restore_current_student:
+            self.current_student_index = _valid_index(snapshot.current_student)
+            self._pending_passive_student = _valid_index(snapshot.pending_student)
+        else:
+            self.current_student_index = None
+            self._pending_passive_student = None
 
         self._store_active_class_state(self._resolve_active_class_name())
 
@@ -11564,6 +11637,8 @@ class RollCallTimerWindow(QWidget):
         self.student_workbook.set_active_class(target)
         self.current_class_name = target
         self._apply_student_workbook(self.student_workbook, propagate=True)
+        self._persist_roll_state_immediately()
+        self._persist_roll_state_immediately()
         self._schedule_save()
 
     def _create_new_class(self) -> None:
@@ -11601,6 +11676,15 @@ class RollCallTimerWindow(QWidget):
         if not (PANDAS_AVAILABLE and OPENPYXL_AVAILABLE):
             return False
         existing_plain, existing_encrypted = self._refresh_student_file_paths()
+        # 若当前处于加密模式，且检测到加密文件，则优先使用加密文件，避免误读打包目录下的默认明文模板。
+        if self._student_file_encrypted and existing_encrypted is not None:
+            existing_plain = None
+        elif existing_encrypted and existing_plain:
+            plain_dir = os.path.normcase(os.path.dirname(os.path.abspath(existing_plain)))
+            enc_dir = os.path.normcase(os.path.dirname(os.path.abspath(existing_encrypted)))
+            if plain_dir != enc_dir:
+                # 明文与加密文件不在同一目录，多半是打包自带的示例文件，避免误用。
+                existing_plain = None
         password: Optional[str] = None
         if existing_plain is None and existing_encrypted is not None:
             password = self._prompt_existing_encryption_password("解密学生数据")
@@ -11609,9 +11693,14 @@ class RollCallTimerWindow(QWidget):
 
         def _on_success(result: object) -> None:
             self._student_data_loading = False
-            if not isinstance(result, tuple) or len(result) != 4:
+            if not isinstance(result, tuple) or len(result) not in (4, 5):
                 return
-            workbook, encrypted_state, encrypted_password, created = result
+            if len(result) == 4:
+                workbook, encrypted_state, encrypted_password, created = result
+                embedded_state = None
+            else:
+                workbook, encrypted_state, encrypted_password, created, embedded_state = result
+                _set_embedded_roll_state(embedded_state)
             if workbook is None:
                 return
             # 尝试恢复当前班级
@@ -11622,6 +11711,9 @@ class RollCallTimerWindow(QWidget):
             self._apply_student_workbook(workbook, propagate=True)
             self._student_file_encrypted = bool(encrypted_state)
             self._student_password = encrypted_password
+            _update_encryption_state(bool(encrypted_state), encrypted_password)
+            if embedded_state:
+                self.roll_call_config.class_states = embedded_state
             saved = self.roll_call_config.to_mapping()
             self._restore_group_state(saved)
             self._update_encryption_button()
@@ -11654,6 +11746,7 @@ class RollCallTimerWindow(QWidget):
         if not PANDAS_READY:
             show_quiet_information(self, "当前环境缺少 pandas，无法执行加密。")
             return
+        self._persist_roll_state_immediately()
         password = self._prompt_new_encryption_password()
         if not password:
             return
@@ -11684,6 +11777,7 @@ class RollCallTimerWindow(QWidget):
                 self._encrypted_file_path,
                 encrypted=True,
                 password=password,
+                roll_state_json=self._encode_class_states(),
             )
             _set_session_student_encryption(True, password)
             self._student_file_encrypted = True
@@ -11692,11 +11786,13 @@ class RollCallTimerWindow(QWidget):
             self._propagate_student_dataframe()
             self._update_class_button_label()
             show_quiet_information(self, "已生成加密文件 students.xlsx.enc，并移除明文数据。")
+            self._persist_roll_state_immediately()
             self._schedule_save()
         except Exception as exc:
             show_quiet_information(self, f"加密失败：{exc}")
 
     def _handle_decrypt_student_file(self) -> None:
+        self._persist_roll_state_immediately()
         self._refresh_student_file_paths()
         encrypted_path = self._encrypted_file_path
         if not os.path.exists(encrypted_path):
@@ -11707,6 +11803,7 @@ class RollCallTimerWindow(QWidget):
         password = self._prompt_existing_encryption_password("解密学生数据")
         if not password:
             return
+        embedded_roll_state: Optional[str] = None
         try:
             with open(encrypted_path, "rb") as fh:
                 payload = fh.read()
@@ -11717,6 +11814,14 @@ class RollCallTimerWindow(QWidget):
         try:
             buffer = io.BytesIO(plain_bytes)
             raw_data = pd.read_excel(buffer, sheet_name=None)
+            if isinstance(raw_data, dict) and "_ROLL_STATE" in raw_data:
+                try:
+                    state_df = raw_data.pop("_ROLL_STATE")
+                    if isinstance(state_df, pd.DataFrame) and not state_df.empty:
+                        value = state_df.iloc[0, 0]
+                        embedded_roll_state = str(value) if isinstance(value, str) else None
+                except Exception:
+                    embedded_roll_state = None
             workbook = StudentWorkbook(OrderedDict(raw_data), active_class="")
         except Exception as exc:
             show_quiet_information(self, f"读取解密后的学生数据失败：{exc}")
@@ -11728,6 +11833,7 @@ class RollCallTimerWindow(QWidget):
                 self._encrypted_file_path,
                 encrypted=False,
                 password=None,
+                roll_state_json=embedded_roll_state,
             )
         except Exception as exc:
             show_quiet_information(self, f"写入学生数据失败：{exc}")
@@ -11736,6 +11842,9 @@ class RollCallTimerWindow(QWidget):
         self._student_password = None
         _set_session_student_encryption(False, None)
         self._apply_decrypted_student_data(workbook)
+        if embedded_roll_state:
+            self.roll_call_config.class_states = embedded_roll_state
+            self._restore_group_state(self.roll_call_config.to_mapping())
         self._update_encryption_button()
         show_quiet_information(self, "已成功解密学生数据并恢复 students.xlsx。")
         self._schedule_save()
@@ -12098,6 +12207,10 @@ class RollCallTimerWindow(QWidget):
             return
         records: List[tuple[int, str, str, int]] = []
         for idx, row in self.student_data.iterrows():
+            try:
+                normalized_idx = int(idx)
+            except (TypeError, ValueError):
+                normalized_idx = idx
             sid_value = row.get("学号", "")
             sid_display = re.sub(r"\s+", "", _normalize_text(sid_value))
             name = re.sub(r"\s+", "", _normalize_text(row.get("姓名", "")))
@@ -12105,16 +12218,37 @@ class RollCallTimerWindow(QWidget):
                 sort_key = int(sid_display) if sid_display else sys.maxsize
             except (TypeError, ValueError):
                 sort_key = sys.maxsize
-            records.append((sort_key, sid_display, name, idx))
+            records.append((sort_key, sid_display, name, normalized_idx))
         if not records:
             show_quiet_information(self, "当前没有可显示的学生名单。")
             return
         records.sort(key=lambda item: (item[0], item[1]))
+
+        group_name = self.current_group_name or "全部"
+        base_indices = set(self._collect_base_indices(self._group_all_indices.get(group_name, [])))
+        called_set: set[int] = set()
+        if group_name == "全部":
+            called_set = set(self._global_drawn_students)
+            if not base_indices:
+                base_indices = set(self._collect_base_indices(self._group_all_indices.get("全部", [])))
+        else:
+            called_set = set(self._group_drawn_history.get(group_name, set()))
+            if not base_indices:
+                base_indices = set(self._collect_base_indices(self._group_all_indices.get("全部", [])))
+            called_set.update(idx for idx in self._global_drawn_students if idx in base_indices)
+        if base_indices:
+            called_set = {idx for idx in called_set if idx in base_indices}
+
         dialog_data = []
         for _, sid, name, data_idx in records:
             display_sid = sid if sid else "无学号"
             display_name = name or "未命名"
-            dialog_data.append((display_sid, display_name, data_idx))
+            called = False
+            try:
+                called = int(data_idx) in called_set
+            except (TypeError, ValueError):
+                called = data_idx in called_set
+            dialog_data.append((display_sid, display_name, data_idx, called))
         dialog = StudentListDialog(self, dialog_data)
         if dialog.exec() == QDialog.DialogCode.Accepted and dialog.selected_index is not None:
             selected = dialog.selected_index
@@ -12230,6 +12364,7 @@ class RollCallTimerWindow(QWidget):
                     self._encrypted_file_path,
                     encrypted=self._student_file_encrypted,
                     password=self._student_password,
+                    roll_state_json=self._encode_class_states(),
                 )
             finally:
                 del locker_inner
@@ -12686,7 +12821,7 @@ class RollCallTimerWindow(QWidget):
             self._ensure_group_pool(self.current_group_name)
             return
 
-        self._apply_roll_state(snapshot)
+        self._apply_roll_state(snapshot, restore_current_student=False)
         sanitized = self._capture_roll_state()
         if sanitized is not None and active_class:
             self._class_roll_states[active_class] = sanitized
@@ -13318,6 +13453,80 @@ class RollCallTimerWindow(QWidget):
         settings = self.settings_manager.load_settings()
         settings["RollCallTimer"] = self.roll_call_config.to_mapping()
         self._queue_settings_save(settings)
+        self._persist_roll_state_to_workbook()
+
+    def _persist_roll_state_immediately(self) -> None:
+        """立即抓取并写入点名状态，避免加/解密或切班时状态丢失。"""
+
+        if not PANDAS_READY:
+            return
+        if getattr(self, "_student_data_pending_load", False):
+            # �ڵȴ�����/���ܵ�ʱ���������߿�ȷ���༶��Ч�ԣ�������ֹͣ���Ա������״̬
+            return
+        snapshot = self._capture_roll_state()
+        if snapshot is None:
+            return
+        active_class = self._resolve_active_class_name()
+        if active_class:
+            self._class_roll_states[active_class] = snapshot
+        self.roll_call_config.class_states = self._encode_class_states()
+        settings = self.settings_manager.load_settings()
+        settings["RollCallTimer"] = self.roll_call_config.to_mapping()
+        self.settings_manager.save_settings(settings)
+        self._persist_roll_state_to_workbook()
+
+    def _persist_roll_state_to_workbook(self) -> None:
+        """将当前点名状态嵌入学生数据文件（含加密场景）。"""
+
+        if not PANDAS_READY:
+            return
+        if getattr(self, "_student_data_pending_load", False):
+            # ��δ����ʵ�����ݵ�ʱ��ִ��д������ܻ������ռλ״̬��д��
+            return
+        if not self._ensure_student_data_ready():
+            return
+        roll_state_json = self._encode_class_states()
+        if roll_state_json is None:
+            return
+        if self.student_workbook is None:
+            if self.student_data is None or not isinstance(self.student_data, pd.DataFrame):
+                return
+            try:
+                snapshot = self.student_data.copy()
+            except Exception:
+                snapshot = pd.DataFrame(self.student_data)
+            class_name = self.current_class_name or "班级1"
+            self.current_class_name = class_name
+            self.student_workbook = StudentWorkbook(
+                OrderedDict({class_name: snapshot}),
+                active_class=class_name,
+            )
+        else:
+            self._snapshot_current_class()
+        if self.student_workbook is None:
+            return
+        if self._student_file_encrypted and not self._student_password:
+            cached_encrypted, cached_password = _get_session_student_encryption()
+            if cached_encrypted and cached_password:
+                self._student_password = cached_password
+            else:
+                return
+        try:
+            data = self.student_workbook.as_dict()
+        except Exception:
+            return
+        self._refresh_student_file_paths()
+        try:
+            _save_student_workbook(
+                data,
+                self._plain_file_path,
+                self._encrypted_file_path,
+                encrypted=self._student_file_encrypted,
+                password=self._student_password,
+                roll_state_json=roll_state_json,
+            )
+        except Exception as exc:
+            logger.debug("Failed to persist roll state into workbook: %s", exc, exc_info=True)
 
 
 # ---------- 关于 ----------
@@ -13603,17 +13812,27 @@ def _atomic_write_bytes(
                 os.remove(tmp_path)
 
 
-def _write_student_workbook(file_path: str, data: Mapping[str, PandasDataFrame]) -> None:
+def _write_student_workbook(
+    file_path: str,
+    data: Mapping[str, PandasDataFrame],
+    roll_state_json: Optional[str] = None,
+) -> None:
     """Write the provided workbook mapping to *file_path* atomically."""
 
-    payload = _export_student_workbook_bytes(data)
+    payload = _export_student_workbook_bytes(data, roll_state_json=roll_state_json)
     _atomic_write_bytes(file_path, payload, suffix=".xlsx", description="workbook")
 
 
-def _write_encrypted_student_workbook(file_path: str, data: Mapping[str, PandasDataFrame], password: str) -> None:
+def _write_encrypted_student_workbook(
+    file_path: str,
+    data: Mapping[str, PandasDataFrame],
+    password: str,
+    *,
+    roll_state_json: Optional[str] = None,
+) -> None:
     """Write workbook bytes encrypted with *password* to *file_path*."""
 
-    payload = _export_student_workbook_bytes(data)
+    payload = _export_student_workbook_bytes(data, roll_state_json=roll_state_json)
     encrypted = _encrypt_student_bytes(password, payload)
     _atomic_write_bytes(file_path, encrypted, suffix=".enc", description="encrypted workbook")
 
@@ -13624,8 +13843,8 @@ def _read_student_workbook(
     encrypted_file_path: str,
     plain_file_path: str,
     password: Optional[str],
-) -> Tuple[Optional[StudentWorkbook], bool, Optional[str], bool]:
-    """Load student data and report encryption state."""
+) -> Tuple[Optional[StudentWorkbook], bool, Optional[str], bool, Optional[str]]:
+    """Load student data and report encryption state and embedded roll state."""
 
     if not (PANDAS_AVAILABLE and OPENPYXL_AVAILABLE):
         raise RuntimeError("缺少 pandas 和 openpyxl")
@@ -13637,6 +13856,7 @@ def _read_student_workbook(
         return normalized
 
     created_template = False
+    embedded_roll_state: Optional[str] = None
     if existing_plain is None and existing_encrypted is None:
         template = pd.DataFrame(
             {
@@ -13655,7 +13875,7 @@ def _read_student_workbook(
             password=None,
         )
         created_template = True
-        return workbook, False, None, created_template
+        return workbook, False, None, created_template, embedded_roll_state
 
     if existing_plain is None and existing_encrypted is not None:
         if not password:
@@ -13672,9 +13892,18 @@ def _read_student_workbook(
             raw_data = pd.read_excel(buffer, sheet_name=None)
         except Exception as exc:
             raise RuntimeError(f"无法读取解密后的学生数据: {exc}") from exc
+        if isinstance(raw_data, dict) and "_ROLL_STATE" in raw_data:
+            try:
+                state_df = raw_data.pop("_ROLL_STATE")
+                if isinstance(state_df, pd.DataFrame) and not state_df.empty:
+                    value = state_df.iloc[0, 0]
+                    embedded_roll_state = str(value) if isinstance(value, str) else None
+            except Exception:
+                embedded_roll_state = None
+        _set_embedded_roll_state(embedded_roll_state)
         workbook = StudentWorkbook(OrderedDict(raw_data), active_class="")
         # Use decrypted data in-memory without immediately writing to disk
-        return workbook, True, password, created_template
+        return workbook, True, password, created_template, embedded_roll_state
 
     read_path: Optional[str] = None
     for candidate in (existing_plain, plain_file_path):
@@ -13691,6 +13920,16 @@ def _read_student_workbook(
     except Exception as exc:
         raise RuntimeError(f"无法读取学生数据文件 {read_path}: {exc}") from exc
 
+    if isinstance(raw_data, dict) and "_ROLL_STATE" in raw_data:
+        try:
+            state_df = raw_data.pop("_ROLL_STATE")
+            if isinstance(state_df, pd.DataFrame) and not state_df.empty:
+                value = state_df.iloc[0, 0]
+                embedded_roll_state = str(value) if isinstance(value, str) else None
+        except Exception:
+            embedded_roll_state = None
+    _set_embedded_roll_state(embedded_roll_state)
+
     workbook = StudentWorkbook(OrderedDict(raw_data), active_class="")
     _save_student_workbook(
         workbook.as_dict(),
@@ -13698,12 +13937,16 @@ def _read_student_workbook(
         encrypted_file_path,
         encrypted=False,
         password=None,
+        roll_state_json=embedded_roll_state,
     )
-    return workbook, False, None, created_template
+    return workbook, False, None, created_template, embedded_roll_state
 
 
 
-def _export_student_workbook_bytes(data: Mapping[str, PandasDataFrame]) -> bytes:
+def _export_student_workbook_bytes(
+    data: Mapping[str, PandasDataFrame],
+    roll_state_json: Optional[str] = None,
+) -> bytes:
     """Normalize the workbook mapping and render it to Excel bytes."""
 
     normalized: "OrderedDict[str, PandasDataFrame]" = OrderedDict()
@@ -13715,6 +13958,8 @@ def _export_student_workbook_bytes(data: Mapping[str, PandasDataFrame]) -> bytes
         except Exception:
             normalized_df = pd.DataFrame(df)
         normalized[sheet_name] = normalized_df
+    if roll_state_json is not None:
+        normalized["_ROLL_STATE"] = pd.DataFrame({"ROLL_STATE_JSON": [roll_state_json]})
     if not normalized:
         normalized["班级1"] = _empty_student_dataframe().copy()
 
@@ -13747,17 +13992,23 @@ def _save_student_workbook(
     *,
     encrypted: bool,
     password: Optional[str],
+    roll_state_json: Optional[str] = None,
 ) -> None:
     """Persist the workbook to disk and clean up duplicate candidate files."""
 
     if encrypted:
         if not password:
             raise ValueError("缺少加密密码")
-        _write_encrypted_student_workbook(encrypted_file_path, data, password)
+        _write_encrypted_student_workbook(
+            encrypted_file_path,
+            data,
+            password,
+            roll_state_json=roll_state_json,
+        )
         with contextlib.suppress(FileNotFoundError):
             os.remove(file_path)
     else:
-        _write_student_workbook(file_path, data)
+        _write_student_workbook(file_path, data, roll_state_json=roll_state_json)
         with contextlib.suppress(FileNotFoundError):
             os.remove(encrypted_file_path)
     keep_plain = file_path if os.path.exists(file_path) else None
@@ -13794,7 +14045,7 @@ def load_student_data(parent: Optional[QWidget]) -> Optional[StudentWorkbook]:
                 attempts += 1
                 continue
             try:
-                workbook, encrypted, pwd, _created = _read_student_workbook(
+                workbook, encrypted, pwd, _created, _embedded = _read_student_workbook(
                     existing_plain,
                     existing_encrypted,
                     resources.encrypted,
@@ -13822,7 +14073,7 @@ def load_student_data(parent: Optional[QWidget]) -> Optional[StudentWorkbook]:
         existing_encrypted = None  # 切换使用未加密数据
 
     try:
-        workbook, encrypted, pwd, created = _read_student_workbook(
+        workbook, encrypted, pwd, created, _embedded = _read_student_workbook(
             existing_plain,
             None,
             resources.encrypted,
