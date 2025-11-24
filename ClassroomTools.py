@@ -11561,19 +11561,26 @@ class RollCallTimerWindow(QWidget):
     def show_student_selector(self) -> None:
         if self.mode != "roll_call":
             return
-        if self.student_data is None or self.student_data.empty:
+        if not (PANDAS_READY and isinstance(self.student_data, pd.DataFrame)):
+            show_quiet_information(self, "暂无学生数据，无法显示名单。")
+            return
+        if getattr(self.student_data, "empty", True):
             show_quiet_information(self, "暂无学生数据，无法显示名单。")
             return
         records: List[tuple[int, str, str, int]] = []
-        for idx, row in self.student_data.iterrows():
-            sid_value = row.get("学号", "")
-            sid_display = re.sub(r"\s+", "", _normalize_text(sid_value))
-            name = re.sub(r"\s+", "", _normalize_text(row.get("姓名", "")))
-            try:
-                sort_key = int(sid_display) if sid_display else sys.maxsize
-            except (TypeError, ValueError):
-                sort_key = sys.maxsize
-            records.append((sort_key, sid_display, name, idx))
+        try:
+            for idx, row in self.student_data.iterrows():
+                sid_value = row.get("学号", "")
+                sid_display = re.sub(r"\s+", "", _normalize_text(sid_value))
+                name = re.sub(r"\s+", "", _normalize_text(row.get("姓名", "")))
+                try:
+                    sort_key = int(sid_display) if sid_display else sys.maxsize
+                except (TypeError, ValueError):
+                    sort_key = sys.maxsize
+                records.append((sort_key, sid_display, name, idx))
+        except Exception as exc:
+            show_quiet_information(self, f"显示学生名单时出错：{exc}")
+            return
         if not records:
             show_quiet_information(self, "当前没有可显示的学生名单。")
             return
@@ -13124,18 +13131,6 @@ def load_student_data(parent: Optional[QWidget]) -> Optional[StudentWorkbook]:
                 raw_data = pd.read_excel(buffer, sheet_name=None)
                 workbook = StudentWorkbook(OrderedDict(raw_data), active_class="")
                 _set_session_student_encryption(True, password)
-                try:
-                    _save_student_workbook(
-                        workbook.as_dict(),
-                        file_path,
-                        resources.encrypted,
-                        encrypted=False,
-                        password=None,
-                        plain_candidates=resources.plain_candidates,
-                        encrypted_candidates=resources.encrypted_candidates,
-                    )
-                except Exception:
-                    logger.debug("Failed to persist decrypted workbook to %s", file_path, exc_info=True)
                 return workbook
             except Exception as exc:
                 attempts += 1
