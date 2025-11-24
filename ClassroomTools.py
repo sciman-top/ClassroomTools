@@ -11848,6 +11848,8 @@ class RollCallTimerWindow(QWidget):
             return
         self._student_file_encrypted = False
         self._student_password = None
+        # 解密流程已经拿到了真实的学生数据，取消延迟加载标记，允许随后的保存/同步逻辑生效。
+        self._student_data_pending_load = False
         _set_session_student_encryption(False, None)
         self._apply_decrypted_student_data(workbook)
         if embedded_roll_state:
