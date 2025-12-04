@@ -6,10 +6,10 @@ import configparser
 import contextlib
 import ctypes
 from ctypes import wintypes
+import filecmp
 import importlib
 import io
 import json
-import html
 import logging
 import math
 import os
@@ -22,13 +22,11 @@ import tempfile
 import threading
 import time
 import traceback
-import hashlib
-import hmac
 import functools
 from collections import OrderedDict, deque
 from functools import singledispatch
 from queue import Empty, Queue
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import (
     TYPE_CHECKING,
@@ -45,14 +43,12 @@ from typing import (
     Literal,
     FrozenSet,
     cast,
+    TypeVar,
 )
 
 logger = logging.getLogger(__name__)
 
-try:
-    _INITIAL_CWD = os.path.normpath(os.path.abspath(os.getcwd()))
-except Exception:  # pragma: no cover - defensive fallback for exotic environments
-    _INITIAL_CWD = ""
+RectTuple = Tuple[int, int, int, int]
 
 if sys.platform == "win32":
     try:  # pragma: no cover - Windows 专用依赖
@@ -115,12 +111,16 @@ def clamp(value: float, minimum: float, maximum: float) -> float:
 
 _TRUE_STRINGS = frozenset({"1", "true", "yes", "on", "y", "t"})
 _FALSE_STRINGS = frozenset({"0", "false", "no", "off", "n", "f"})
+_INVALID_SHEET_CHARS = frozenset("\\/:?*[]")
+_PHOTO_SEGMENT_SANITIZER = re.compile(r"[^\w\u4e00-\u9fff-]+")
 
 
 class _BooleanParseResult:
     """Namespace for sentinel objects used during boolean coercion."""
 
     UNRESOLVED = object()
+
+NumberT = TypeVar("NumberT", int, float)
 
 
 @singledispatch
@@ -186,6 +186,29 @@ def _coerce_bool_from_str(value: str) -> object:
     return bool(number)
 
 
+def _coerce_to_text(value: Any) -> str:
+    """Safely coerce *value* into text, returning an empty string on failure."""
+
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        try:
+            return bytes(value).decode("utf-8", "ignore")
+        except Exception:
+            return ""
+    if isinstance(value, os.PathLike):
+        try:
+            return os.fspath(value)
+        except Exception:
+            return ""
+    try:
+        return str(value)
+    except Exception:
+        return ""
+
+
 @functools.lru_cache(maxsize=512)
 def _casefold_cached(value: str) -> str:
     """Return a stripped, case-folded representation of *value* with caching."""
@@ -196,38 +219,12 @@ def _casefold_cached(value: str) -> str:
     return sanitized.strip().casefold()
 
 
-def _coerce_to_text(value: Any) -> Optional[str]:
-    """Return *value* converted to ``str`` when possible.
-
-    ``None`` and values whose conversion raises an exception are treated as
-    missing and therefore return :data:`None`. The helper is intentionally
-    conservative and does not attempt to special-case false-y values such as
-    ``0`` or ``False`` so callers can decide how those should be handled.
-    """
-
-    if value is None:
-        return None
-    if isinstance(value, str):
-        return value
-    if isinstance(value, (bytes, bytearray, memoryview)):
-        try:
-            return bytes(value).decode("utf-8", "ignore")
-        except Exception:
-            return None
-    try:
-        return str(value)
-    except Exception:
-        return None
-
-
 def _normalize_text_token(value: Any, *, empty_on_falsy: bool) -> str:
     """Normalize arbitrary *value* inputs into case-folded strings."""
 
     if empty_on_falsy and not value:
         return ""
     text = _coerce_to_text(value)
-    if text is None:
-        return ""
     if empty_on_falsy and not text:
         return ""
     if not text:
@@ -250,6 +247,13 @@ def parse_bool(value: Any, default: bool = False) -> bool:
     return bool(result)
 
 
+def str_to_bool(value: Any, default: bool = False) -> bool:
+    """Alias for :func:`parse_bool` kept for backwards compatibility."""
+
+    return parse_bool(value, default)
+
+
+@functools.lru_cache(maxsize=1)
 def _preferred_app_directory() -> str:
     """Return the user-specific data directory without creating it."""
 
@@ -311,31 +315,25 @@ def _collect_resource_roots() -> List[str]:
         seen.add(normalized)
         roots.append(normalized)
 
-    _append(os.environ.get("NUITKA_ONEFILE_PARENT"))
+    app_dir = _preferred_app_directory()
+    if _ensure_directory(app_dir):
+        _append(app_dir)
+
+    exe_dir: Optional[str] = None
+    with contextlib.suppress(Exception):
+        exe_dir = os.path.dirname(os.path.abspath(getattr(sys, "executable", "")))
+    if getattr(sys, "frozen", False) and exe_dir:
+        _append(exe_dir)
+
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        _append(meipass)
 
     script_dir: Optional[str] = None
     with contextlib.suppress(Exception):
         script_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
     if script_dir:
         _append(script_dir)
-
-    if _INITIAL_CWD:
-        _append(_INITIAL_CWD)
-
-    app_dir = _preferred_app_directory()
-    if _ensure_directory(app_dir):
-        _append(app_dir)
-
-    if getattr(sys, "frozen", False):
-        exe_dir: Optional[str] = None
-        with contextlib.suppress(Exception):
-            exe_dir = os.path.dirname(os.path.abspath(getattr(sys, "executable", "")))
-        if exe_dir:
-            _append(exe_dir)
-
-    meipass = getattr(sys, "_MEIPASS", None)
-    if meipass:
-        _append(meipass)
 
     module_dir = os.path.dirname(os.path.abspath(__file__))
     _append(module_dir)
@@ -436,78 +434,10 @@ def _mirror_resource_to_primary(primary: str, candidates: Tuple[str, ...]) -> No
         logger.debug("Failed to mirror %s to %s", source, primary, exc_info=True)
 
 
-def _iter_unique_paths(paths: Iterable[str]) -> Iterable[str]:
-    seen: Set[str] = set()
-    for path in paths:
-        if not path:
-            continue
-        try:
-            normalized = os.path.normpath(os.path.abspath(path))
-        except Exception:
-            continue
-        marker = os.path.normcase(normalized)
-        if marker in seen:
-            continue
-        seen.add(marker)
-        yield normalized
-
-
-def _normalize_path_marker(path: Optional[str]) -> Optional[str]:
-    if not path:
-        return None
-    try:
-        normalized = os.path.normpath(os.path.abspath(path))
-    except Exception:
-        return None
-    return os.path.normcase(normalized)
-
-
-def _candidate_path_pool(primary: str, extra: Optional[Iterable[str]]) -> Tuple[str, ...]:
-    combined: List[str] = [primary]
-    if extra is not None:
-        for candidate in extra:
-            combined.append(candidate)
-    return tuple(_iter_unique_paths(combined))
-
-
-def _remove_file_candidates(paths: Iterable[str], *, skip: Optional[str] = None) -> None:
-    skip_marker = _normalize_path_marker(skip)
-    for candidate in _iter_unique_paths(paths):
-        if skip_marker and os.path.normcase(candidate) == skip_marker:
-            continue
-        try:
-            os.remove(candidate)
-        except FileNotFoundError:
-            continue
-        except Exception:
-            logger.debug("Failed to remove %s", candidate, exc_info=True)
-
-
-def _replicate_file_to_candidates(source: str, candidates: Iterable[str]) -> None:
-    source_marker = _normalize_path_marker(source)
-    if source_marker is None:
-        return
-    for target in _iter_unique_paths(candidates):
-        if os.path.normcase(target) == source_marker:
-            continue
-        directory = os.path.dirname(target)
-        if directory and not _ensure_directory(directory):
-            continue
-        try:
-            shutil.copy2(source, target)
-        except FileNotFoundError:
-            continue
-        except Exception:
-            logger.debug("Failed to replicate %s to %s", source, target, exc_info=True)
-
-
 @dataclass(frozen=True)
 class _ResolvedPathGroup:
     primary: str
     candidates: Tuple[str, ...]
-
-    def first_existing(self) -> Optional[str]:
-        return _any_existing_path(self.candidates)
 
 
 @functools.lru_cache(maxsize=None)
@@ -520,7 +450,6 @@ def _resolve_writable_resource(
     ensure_primary_exists: bool = False,
     copy_from_candidates: bool = True,
     prefer_extra_candidates: bool = False,
-    preferred_primary: Optional[str] = None,
 ) -> _ResolvedPathGroup:
     normalized_rel = str(relative_path).strip().replace("\\", "/")
     locator = _get_resource_locator()
@@ -538,10 +467,6 @@ def _resolve_writable_resource(
         candidate_list.append(normalized)
 
     locator_candidates = locator.candidates(normalized_rel)
-    preferred_marker: Optional[str] = None
-    if preferred_primary:
-        preferred_marker = os.path.normcase(os.path.normpath(os.path.abspath(preferred_primary)))
-        _append(preferred_primary)
     if prefer_extra_candidates:
         for extra in extra_candidates:
             _append(extra)
@@ -558,35 +483,10 @@ def _resolve_writable_resource(
         _append(os.path.join(module_dir, normalized_rel))
 
     fallback = fallback_name or os.path.basename(normalized_rel) or normalized_rel.replace("/", "_")
-    ordered_candidates: List[str] = []
-    existing_candidates: List[str] = []
-    for candidate in candidate_list:
-        exists = False
-        try:
-            if is_dir:
-                exists = os.path.isdir(candidate)
-            else:
-                exists = os.path.exists(candidate)
-        except Exception:
-            exists = False
-        if exists:
-            existing_candidates.append(candidate)
-        else:
-            ordered_candidates.append(candidate)
-    prioritized_candidates = tuple(existing_candidates + ordered_candidates) if existing_candidates else tuple(candidate_list)
-    primary: Optional[str] = None
-
-    if preferred_marker:
-        target = next((candidate for candidate in candidate_list if os.path.normcase(candidate) == preferred_marker), None)
-        if target:
-            directory = target if is_dir else os.path.dirname(target)
-            if _ensure_writable_directory(directory or os.getcwd()):
-                primary = target
-
-    if primary is None:
-        primary = _choose_writable_target(prioritized_candidates, is_dir=is_dir, fallback_name=fallback)
-
-    unique_candidates = tuple(_iter_unique_paths((primary, *candidate_list)))
+    primary = _choose_writable_target(tuple(candidate_list), is_dir=is_dir, fallback_name=fallback)
+    unique_candidates = (primary,) + tuple(
+        candidate for candidate in candidate_list if os.path.normcase(candidate) != os.path.normcase(primary)
+    )
 
     if is_dir:
         if ensure_primary_exists:
@@ -600,105 +500,67 @@ def _resolve_writable_resource(
 @dataclass(frozen=True)
 class _StudentResourcePaths:
     plain: str
-    encrypted: str
     plain_candidates: Tuple[str, ...]
-    encrypted_candidates: Tuple[str, ...]
-
-
-def _preferred_student_resource_directory() -> str:
-    """Return the user-visible directory for student roster files."""
-
-    candidates: List[str] = []
-    seen: Set[str] = set()
-
-    def _append(path: Optional[str]) -> None:
-        if not path:
-            return
-        normalized = os.path.normpath(os.path.abspath(path))
-        marker = os.path.normcase(normalized)
-        if marker in seen:
-            return
-        seen.add(marker)
-        candidates.append(normalized)
-
-    _append(os.environ.get("NUITKA_ONEFILE_PARENT"))
-
-    if getattr(sys, "frozen", False):
-        with contextlib.suppress(Exception):
-            _append(os.path.dirname(os.path.abspath(getattr(sys, "executable", ""))))
-
-    with contextlib.suppress(Exception):
-        _append(os.path.dirname(os.path.abspath(sys.argv[0])))
-
-    if _INITIAL_CWD:
-        _append(_INITIAL_CWD)
-
-    with contextlib.suppress(Exception):
-        _append(os.getcwd())
-
-    module_dir = os.path.dirname(os.path.abspath(__file__))
-    _append(module_dir)
-
-    fallback_app_dir = _preferred_app_directory()
-    if fallback_app_dir:
-        _append(fallback_app_dir)
-
-    for candidate in candidates:
-        if _ensure_directory(candidate):
-            return candidate
-
-    if not _ensure_directory(module_dir):
-        module_dir = os.path.abspath(os.getcwd())
-        _ensure_directory(module_dir)
-    return module_dir
 
 
 @functools.lru_cache(maxsize=1)
 def _resolve_student_resource_paths() -> _StudentResourcePaths:
-    base_dir = _preferred_student_resource_directory()
-    preferred_plain = os.path.join(base_dir, "students.xlsx")
+    module_plain = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "students.xlsx"))
     legacy_plain = os.path.abspath("students.xlsx")
     plain_group = _resolve_writable_resource(
         "students.xlsx",
         fallback_name="students.xlsx",
-        extra_candidates=(legacy_plain,),
+        extra_candidates=(module_plain, legacy_plain),
         is_dir=False,
         copy_from_candidates=True,
-        preferred_primary=preferred_plain,
-    )
-
-    preferred_encrypted = os.path.join(base_dir, "students.xlsx.enc")
-    legacy_encrypted = os.path.abspath("students.xlsx.enc")
-    encrypted_group = _resolve_writable_resource(
-        "students.xlsx.enc",
-        fallback_name="students.xlsx.enc",
-        extra_candidates=(legacy_encrypted,),
-        is_dir=False,
-        copy_from_candidates=True,
-        preferred_primary=preferred_encrypted,
+        prefer_extra_candidates=True,
     )
 
     return _StudentResourcePaths(
         plain=plain_group.primary,
-        encrypted=encrypted_group.primary,
         plain_candidates=plain_group.candidates,
-        encrypted_candidates=encrypted_group.candidates,
     )
 
 
 _STUDENT_RESOURCES = _resolve_student_resource_paths()
 
 
+def _cleanup_student_candidates(keep_plain: Optional[str]) -> None:
+    """Remove duplicated student files in alternative candidate locations."""
+
+    def _is_duplicate(path: str, keep: Optional[str]) -> bool:
+        if not path or not keep:
+            return False
+        if not (os.path.exists(path) and os.path.exists(keep)):
+            return False
+        try:
+            if os.path.samefile(path, keep):
+                return False
+        except Exception:
+            pass
+        with contextlib.suppress(Exception):
+            if filecmp.cmp(path, keep, shallow=False):
+                return True
+        return False
+
+    for path in _STUDENT_RESOURCES.plain_candidates:
+        if _is_duplicate(path, keep_plain):
+            with contextlib.suppress(Exception):
+                os.remove(path)
+
+
 def _determine_student_photo_roots() -> Tuple[str, List[str]]:
     """Select the most appropriate student photo root and provide the fallback list."""
 
+    module_dir = os.path.dirname(os.path.abspath(__file__))
     group = _resolve_writable_resource(
         "student_photos",
         fallback_name="student_photos",
         is_dir=True,
-        extra_candidates=(os.path.abspath("student_photos"),),
+        extra_candidates=(os.path.join(module_dir, "student_photos"), os.path.abspath("student_photos")),
         ensure_primary_exists=True,
         copy_from_candidates=False,
+        prefer_extra_candidates=True,
     )
     return group.primary, list(group.candidates)
 
@@ -858,6 +720,8 @@ def _user32_focus_window(hwnd: int) -> bool:
 
 from PyQt6.QtCore import (
     QByteArray,
+    QMutex,
+    QMutexLocker,
     QPoint,
     QPointF,
     QRect,
@@ -869,6 +733,8 @@ from PyQt6.QtCore import (
     pyqtSignal,
     QObject,
     QUrl,
+    QRunnable,
+    QThreadPool,
 )
 from PyQt6.QtGui import (
     QBrush,
@@ -903,7 +769,6 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QMenu,
     QInputDialog,
     QMessageBox,
@@ -974,6 +839,7 @@ class IconManager:
         {
             "arrow_down": "PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCc+PHBhdGggZmlsbD0nI2YxZjNmNCcgZD0nTTEyIDE2LjUgNSA5LjVoMTR6Jy8+PHBhdGggZmlsbD0nbm9uZScgc3Ryb2tlPScjMWE3M2U4JyBzdHJva2Utd2lkdGg9JzEuNScgc3Rya2UtbGluZWpvaW49J3JvdW5kJyBkPSdNMTIgMTYuNSA1IDkuNWgxNHonLz48L3N2Zz4=",
             "arrow_up": "PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCc+PHBhdGggZmlsbD0nI2YxZjNmNCcgZD0nTTEyIDcuNSAxOSAxNC41SDV6Jy8+PHBhdGggZmlsbD0nbm9uZScgc3Ryb2tlPScjMWE3M2U4JyBzdHJva2Utd2lkdGg9JzEuNScgc3Ryb2tlLWxpbmVqb2luPSdyb3VuZCcgZD0nTTEyIDcuNSAxOSAxNC41SDV6Jy8+PC9zdmc+",
+            "selection_delete": "PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCc+PHJlY3QgeD0nNCcgeT0nNC41JyB3aWR0aD0nMTYnIGhlaWdodD0nMTInIGZpbGw9J25vbmUnIHN0cm9rZT0nI2YxZjNmNCcgc3Rya2Utd2lkdGg9JzEuNScgc3Rya2UtZGFzaGFycmF5PSczIDInIHN0cm9rZS1saW5lam9pbj0ncm91bmQnLz48cmVjdCB4PSc1LjQnIHk9JzUuOScgd2lkdGg9JzEzLjInIGhlaWdodD0nOS42JyBmaWxsPScjOGFiNGY4JyBvcGFjaXR5PScwLjE4Jy8+PHBhdGggZD0nTTkuMyAxNi4zIDE0IDExLjYgMTcgMTQuNiAxMi4zIDE5LjNjLS40LjQtMSAuNC0xLjQgMEw5LjMgMTcuN2ExIDEgMCAwIDEgMC0xLjRaJyBmaWxsPScjZjRhOWI3Jy8+PHBhdGggZD0nTTEzLjYgMTcgMTUuOSAxNC43JyBmaWxsPSdub25lJyBzdHJva2U9JyM1ZjYzNjgnIHN0cm9rZS13aWR0aD0nMS40JyBzdHJva2UtbGluZWNhcD0ncm91bmQnLz48L3N2Zz4=",
         }
     )
 
@@ -1038,10 +904,25 @@ except Exception:
 
 try:
     import pyttsx3
-    PYTTSX3_AVAILABLE = True
 except ImportError:
     pyttsx3 = None
-    PYTTSX3_AVAILABLE = False
+
+try:
+    import comtypes  # type: ignore[import-not-found]
+    import comtypes.client  # type: ignore[import-not-found]
+    COMTYPES_AVAILABLE = True
+except ImportError:
+    comtypes = None  # type: ignore[assignment]
+    COMTYPES_AVAILABLE = False
+
+try:
+    import win32com.client  # type: ignore[import-not-found]
+    import pythoncom  # type: ignore[import-not-found]
+    WIN32COM_AVAILABLE = True
+except ImportError:
+    win32com = None  # type: ignore[assignment]
+    pythoncom = None  # type: ignore[assignment]
+    WIN32COM_AVAILABLE = False
 
 try:
     import sounddevice as sd
@@ -1057,6 +938,11 @@ if TYPE_CHECKING:
 else:  # pragma: no cover - runtime fallback for typing
     PandasDataFrame = Any  # type: ignore[misc, assignment]
 
+# 统一学生名单使用的列顺序，避免各处硬编码。
+DEFAULT_STUDENT_COLUMNS: list[str] = ["学号", "姓名", "分组"]
+# 规范化后的空表模板，避免重复构造；每次取用时复制以保证不可变。
+_EMPTY_STUDENT_TEMPLATE: Optional["PandasDataFrame"] = None
+
 if sys.platform == "win32":
     try:
         import winreg
@@ -1067,19 +953,17 @@ else:
     WINREG_AVAILABLE = False
 
 
-_SESSION_STUDENT_PASSWORD: Optional[str] = None
-_SESSION_STUDENT_FILE_ENCRYPTED: bool = False
+_EMBEDDED_ROLL_STATE: Optional[str] = None
+def _set_embedded_roll_state(state: Optional[str]) -> None:
+    global _EMBEDDED_ROLL_STATE
+    _EMBEDDED_ROLL_STATE = state if state else None
 
 
-def _set_session_student_encryption(encrypted: bool, password: Optional[str]) -> None:
-    global _SESSION_STUDENT_PASSWORD, _SESSION_STUDENT_FILE_ENCRYPTED
-    _SESSION_STUDENT_FILE_ENCRYPTED = bool(encrypted)
-    _SESSION_STUDENT_PASSWORD = password if encrypted else None
-
-
-def _get_session_student_encryption() -> tuple[bool, Optional[str]]:
-    return _SESSION_STUDENT_FILE_ENCRYPTED, _SESSION_STUDENT_PASSWORD
-
+def _consume_embedded_roll_state() -> Optional[str]:
+    global _EMBEDDED_ROLL_STATE
+    state = _EMBEDDED_ROLL_STATE
+    _EMBEDDED_ROLL_STATE = None
+    return state
 
 # ---------- 缓存 ----------
 _SPEECH_ENV_CACHE: tuple[float, str, List[str]] = (0.0, "", [])
@@ -1203,17 +1087,6 @@ def ensure_widget_within_screen(widget: QWidget) -> None:
     widget.move(x, y)
 
 
-def _hide_label_if_visible(label: QWidget) -> None:
-    if label.isVisible():
-        label.hide()
-
-
-def str_to_bool(value: Any, default: bool = False) -> bool:
-    """Backward-compatible wrapper around :func:`parse_bool`."""
-
-    return parse_bool(value, default)
-
-
 def bool_to_str(value: bool) -> str:
     return "True" if value else "False"
 
@@ -1229,6 +1102,324 @@ def dedupe_strings(values: List[str]) -> List[str]:
         unique.append(normalized)
     return unique
 
+
+def _new_student_dataframe() -> Optional["PandasDataFrame"]:
+    """生成一份空白的学生名单 DataFrame，保持列顺序一致。"""
+
+    if not (PANDAS_READY and pd is not None):
+        return None
+    try:
+        return _empty_student_dataframe().copy()
+    except Exception:
+        try:
+            return pd.DataFrame(columns=DEFAULT_STUDENT_COLUMNS)
+        except Exception:
+            return None
+
+
+def recommended_control_height(font: QFont, *, extra: int = 0, minimum: int = 0) -> int:
+    """根据字体高度返回推荐控件高度，避免不同平台字体溢出。"""
+
+    try:
+        fm = QFontMetrics(font)
+        height = fm.height() + int(extra)
+    except Exception:
+        height = minimum
+    return max(int(minimum), int(height))
+
+
+def ask_quiet_confirmation(parent: QWidget, message: str, title: str) -> bool:
+    """弹出简洁的确认对话框，返回用户是否选择“确定”。"""
+
+    box = QMessageBox(parent)
+    box.setIcon(QMessageBox.Icon.Question)
+    box.setWindowTitle(title or "确认")
+    box.setText(message)
+    box.setStyleSheet(
+        """
+        QMessageBox QPushButton {
+            min-width: 64px;
+            padding: 4px 10px;
+            color: #1f1f1f;
+            background: #f8f9fb;
+            border: 1px solid #d0d5db;
+            border-radius: 6px;
+        }
+        QMessageBox QPushButton:hover {
+            background: #e8f0fe;
+            border-color: #c6d3f0;
+        }
+        QMessageBox QPushButton:pressed {
+            background: #d2e3fc;
+        }
+        """
+    )
+    yes_button = box.addButton("确定", QMessageBox.ButtonRole.YesRole)
+    no_button = box.addButton("取消", QMessageBox.ButtonRole.NoRole)
+    box.setDefaultButton(cast(QPushButton, yes_button))
+    box.setEscapeButton(cast(QPushButton, no_button))
+    box.exec()
+    return box.clickedButton() is yes_button
+
+
+def _normalize_text(value: object) -> str:
+    """标准化文本：去空白、过滤 None/nan，返回字符串。"""
+
+    if PANDAS_READY:
+        if pd.isna(value):
+            return ""
+    else:
+        if value is None:
+            return ""
+        if isinstance(value, float) and math.isnan(value):
+            return ""
+    text = str(value).strip()
+    lowered = text.lower()
+    if lowered in {"nan", "none", "nat"}:
+        return ""
+    return text
+
+
+def _normalize_student_dataframe(
+    df: "PandasDataFrame",
+    *,
+    drop_incomplete: bool = True,
+) -> "PandasDataFrame":
+    if not PANDAS_READY:
+        return df.copy()
+
+    normalized = df.copy()
+    for column in ("学号", "姓名", "分组"):
+        if column not in normalized.columns:
+            normalized[column] = pd.NA
+    # 清理已废弃的成绩列，避免旧数据影响界面
+    normalized = normalized.drop(columns=["成绩"], errors="ignore")
+
+    normalized["姓名"] = normalized["姓名"].apply(lambda v: re.sub(r"\s+", "", _normalize_text(v))).str.upper()
+
+    id_series = normalized["学号"].apply(lambda v: re.sub(r"\s+", "", _normalize_text(v)))
+    id_numeric = pd.to_numeric(id_series.replace("", pd.NA), errors="coerce")
+    if not id_numeric.empty:
+        try:
+            fractional_mask = id_numeric.notna() & (id_numeric != id_numeric.round())
+            id_numeric = id_numeric.where(~fractional_mask)
+        except Exception:
+            pass
+    normalized["学号"] = id_numeric.round().astype("Int64")
+
+    for column in normalized.select_dtypes(include=["object"]).columns:
+        if column in {"姓名", "分组"}:
+            continue
+        normalized[column] = normalized[column].apply(_normalize_text)
+
+    ordered_columns = [col for col in DEFAULT_STUDENT_COLUMNS if col in normalized.columns]
+    extra_columns = [col for col in normalized.columns if col not in ordered_columns]
+    normalized = normalized[ordered_columns + extra_columns]
+
+    if drop_incomplete:
+        normalized = normalized[(normalized["学号"].notna()) & (normalized["姓名"] != "")].copy()
+        normalized.reset_index(drop=True, inplace=True)
+
+    return normalized
+
+
+def _empty_student_dataframe() -> "PandasDataFrame":
+    if not PANDAS_READY:
+        raise RuntimeError("Pandas support is required to create student data tables.")
+    global _EMPTY_STUDENT_TEMPLATE
+    if _EMPTY_STUDENT_TEMPLATE is not None:
+        return _EMPTY_STUDENT_TEMPLATE.copy(deep=True)
+    template = pd.DataFrame({column: [] for column in DEFAULT_STUDENT_COLUMNS})
+    normalized = _normalize_student_dataframe(template, drop_incomplete=False)
+    _EMPTY_STUDENT_TEMPLATE = normalized.copy(deep=True)
+    return normalized
+
+
+def _sanitize_sheet_name(name: str, fallback: str) -> str:
+    cleaned = "".join(ch for ch in str(name) if ch not in _INVALID_SHEET_CHARS).strip()
+    if not cleaned:
+        cleaned = fallback
+    if len(cleaned) > 31:
+        cleaned = cleaned[:31]
+    return cleaned
+
+
+@dataclass
+class StudentWorkbook:
+    """封装多班级学生数据的简单容器，提供读取、更新与切换。"""
+
+    sheets: "OrderedDict[str, PandasDataFrame]"
+    active_class: str = ""
+
+    def __post_init__(self) -> None:
+        ordered: "OrderedDict[str, PandasDataFrame]" = OrderedDict()
+        if self.sheets:
+            for idx, (name, df) in enumerate(self.sheets.items(), start=1):
+                fallback = f"班级{idx}" if idx > 1 else "班级1"
+                safe_name = _sanitize_sheet_name(name, fallback)
+                try:
+                    normalized = _normalize_student_dataframe(df, drop_incomplete=False)
+                except Exception:
+                    normalized = pd.DataFrame(df)
+                ordered[safe_name] = normalized
+        if not ordered:
+            ordered["班级1"] = _empty_student_dataframe().copy()
+        self.sheets = ordered
+        if not self.active_class or self.active_class not in self.sheets:
+            self.active_class = next(iter(self.sheets))
+
+    def class_names(self) -> List[str]:
+        return list(self.sheets.keys())
+
+    def is_empty(self) -> bool:
+        if not self.sheets:
+            return True
+        for df in self.sheets.values():
+            try:
+                if not df.empty:
+                    return False
+            except AttributeError:
+                return False
+        return True
+
+    def get_active_dataframe(self) -> "PandasDataFrame":
+        df = self.sheets.get(self.active_class)
+        if df is None:
+            raise KeyError("Active class not found in workbook")
+        return df
+
+    def set_active_class(self, class_name: str) -> None:
+        name = str(class_name).strip()
+        if not name:
+            return
+        if name not in self.sheets:
+            name = self.class_names()[0]
+        self.active_class = name
+
+    def update_class(self, class_name: str, df: "PandasDataFrame") -> None:
+        name = str(class_name or "").strip() or "班级1"
+        safe_name = _sanitize_sheet_name(name, "班级1")
+        try:
+            normalized = _normalize_student_dataframe(df, drop_incomplete=False)
+        except Exception:
+            normalized = pd.DataFrame(df)
+        self.sheets[safe_name] = normalized
+
+    def as_dict(self) -> "OrderedDict[str, PandasDataFrame]":
+        return OrderedDict(self.sheets)
+
+
+def _atomic_write_bytes(file_path: str, payload: bytes, *, suffix: str, description: str) -> None:
+    """原子写入二进制文件，避免中途失败留下损坏文件。"""
+
+    directory = os.path.dirname(file_path) or os.getcwd()
+    if not _ensure_writable_directory(directory):
+        raise OSError(f"目标目录不可写：{directory}")
+    fd: Optional[int] = None
+    tmp_path = ""
+    try:
+        fd, tmp_path = tempfile.mkstemp(prefix="ctools_", suffix=suffix, dir=directory)
+        with os.fdopen(fd, "wb") as tmp_file:
+            tmp_file.write(payload)
+        os.replace(tmp_path, file_path)
+    except OSError as exc:
+        raise OSError(f"Failed to write {description} to {file_path!r}: {exc}") from exc
+    finally:
+        if fd is not None:
+            with contextlib.suppress(Exception):
+                os.close(fd)
+        if tmp_path:
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(tmp_path)
+
+
+@dataclass(frozen=True)
+class MappingReader:
+    """Lightweight helper to read typed values from a mapping with defaults."""
+
+    data: Mapping[str, Any]
+    defaults: Mapping[str, Any]
+
+    def _raw(self, key: str, fallback: Any) -> Any:
+        if key in self.data:
+            return self.data[key]
+        if key in self.defaults:
+            return self.defaults[key]
+        return fallback
+
+    def _raw_default(self, key: str, fallback: Any) -> Any:
+        if key in self.defaults:
+            return self.defaults[key]
+        return fallback
+
+    @staticmethod
+    def _coerce_number(
+        raw: Any,
+        fallback: NumberT,
+        converter: Callable[[str], NumberT],
+        min_value: Optional[NumberT],
+        max_value: Optional[NumberT],
+    ) -> NumberT:
+        try:
+            if isinstance(raw, bool):
+                value = converter(str(raw))
+            elif isinstance(raw, (int, float)):
+                value = converter(raw)  # type: ignore[arg-type]
+            else:
+                value = converter(str(raw))
+        except (TypeError, ValueError):
+            value = fallback
+        if isinstance(value, float) and not math.isfinite(value):
+            value = fallback
+        if min_value is not None:
+            value = max(min_value, value)
+        if max_value is not None:
+            value = min(max_value, value)
+        return value
+
+    def get_str(self, key: str, fallback: str) -> str:
+        raw = self._raw(key, fallback)
+        try:
+            return str(raw)
+        except Exception:
+            return fallback
+
+    def get_bool(self, key: str, fallback: bool) -> bool:
+        raw = self._raw(key, fallback)
+        return parse_bool(raw, fallback)
+
+    def get_int(
+        self,
+        key: str,
+        fallback: int,
+        *,
+        min_value: Optional[int] = None,
+        max_value: Optional[int] = None,
+    ) -> int:
+        raw = self._raw(key, fallback)
+        return self._coerce_number(raw, fallback, int, min_value, max_value)
+
+    def get_float(
+        self,
+        key: str,
+        fallback: float,
+        *,
+        min_value: Optional[float] = None,
+        max_value: Optional[float] = None,
+    ) -> float:
+        raw = self._raw(key, fallback)
+        return self._coerce_number(raw, fallback, float, min_value, max_value)
+
+    def get_int_from_defaults(
+        self,
+        key: str,
+        fallback: int,
+        *,
+        min_value: Optional[int] = None,
+        max_value: Optional[int] = None,
+    ) -> int:
+        raw = self._raw_default(key, fallback)
+        return self._coerce_number(raw, fallback, int, min_value, max_value)
 
 def _compute_presentation_category(
     class_name: str,
@@ -1362,9 +1553,11 @@ def _compute_presentation_category(
     if process_lower:
         if process_lower.startswith(("wpp", "wppt")):
             return "wps_ppt"
+        if "wpspresentation" in process_lower:
+            return "wps_ppt"
         if process_lower.startswith("wps"):
             return "wps_word"
-        if "powerpnt" in process_lower:
+        if "powerpnt" in process_lower or process_lower.startswith("pptview"):
             return "ms_ppt"
         if "winword" in process_lower:
             return "ms_word"
@@ -1488,7 +1681,7 @@ def _detect_pyttsx3_driver_issue() -> Optional[str]:
     except Exception:
         return None
     if drivers_spec is None or sapi_spec is None:
-        return "pyttsx3 �Ĳ��� sapi5 ����û���ý���ɵط���ϵͳ�޷�ʹ�� pyttsx3 ��������"
+        return "pyttsx3 的 SAPI5 驱动未找到，当前系统无法使用 pyttsx3 进行语音播报"
     return None
 
 
@@ -1518,6 +1711,8 @@ def detect_speech_environment_issues(
                     missing.append(base_name)
                 if hint not in suggestions:
                     suggestions.append(hint)
+        if not WIN32COM_AVAILABLE:
+            suggestions.append("未检测到 pywin32，推荐安装以启用本地 SAPI 播报（速度快、可选发音人）。")
         if missing:
             issues.append(f"缺少依赖包{'、'.join(sorted(missing))}")
         token_count, token_error = _count_windows_voice_tokens()
@@ -1589,7 +1784,7 @@ class QuietInfoPopup(QWidget):
         apply_button_style(
             self.ok_button,
             ButtonStyles.PRIMARY,
-            height=recommended_control_height(self.ok_button.font(), extra=14, minimum=36),
+            height=recommended_control_height(self.ok_button.font(), extra=10, minimum=32),
         )
         self.ok_button.clicked.connect(self.close)
         button_row.addWidget(self.ok_button)
@@ -1632,275 +1827,134 @@ def show_quiet_information(parent: Optional[QWidget], text: str, title: str = "�
     popup.show()
 
 
-class QuietQuestionDialog(QDialog):
-    """静音确认对话框，避免系统默认的提示音。"""
+class StyleConfig:
+    """统一管理颜色、字体与 QSS 片段，避免散落的硬编码。"""
 
-    def __init__(self, parent: Optional[QWidget], text: str, title: str) -> None:
-        super().__init__(parent)
-        self.setWindowTitle(title)
-        self.setModal(True)
-        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
-        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-        self.setMinimumWidth(320)
+    DESCRIPTION_COLOR = "#5f6368"
+    TOOLBAR_BG = "rgba(28, 29, 32, 235)"
+    TOOLBAR_BORDER = "rgba(255, 255, 255, 45)"
+    TOOLBAR_TEXT = "#f1f3f4"
+    TOOLBAR_BUTTON_BG = "rgba(60, 64, 67, 240)"
+    TOOLBAR_HOVER_BG = "rgba(138, 180, 248, 245)"
+    TOOLBAR_HOVER_BORDER = "rgba(138, 180, 248, 255)"
+    TOOLBAR_HOVER_TEXT = "#202124"
+    TOOLBAR_CHECKED_BG = "rgba(138, 180, 248, 255)"
+    TOOLBAR_CHECKED_TEXT = "#202124"
+    ERASER_BG = TOOLBAR_BUTTON_BG
+    ERASER_TEXT = TOOLBAR_TEXT
+    ERASER_BORDER = TOOLBAR_BORDER
+    ERASER_ACTIVE_BG = TOOLBAR_HOVER_BG
+    ERASER_ACTIVE_BORDER = TOOLBAR_HOVER_BORDER
+    ERASER_ACTIVE_TEXT = TOOLBAR_HOVER_TEXT
+    CLEAR_BG = TOOLBAR_BUTTON_BG
+    CLEAR_BORDER = TOOLBAR_BORDER
+    CLEAR_TEXT = TOOLBAR_TEXT
+    CLEAR_ACTIVE_BG = TOOLBAR_HOVER_BG
+    CLEAR_ACTIVE_BORDER = TOOLBAR_HOVER_BORDER
+    CLEAR_ACTIVE_TEXT = TOOLBAR_HOVER_TEXT
+    WHITEBOARD_ACTIVE_BG = "rgba(255, 214, 102, 240)"
+    WHITEBOARD_ACTIVE_BORDER = "rgba(251, 188, 5, 255)"
+    WHITEBOARD_ACTIVE_TEXT = "#202124"
+    DESCRIPTION_LABEL_STYLE = f"color: {DESCRIPTION_COLOR}; font-size: 12px;"
+    MENU_BUTTON_STYLE = "font-size: 18px; padding-bottom: 6px;"
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 18, 24, 18)
-        layout.setSpacing(12)
-
-        label = QLabel(text, self)
-        label.setWordWrap(True)
-        label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        layout.addWidget(label)
-
-        buttons = QHBoxLayout()
-        buttons.addStretch(1)
-
-        cancel = QPushButton("取消", self)
-        control_height = recommended_control_height(cancel.font(), extra=14, minimum=36)
-        apply_button_style(cancel, ButtonStyles.TOOLBAR, height=control_height)
-        cancel.clicked.connect(self.reject)
-        buttons.addWidget(cancel)
-
-        ok = QPushButton("确定", self)
-        ok.setDefault(True)
-        apply_button_style(ok, ButtonStyles.PRIMARY, height=control_height)
-        ok.clicked.connect(self.accept)
-        buttons.addWidget(ok)
-
-        target_width = max(cancel.sizeHint().width(), ok.sizeHint().width())
-        cancel.setFixedWidth(target_width)
-        ok.setFixedWidth(target_width)
-
-        layout.addLayout(buttons)
-        self._ok_button = ok
-
-    def showEvent(self, event) -> None:  # type: ignore[override]
-        super().showEvent(event)
-        self._ok_button.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
-
-
-class PasswordPromptDialog(QDialog):
-    """统一样式的密码输入窗口，确保按钮始终可见且尺寸一致。"""
-
-    def __init__(self, parent: Optional[QWidget], title: str, prompt: str) -> None:
-        super().__init__(parent)
-        self.setWindowTitle(title)
-        self.setModal(True)
-        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
-        self._captured_text: str = ""
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 18, 24, 18)
-        layout.setSpacing(12)
-
-        label = QLabel(prompt, self)
-        label.setWordWrap(True)
-        label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        layout.addWidget(label)
-
-        self.line_edit = QLineEdit(self)
-        self.line_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.line_edit.setMinimumWidth(220)
-        layout.addWidget(self.line_edit)
-
-        self.error_label = QLabel("", self)
-        self.error_label.setWordWrap(True)
-        self.error_label.setObjectName("passwordPromptErrorLabel")
-        self.error_label.setStyleSheet(
-            "#passwordPromptErrorLabel { color: #d93025; font-size: 12px; margin-top: 4px; }"
-        )
-        self.error_label.hide()
-        layout.addWidget(self.error_label)
-
-        button_box = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
-            Qt.Orientation.Horizontal,
-            self,
-        )
-        button_box.accepted.connect(self.accept)
-        button_box.rejected.connect(self.reject)
-        style_dialog_buttons(
-            button_box,
-            {
-                QDialogButtonBox.StandardButton.Ok: ButtonStyles.PRIMARY,
-                QDialogButtonBox.StandardButton.Cancel: ButtonStyles.TOOLBAR,
-            },
-            extra_padding=12,
-            minimum_height=34,
-            uniform_width=True,
-        )
-        layout.addWidget(button_box)
-
-        self.line_edit.returnPressed.connect(self.accept)
-        self.line_edit.textChanged.connect(
-            lambda _text: _hide_label_if_visible(self.error_label)
-        )
-
-    @classmethod
-    def get_password(
-        cls,
-        parent: Optional[QWidget],
-        title: str,
-        prompt: str,
-        *,
-        allow_empty: bool = True,
-    ) -> tuple[str, bool]:
-        dialog = cls(parent, title, prompt)
-        dialog._allow_empty = allow_empty  # type: ignore[attr-defined]
-        accepted = dialog.exec() == QDialog.DialogCode.Accepted
-        value = dialog._captured_text if accepted else ""
-        return value, accepted
-
-    def showEvent(self, event) -> None:  # type: ignore[override]
-        super().showEvent(event)
-        self.line_edit.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
-
-    def accept(self) -> None:  # type: ignore[override]
-        text = self.line_edit.text()
-        if not getattr(self, "_allow_empty", True) and not text.strip():
-            self._show_error("密码不能为空，请重新输入。")
-            return
-        self._captured_text = text
-        super().accept()
-
-    def reject(self) -> None:  # type: ignore[override]
-        self._captured_text = ""
-        super().reject()
-
-    def _show_error(self, message: str) -> None:
-        self.error_label.setText(message)
-        self.error_label.show()
-        self.line_edit.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
-
-class PasswordSetupDialog(QDialog):
-    """一次性采集两次输入的新密码，避免外部循环引发界面阻塞。"""
-
-    def __init__(self, parent: Optional[QWidget], title: str, prompt: str, confirm_prompt: str) -> None:
-        super().__init__(parent)
-        self.setWindowTitle(title)
-        self.setModal(True)
-        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
-        self._password: str = ""
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 18, 24, 18)
-        layout.setSpacing(12)
-
-        prompt_label = QLabel(prompt, self)
-        prompt_label.setWordWrap(True)
-        prompt_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        layout.addWidget(prompt_label)
-
-        self.password_edit = QLineEdit(self)
-        self.password_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.password_edit.setMinimumWidth(220)
-        layout.addWidget(self.password_edit)
-
-        confirm_label = QLabel(confirm_prompt, self)
-        confirm_label.setWordWrap(True)
-        confirm_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        layout.addWidget(confirm_label)
-
-        self.confirm_edit = QLineEdit(self)
-        self.confirm_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.confirm_edit.setMinimumWidth(220)
-        layout.addWidget(self.confirm_edit)
-
-        self.error_label = QLabel("", self)
-        self.error_label.setWordWrap(True)
-        self.error_label.setObjectName("passwordSetupErrorLabel")
-        self.error_label.setStyleSheet(
-            "#passwordSetupErrorLabel { color: #d93025; font-size: 12px; margin-top: 4px; }"
-        )
-        self.error_label.hide()
-        layout.addWidget(self.error_label)
-
-        button_box = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
-            Qt.Orientation.Horizontal,
-            self,
-        )
-        button_box.accepted.connect(self.accept)
-        button_box.rejected.connect(self.reject)
-        style_dialog_buttons(
-            button_box,
-            {
-                QDialogButtonBox.StandardButton.Ok: ButtonStyles.PRIMARY,
-                QDialogButtonBox.StandardButton.Cancel: ButtonStyles.TOOLBAR,
-            },
-            extra_padding=12,
-            minimum_height=34,
-            uniform_width=True,
-        )
-        layout.addWidget(button_box)
-
-        self.password_edit.returnPressed.connect(self._focus_confirm)
-        self.confirm_edit.returnPressed.connect(self.accept)
-        self.password_edit.textChanged.connect(
-            lambda _text: _hide_label_if_visible(self.error_label)
-        )
-        self.confirm_edit.textChanged.connect(
-            lambda _text: _hide_label_if_visible(self.error_label)
+    @staticmethod
+    def floating_toolbar_style() -> str:
+        return (
+            """
+            #container {{
+                background-color: {bg};
+                border-radius: 10px;
+                border: 1px solid {border};
+            }}
+            QPushButton {{
+                color: {text};
+                background: {button_bg};
+                border: 1px solid {border};
+                border-radius: 6px;
+                padding: 3px;
+                min-width: 28px;
+                min-height: 28px;
+            }}
+            QPushButton:hover {{
+                background: {hover_bg};
+                border-color: {hover_border};
+                color: {hover_text};
+            }}
+            QPushButton:checked {{
+                background: {checked_bg};
+                color: {checked_text};
+            }}
+            QPushButton#eraserButton {{
+                background: {eraser_bg};
+                color: {eraser_text};
+                border-color: {eraser_border};
+            }}
+            QPushButton#eraserButton:hover,
+            QPushButton#eraserButton:checked {{
+                background: {eraser_active_bg};
+                border-color: {eraser_active_border};
+                color: {eraser_active_text};
+            }}
+            QPushButton#clearButton {{
+                background: {clear_bg};
+                color: {clear_text};
+                border-color: {clear_border};
+            }}
+            QPushButton#clearButton:hover,
+            QPushButton#clearButton:checked {{
+                background: {clear_active_bg};
+                border-color: {clear_active_border};
+                color: {clear_active_text};
+            }}
+            #whiteboardButtonActive {{
+                background: {whiteboard_bg};
+                border-color: {whiteboard_border};
+                color: {whiteboard_text};
+            }}
+            """
+        ).format(
+            bg=StyleConfig.TOOLBAR_BG,
+            border=StyleConfig.TOOLBAR_BORDER,
+            text=StyleConfig.TOOLBAR_TEXT,
+            button_bg=StyleConfig.TOOLBAR_BUTTON_BG,
+            hover_bg=StyleConfig.TOOLBAR_HOVER_BG,
+            hover_border=StyleConfig.TOOLBAR_HOVER_BORDER,
+            hover_text=StyleConfig.TOOLBAR_HOVER_TEXT,
+            checked_bg=StyleConfig.TOOLBAR_CHECKED_BG,
+            checked_text=StyleConfig.TOOLBAR_CHECKED_TEXT,
+            eraser_bg=StyleConfig.ERASER_BG,
+            eraser_text=StyleConfig.ERASER_TEXT,
+            eraser_border=StyleConfig.ERASER_BORDER,
+            eraser_active_bg=StyleConfig.ERASER_ACTIVE_BG,
+            eraser_active_border=StyleConfig.ERASER_ACTIVE_BORDER,
+            eraser_active_text=StyleConfig.ERASER_ACTIVE_TEXT,
+            clear_bg=StyleConfig.CLEAR_BG,
+            clear_text=StyleConfig.CLEAR_TEXT,
+            clear_border=StyleConfig.CLEAR_BORDER,
+            clear_active_bg=StyleConfig.CLEAR_ACTIVE_BG,
+            clear_active_border=StyleConfig.CLEAR_ACTIVE_BORDER,
+            clear_active_text=StyleConfig.CLEAR_ACTIVE_TEXT,
+            whiteboard_bg=StyleConfig.WHITEBOARD_ACTIVE_BG,
+            whiteboard_border=StyleConfig.WHITEBOARD_ACTIVE_BORDER,
+            whiteboard_text=StyleConfig.WHITEBOARD_ACTIVE_TEXT,
         )
 
-    @classmethod
-    def get_new_password(
-        cls,
-        parent: Optional[QWidget],
-        title: str,
-        prompt: str,
-        confirm_prompt: str,
-    ) -> tuple[str, bool]:
-        dialog = cls(parent, title, prompt, confirm_prompt)
-        accepted = dialog.exec() == QDialog.DialogCode.Accepted
-        value = dialog._password if accepted else ""
-        return value, accepted
 
-    def showEvent(self, event) -> None:  # type: ignore[override]
-        super().showEvent(event)
-        self.password_edit.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
+@dataclass(frozen=True)
+class StyleManager:
+    """集中管理通用样式，避免分散的硬编码。"""
 
-    def accept(self) -> None:  # type: ignore[override]
-        password = self.password_edit.text().strip()
-        confirm = self.confirm_edit.text().strip()
-        if not password:
-            self._show_error("密码不能为空，请重新输入。", focus_widget=self.password_edit)
-            return
-        if password != confirm:
-            self._show_error("两次输入的密码不一致，请重新设置。", focus_widget=self.confirm_edit)
-            return
-        self._password = password
-        super().accept()
+    description_label: str = StyleConfig.DESCRIPTION_LABEL_STYLE
 
-    def reject(self) -> None:  # type: ignore[override]
-        self._password = ""
-        super().reject()
-
-    def _show_error(self, message: str, *, focus_widget: Optional[QWidget] = None) -> None:
-        self.error_label.setText(message)
-        self.error_label.show()
-        target = focus_widget or self.password_edit
-        target.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
-
-    def _focus_confirm(self) -> None:
-        self.confirm_edit.setFocus(Qt.FocusReason.TabFocusReason)
+    def apply_description_style(self, widget: QWidget) -> None:
+        try:
+            widget.setStyleSheet(self.description_label)
+        except Exception:
+            logger.debug("apply_description_style failed", exc_info=True)
 
 
-def ask_quiet_confirmation(parent: Optional[QWidget], text: str, title: str = "确认") -> bool:
-    dialog = QuietQuestionDialog(parent, text, title)
-    return dialog.exec() == QDialog.DialogCode.Accepted
-
-
-def recommended_control_height(font: QFont, *, extra: int = 12, minimum: int = 32) -> int:
-    """Return a DPI-aware button height based on the supplied font metrics."""
-
-    metrics = QFontMetrics(font)
-    text_height = metrics.boundingRect("Ag").height()
-    line_height = metrics.height()
-    base_height = max(text_height, line_height)
-    return max(minimum, int(math.ceil(base_height + extra)))
+STYLE_MANAGER = StyleManager()
 
 
 class ButtonStyles:
@@ -1972,25 +2026,6 @@ class ButtonStyles:
         "}\n"
     )
 
-    ORDER_TOGGLE = (
-        "QPushButton {\n"
-        "    padding: 4px 18px;\n"
-        "    border-radius: 22px;\n"
-        "    border: 1px solid rgba(16, 61, 115, 0.28);\n"
-        "    background-color: rgba(255, 255, 255, 0.96);\n"
-        "    color: #0b3d91;\n"
-        "}\n"
-        "QPushButton:hover {\n"
-        "    border-color: #1a73e8;\n"
-        "    background-color: rgba(26, 115, 232, 0.16);\n"
-        "}\n"
-        "QPushButton:checked {\n"
-        "    background-color: #1a73e8;\n"
-        "    border-color: #1a73e8;\n"
-        "    color: #ffffff;\n"
-        "}\n"
-    )
-
 
 def apply_button_style(button: QPushButton, style: str, *, height: Optional[int] = None) -> None:
     """Apply a reusable QPushButton stylesheet and pointer cursor."""
@@ -2007,8 +2042,8 @@ def style_dialog_buttons(
     button_box: QDialogButtonBox,
     styles: Mapping[QDialogButtonBox.StandardButton, str],
     *,
-    extra_padding: int = 10,
-    minimum_height: int = 34,
+    extra_padding: int = 6,
+    minimum_height: int = 30,
     uniform_width: bool = False,
 ) -> None:
     """Apply shared styling to all buttons contained in a QDialogButtonBox."""
@@ -2043,27 +2078,28 @@ class SettingsManager:
         self._settings_cache: Optional[Dict[str, Dict[str, str]]] = None
         self.defaults: Dict[str, Dict[str, str]] = {
             "Launcher": {
-            "x": "120",
-            "y": "120",
-            "minimized": "False",
-            "bubble_x": "120",
-            "bubble_y": "120",
-            "auto_exit_seconds": "2400",
-        },
-        "Startup": {"autostart_enabled": "False"},
+                "x": "120",
+                "y": "120",
+                "minimized": "False",
+                "bubble_x": "120",
+                "bubble_y": "120",
+                "auto_exit_seconds": "2400",
+            },
             "RollCallTimer": {
                 "geometry": "480x280+180+180",
                 "show_id": "True",
                 "show_name": "True",
                 "show_photo": "False",
-                "photo_duration_seconds": "0",
-                "speech_enabled": "False",
-                "speech_voice_id": "",
-                "current_group": "全部",
-                "timer_countdown_minutes": "5",
-                "timer_countdown_seconds": "0",
-                "timer_sound_enabled": "True",
-                "mode": "roll_call",
+            "photo_duration_seconds": "0",
+            "speech_enabled": "False",
+            "speech_voice_id": "",
+            "speech_output_id": "",
+            "speech_engine": "pyttsx3",
+            "current_group": "全部",
+            "timer_countdown_minutes": "5",
+            "timer_countdown_seconds": "0",
+            "timer_sound_enabled": "True",
+            "mode": "roll_call",
                 "timer_mode": "countdown",
                 "timer_seconds_left": "300",
                 "timer_stopwatch_seconds": "0",
@@ -2071,12 +2107,10 @@ class SettingsManager:
                 "id_font_size": "48",
                 "name_font_size": "60",
                 "timer_font_size": "56",
-                "scoreboard_order": "rank",
             },
             "Paint": {
                 "x": "260",
                 "y": "260",
-                "brush_size": "12",
                 "brush_base_size": "12",
                 "brush_color": "#ff0000",
                 "brush_style": "chalk",
@@ -2086,11 +2120,6 @@ class SettingsManager:
                 "control_wps_word": "False",
             },
         }
-
-    def _get_config_dir(self) -> str:
-        """返回当前系统下建议的配置目录。"""
-
-        return _preferred_app_directory()
 
     def _prepare_storage_path(self, filename: str) -> str:
         """根据平台选择合适的设置文件路径，并在需要时迁移旧文件。"""
@@ -2123,6 +2152,23 @@ class SettingsManager:
     def get_defaults(self) -> Dict[str, Dict[str, str]]:
         return {section: values.copy() for section, values in self.defaults.items()}
 
+    def get_paint_settings(self) -> PaintConfig:
+        settings = self.load_settings()
+        section = settings.get("Paint", {})
+        defaults = self.defaults.get("Paint", {})
+        return PaintConfig.from_mapping(section, defaults)
+
+    def update_paint_settings(self, config: PaintConfig) -> None:
+        settings = self.load_settings()
+        settings["Paint"] = config.to_mapping()
+        self.save_settings(settings)
+
+    def get_roll_call_settings(self) -> RollCallTimerConfig:
+        settings = self.load_settings()
+        section = settings.get("RollCallTimer", {})
+        defaults = self.defaults.get("RollCallTimer", {})
+        return RollCallTimerConfig.from_mapping(section, defaults)
+
     def load_settings(self) -> Dict[str, Dict[str, str]]:
         if self._settings_cache is not None:
             return {section: values.copy() for section, values in self._settings_cache.items()}
@@ -2136,7 +2182,8 @@ class SettingsManager:
                         settings[section] = {}
                     for key, value in self.config.items(section):
                         settings[section][key] = value
-            except configparser.Error:
+            except (configparser.Error, OSError, UnicodeError) as exc:
+                logger.warning("Failed to read settings from %s: %s", self.filename, exc)
                 settings = self.get_defaults()
 
         self._settings_cache = {section: values.copy() for section, values in settings.items()}
@@ -2145,19 +2192,33 @@ class SettingsManager:
     def _write_atomic(self, path: str, data: str) -> None:
         directory = os.path.dirname(path)
         if directory and not os.path.exists(directory):
-            os.makedirs(directory, exist_ok=True)
+            try:
+                os.makedirs(directory, exist_ok=True)
+            except Exception as exc:
+                logger.warning("Failed to prepare directory for settings %s: %s", directory, exc)
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write(data)
+                return
         target_dir = directory or os.getcwd()
-        fd, tmp_path = tempfile.mkstemp(prefix="ctools_", suffix=".tmp", dir=target_dir)
+        try:
+            fd, tmp_path = tempfile.mkstemp(prefix="ctools_", suffix=".tmp", dir=target_dir)
+        except Exception as exc:
+            logger.warning("Failed to create temp file for settings write %s: %s", path, exc)
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(data)
+            return
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 handle.write(data)
             os.replace(tmp_path, path)
-        except Exception:
+        except Exception as exc:
             try:
                 os.remove(tmp_path)
             except OSError:
                 pass
-            raise
+            logger.warning("Atomic write failed for %s, falling back to direct write: %s", path, exc)
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(data)
 
     def save_settings(self, settings: Dict[str, Dict[str, str]]) -> None:
         config = configparser.ConfigParser()
@@ -2179,38 +2240,26 @@ class SettingsManager:
             except Exception:
                 failed.append(path)
         if failed and self.filename not in failed:
-            print(f"无法写入备用配置文件: {failed}")
+            logger.warning("Failed to write mirrored settings to %s", failed)
 
         self._settings_cache = {section: values.copy() for section, values in snapshot.items()}
 
-    def get_launcher_state(self) -> Tuple["LauncherSettings", "StartupSettings"]:
-        """Return launcher geometry and startup flags in a single pass."""
+    def get_launcher_state(self) -> "LauncherSettings":
+        """Return launcher geometry and timing flags in a single pass."""
 
         settings = self.load_settings()
         launcher_defaults = self.defaults.get("Launcher", {})
-        startup_defaults = self.defaults.get("Startup", {})
         launcher_section = settings.get("Launcher", {})
-        startup_section = settings.get("Startup", {})
         launcher_settings = LauncherSettings.from_mapping(launcher_section, launcher_defaults)
-        startup_settings = StartupSettings.from_mapping(startup_section, startup_defaults)
-        return launcher_settings, startup_settings
+        return launcher_settings
 
-    def update_launcher_settings(
-        self,
-        launcher_settings: "LauncherSettings",
-        startup_settings: Optional["StartupSettings"] = None,
-    ) -> None:
-        """Persist the launcher configuration alongside optional startup flags."""
+    def update_launcher_settings(self, launcher_settings: "LauncherSettings") -> None:
+        """Persist the launcher configuration."""
 
         settings = self.load_settings()
         launcher_section = dict(settings.get("Launcher", {}))
         launcher_section.update(launcher_settings.to_mapping())
         settings["Launcher"] = launcher_section
-
-        if startup_settings is not None:
-            startup_section = dict(settings.get("Startup", {}))
-            startup_section.update(startup_settings.to_mapping())
-            settings["Startup"] = startup_section
 
         self.save_settings(settings)
 
@@ -2229,6 +2278,39 @@ class SettingsManager:
             self.save_settings(settings)
 
 
+class _IOWorkerSignals(QObject):
+    """通用的线程任务信号定义。"""
+
+    finished = pyqtSignal(object)
+    error = pyqtSignal(str, object)
+
+
+class _IOWorker(QRunnable):
+    """在后台线程中执行 I/O 任务，避免阻塞 UI。"""
+
+    def __init__(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
+        super().__init__()
+        self.fn = fn
+        self.args = args
+        self.kwargs = kwargs
+        self.signals = _IOWorkerSignals()
+
+    def run(self) -> None:  # pragma: no cover - 线程任务
+        try:
+            result = self.fn(*self.args, **self.kwargs)
+        except Exception as exc:  # noqa: BLE001 - 顶层捕获以防线程崩溃
+            traceback.print_exc()
+            try:
+                self.signals.error.emit(str(exc), exc)
+            except Exception:
+                pass
+            return
+        try:
+            self.signals.finished.emit(result)
+        except Exception:
+            pass
+
+
 @dataclass(frozen=True)
 class LauncherSettings:
     position: QPoint
@@ -2241,37 +2323,20 @@ class LauncherSettings:
         mapping: Mapping[str, str],
         defaults: Mapping[str, str],
     ) -> "LauncherSettings":
-        def _to_int(key: str, fallback: int) -> int:
-            raw_value = mapping.get(key, defaults.get(key, str(fallback)))
-            try:
-                return int(str(raw_value))
-            except (TypeError, ValueError):
-                return fallback
+        reader = MappingReader(mapping, defaults)
 
-        def _int_from_defaults(key: str, fallback: int) -> int:
-            raw_default = defaults.get(key)
-            if raw_default is None:
-                return fallback
-            try:
-                return int(str(raw_default))
-            except (TypeError, ValueError):
-                return fallback
+        default_x = reader.get_int_from_defaults("x", 120)
+        default_y = reader.get_int_from_defaults("y", 120)
+        x = reader.get_int("x", default_x)
+        y = reader.get_int("y", default_y)
 
-        default_x = _int_from_defaults("x", 120)
-        default_y = _int_from_defaults("y", 120)
-        x = _to_int("x", default_x)
-        y = _to_int("y", default_y)
-        bubble_default_x = _int_from_defaults("bubble_x", x)
-        bubble_default_y = _int_from_defaults("bubble_y", y)
-        bubble_x = _to_int("bubble_x", bubble_default_x)
-        bubble_y = _to_int("bubble_y", bubble_default_y)
-        minimized_raw = mapping.get("minimized", defaults.get("minimized", "False"))
-        minimized = str_to_bool(str(minimized_raw), False)
-        auto_exit_raw = mapping.get("auto_exit_seconds", defaults.get("auto_exit_seconds", "2400"))
-        try:
-            auto_exit_seconds = max(0, int(str(auto_exit_raw)))
-        except (TypeError, ValueError):
-            auto_exit_seconds = 2400
+        bubble_default_x = reader.get_int_from_defaults("bubble_x", x)
+        bubble_default_y = reader.get_int_from_defaults("bubble_y", y)
+        bubble_x = reader.get_int("bubble_x", bubble_default_x)
+        bubble_y = reader.get_int("bubble_y", bubble_default_y)
+
+        minimized = reader.get_bool("minimized", False)
+        auto_exit_seconds = reader.get_int("auto_exit_seconds", 0, min_value=0)
         return LauncherSettings(QPoint(x, y), QPoint(bubble_x, bubble_y), minimized, auto_exit_seconds)
 
     def to_mapping(self) -> Dict[str, str]:
@@ -2281,28 +2346,11 @@ class LauncherSettings:
             "bubble_x": str(self.bubble_position.x()),
             "bubble_y": str(self.bubble_position.y()),
             "minimized": bool_to_str(self.minimized),
-            "auto_exit_seconds": str(int(max(0, self.auto_exit_seconds))),
+            "auto_exit_seconds": str(self.auto_exit_seconds),
         }
 
 
-@dataclass(frozen=True)
-class StartupSettings:
-    autostart_enabled: bool
-
-    @staticmethod
-    def from_mapping(
-        mapping: Mapping[str, str],
-        defaults: Mapping[str, str],
-    ) -> "StartupSettings":
-        raw_value = mapping.get("autostart_enabled", defaults.get("autostart_enabled", "False"))
-        enabled = str_to_bool(str(raw_value), False)
-        return StartupSettings(enabled)
-
-    def to_mapping(self) -> Dict[str, str]:
-        return {"autostart_enabled": bool_to_str(self.autostart_enabled)}
-
-
-# ---------- 画笔风格 ----------
+# ---------- ���ʷ�� ----------
 class PenStyle(Enum):
     CHALK = "chalk"
     HIGHLIGHTER = "highlighter"
@@ -2368,108 +2416,269 @@ class PenStyleConfig:
 _DEFAULT_PEN_STYLE = PenStyle.FOUNTAIN
 
 
+@dataclass
+class PaintConfig:
+    """Typed configuration for overlay and paint tools."""
+
+    x: int = 260
+    y: int = 260
+    brush_base_size: float = 12.0
+    brush_color: str = "#ff0000"
+    brush_style: PenStyle = _DEFAULT_PEN_STYLE
+    control_ms_ppt: bool = True
+    control_ms_word: bool = False
+    control_wps_ppt: bool = True
+    control_wps_word: bool = False
+    base_size_overrides: Dict[str, float] = field(default_factory=dict)
+    opacity_overrides: Dict[str, int] = field(default_factory=dict)
+
+    @classmethod
+    def from_mapping(cls, mapping: Mapping[str, str], defaults: Mapping[str, str]) -> "PaintConfig":
+        reader = MappingReader(mapping, defaults)
+
+        style_raw = reader.get_str("brush_style", _DEFAULT_PEN_STYLE.value)
+        style = _DEFAULT_PEN_STYLE
+        if isinstance(style_raw, str):
+            with contextlib.suppress(Exception):
+                style = PenStyle(style_raw)
+        base_sizes: Dict[str, float] = {}
+        opacity_overrides: Dict[str, int] = {}
+        for key, _value in mapping.items():
+            if key.endswith("_base_size"):
+                style_name = key[: -len("_base_size")]
+                fallback_base = get_pen_style_config(_DEFAULT_PEN_STYLE).default_base
+                with contextlib.suppress(Exception):
+                    fallback_base = get_pen_style_config(PenStyle(style_name)).default_base
+                base_sizes[key] = reader.get_float(key, float(fallback_base))
+            if key.endswith("_opacity"):
+                opacity_overrides[key] = int(reader.get_float(key, 0.0))
+        return cls(
+            x=reader.get_int("x", 260),
+            y=reader.get_int("y", 260),
+            brush_base_size=reader.get_float("brush_base_size", 12.0),
+            brush_color=reader.get_str("brush_color", "#ff0000"),
+            brush_style=style,
+            control_ms_ppt=reader.get_bool("control_ms_ppt", True),
+            control_ms_word=reader.get_bool("control_ms_word", False),
+            control_wps_ppt=reader.get_bool("control_wps_ppt", True),
+            control_wps_word=reader.get_bool("control_wps_word", False),
+            base_size_overrides=base_sizes,
+            opacity_overrides=opacity_overrides,
+        )
+
+    def to_mapping(self) -> Dict[str, str]:
+        return {
+            "x": str(int(self.x)),
+            "y": str(int(self.y)),
+            "brush_base_size": f"{float(self.brush_base_size):.2f}",
+            "brush_color": str(self.brush_color),
+            "brush_style": self.brush_style.value,
+            "control_ms_ppt": bool_to_str(self.control_ms_ppt),
+            "control_ms_word": bool_to_str(self.control_ms_word),
+            "control_wps_ppt": bool_to_str(self.control_wps_ppt),
+            "control_wps_word": bool_to_str(self.control_wps_word),
+            **(self.base_size_overrides or {}),
+            **(self.opacity_overrides or {}),
+        }
+
+
+@dataclass
+class RollCallTimerConfig:
+    """Typed configuration for roll call and timer settings."""
+
+    geometry: str = "480x280+180+180"
+    show_id: bool = True
+    show_name: bool = True
+    show_photo: bool = False
+    photo_duration_seconds: int = 0
+    speech_enabled: bool = False
+    speech_voice_id: str = ""
+    speech_output_id: str = ""
+    speech_engine: str = "pyttsx3"
+    current_group: str = "全部"
+    timer_countdown_minutes: int = 5
+    timer_countdown_seconds: int = 0
+    timer_sound_enabled: bool = True
+    mode: str = "roll_call"
+    timer_mode: str = "countdown"
+    timer_seconds_left: int = 300
+    timer_stopwatch_seconds: int = 0
+    timer_running: bool = False
+    id_font_size: int = 48
+    name_font_size: int = 60
+    timer_font_size: int = 56
+    current_class: str = ""
+    class_states: str = ""
+    group_remaining: str = ""
+    group_last: str = ""
+    global_drawn: str = ""
+
+    @classmethod
+    def from_mapping(cls, mapping: Mapping[str, str], defaults: Mapping[str, str]) -> "RollCallTimerConfig":
+        reader = MappingReader(mapping, defaults)
+
+        return cls(
+            geometry=reader.get_str("geometry", "480x280+180+180"),
+            show_id=reader.get_bool("show_id", True),
+            show_name=reader.get_bool("show_name", True),
+            show_photo=reader.get_bool("show_photo", False),
+            photo_duration_seconds=reader.get_int("photo_duration_seconds", 0, min_value=0),
+            speech_enabled=reader.get_bool("speech_enabled", False),
+            speech_voice_id=reader.get_str("speech_voice_id", ""),
+            speech_output_id=reader.get_str("speech_output_id", ""),
+            speech_engine=reader.get_str("speech_engine", "pyttsx3"),
+            current_group=reader.get_str("current_group", "全部"),
+            timer_countdown_minutes=reader.get_int("timer_countdown_minutes", 5),
+            timer_countdown_seconds=reader.get_int("timer_countdown_seconds", 0),
+            timer_sound_enabled=reader.get_bool("timer_sound_enabled", True),
+            mode=reader.get_str("mode", "roll_call"),
+            timer_mode=reader.get_str("timer_mode", "countdown"),
+            timer_seconds_left=reader.get_int("timer_seconds_left", 300, min_value=0),
+            timer_stopwatch_seconds=reader.get_int("timer_stopwatch_seconds", 0, min_value=0),
+            timer_running=reader.get_bool("timer_running", False),
+            id_font_size=reader.get_int("id_font_size", 48),
+            name_font_size=reader.get_int("name_font_size", 60),
+            timer_font_size=reader.get_int("timer_font_size", 56),
+            current_class=reader.get_str("current_class", ""),
+            class_states=reader.get_str("class_states", ""),
+            group_remaining=reader.get_str("group_remaining", ""),
+            group_last=reader.get_str("group_last", ""),
+            global_drawn=reader.get_str("global_drawn", ""),
+        )
+
+    def to_mapping(self) -> Dict[str, str]:
+        return {
+            "geometry": self.geometry,
+            "show_id": bool_to_str(self.show_id),
+            "show_name": bool_to_str(self.show_name),
+            "show_photo": bool_to_str(self.show_photo),
+            "photo_duration_seconds": str(int(self.photo_duration_seconds)),
+            "speech_enabled": bool_to_str(self.speech_enabled),
+            "speech_voice_id": self.speech_voice_id,
+            "speech_output_id": self.speech_output_id,
+            "speech_engine": self.speech_engine,
+            "current_group": self.current_group,
+            "timer_countdown_minutes": str(int(self.timer_countdown_minutes)),
+            "timer_countdown_seconds": str(int(self.timer_countdown_seconds)),
+            "timer_sound_enabled": bool_to_str(self.timer_sound_enabled),
+            "mode": self.mode,
+            "timer_mode": self.timer_mode,
+            "timer_seconds_left": str(int(self.timer_seconds_left)),
+            "timer_stopwatch_seconds": str(int(self.timer_stopwatch_seconds)),
+            "timer_running": bool_to_str(self.timer_running),
+            "id_font_size": str(int(self.id_font_size)),
+            "name_font_size": str(int(self.name_font_size)),
+            "timer_font_size": str(int(self.timer_font_size)),
+            "current_class": self.current_class,
+            "class_states": self.class_states,
+            "group_remaining": self.group_remaining,
+            "group_last": self.group_last,
+            "global_drawn": self.global_drawn,
+        }
+
+
 PEN_STYLE_CONFIGS: Dict[PenStyle, PenStyleConfig] = {
     PenStyle.CHALK: PenStyleConfig(
         key="chalk",
         display_name="粉笔",
         description="粉笔质感，色彩柔和并带有细腻粉雾与轻微擦痕。",
-        slider_range=(8, 34),
-        default_base=16,
-        width_multiplier=1.1,
-        smoothing=0.92,
-        speed_base_multiplier=30.0,
-        speed_base_offset=46.0,
-        target_min_factor=0.9,
-        target_speed_factor=0.12,
-        target_curve_factor=0.1,
-        target_blend=0.28,
-        curve_sensitivity=0.42,
-        pressure_factor=0.16,
+        slider_range=(8, 36),
+        default_base=15,
+        width_multiplier=1.16,
+        smoothing=0.91,
+        speed_base_multiplier=22.0,
+        speed_base_offset=28.0,
+        target_min_factor=0.88,
+        target_speed_factor=0.1,
+        target_curve_factor=0.2,
+        target_blend=0.2,
+        curve_sensitivity=0.56,
+        pressure_factor=0.32,
         width_memory=0.93,
-        pressure_time_weight=2.6,
-        travel_weight=0.18,
-        fade_min_alpha=210,
-        fade_max_alpha=255,
-        fade_speed_weight=88.0,
-        fade_curve_weight=54.0,
-        base_alpha=255,
-        shadow_alpha=70,
-        shadow_alpha_scale=0.26,
+        pressure_time_weight=2.0,
+        travel_weight=0.36,
+        fade_min_alpha=186,
+        fade_max_alpha=232,
+        fade_speed_weight=70.0,
+        fade_curve_weight=42.0,
+        base_alpha=228,
+        shadow_alpha=72,
+        shadow_alpha_scale=0.32,
         shadow_width_scale=1.16,
         texture=None,
         composition_mode=QPainter.CompositionMode.CompositionMode_SourceOver,
         color_lighten=1.0,
-        target_max_factor=1.16,
-        width_change_limit=0.028,
-        noise_strength=0.0,
+        target_max_factor=1.18,
+        width_change_limit=0.012,
+        noise_strength=0.85,
         fill_alpha_boost=12,
-        feather_strength=0.18,
-        edge_highlight_alpha=52,
+        feather_strength=0.6,
+        edge_highlight_alpha=30,
         solid_fill=True,
-        target_responsiveness=0.34,
-        width_accel=0.18,
-        width_velocity_limit=0.18,
-        width_velocity_damping=0.7,
-        width_gamma=0.9,
-        entry_taper_distance=26.0,
-        entry_taper_strength=0.42,
-        entry_taper_curve=1.38,
-        exit_taper_speed=320.0,
+        target_responsiveness=0.26,
+        width_accel=0.1,
+        width_velocity_limit=0.12,
+        width_velocity_damping=0.82,
+        width_gamma=1.0,
+        entry_taper_distance=20.0,
+        entry_taper_strength=0.32,
+        entry_taper_curve=1.1,
+        exit_taper_speed=260.0,
         exit_taper_strength=0.5,
-        exit_taper_curve=1.32,
-        tail_alpha_fade=0.26,
-        jitter_strength=0.2,
+        exit_taper_curve=1.16,
+        tail_alpha_fade=0.5,
+        jitter_strength=0.3,
     ),
     PenStyle.HIGHLIGHTER: PenStyleConfig(
         key="highlighter",
         display_name="荧光笔",
         description="半透明荧光覆盖，线宽稳定，突出重点且不遮挡底稿。",
-        slider_range=(12, 30),
-        default_base=18,
-        width_multiplier=1.9,
-        smoothing=0.9,
+        slider_range=(8, 34),
+        default_base=14,
+        width_multiplier=2.3,
+        smoothing=0.99,
         speed_base_multiplier=34.0,
-        speed_base_offset=52.0,
-        target_min_factor=0.96,
-        target_speed_factor=0.04,
-        target_curve_factor=0.03,
-        target_blend=0.2,
-        curve_sensitivity=0.3,
-        pressure_factor=0.03,
-        width_memory=0.97,
-        pressure_time_weight=2.2,
-        travel_weight=0.09,
-        fade_min_alpha=60,
-        fade_max_alpha=190,
-        fade_speed_weight=60.0,
-        fade_curve_weight=30.0,
-        base_alpha=190,
+        speed_base_offset=64.0,
+        target_min_factor=0.99,
+        target_speed_factor=0.0025,
+        target_curve_factor=0.006,
+        target_blend=0.06,
+        curve_sensitivity=0.08,
+        pressure_factor=0.002,
+        width_memory=0.999,
+        pressure_time_weight=1.0,
+        travel_weight=0.015,
+        fade_min_alpha=52,
+        fade_max_alpha=178,
+        fade_speed_weight=42.0,
+        fade_curve_weight=14.0,
+        base_alpha=176,
         shadow_alpha=0,
         shadow_alpha_scale=0.0,
         shadow_width_scale=1.0,
         texture=None,
         composition_mode=QPainter.CompositionMode.CompositionMode_SourceOver,
         color_lighten=1.0,
-        target_max_factor=1.08,
-        width_change_limit=0.022,
+        target_max_factor=1.02,
+        width_change_limit=0.003,
         noise_strength=0.0,
         fill_alpha_boost=0,
-        feather_strength=0.36,
+        feather_strength=0.72,
         edge_highlight_alpha=0,
         solid_fill=True,
-        opacity_range=(96, 232),
-        default_opacity=180,
-        target_responsiveness=0.24,
-        width_accel=0.1,
-        width_velocity_limit=0.14,
-        width_velocity_damping=0.78,
-        width_gamma=1.0,
-        entry_taper_distance=14.0,
-        entry_taper_strength=0.1,
-        entry_taper_curve=1.05,
-        exit_taper_speed=440.0,
-        exit_taper_strength=0.12,
-        exit_taper_curve=1.03,
+        opacity_range=(96, 220),
+        default_opacity=165,
+        target_responsiveness=0.08,
+        width_accel=0.024,
+        width_velocity_limit=0.05,
+        width_velocity_damping=0.94,
+        width_gamma=1.04,
+        entry_taper_distance=3.5,
+        entry_taper_strength=0.008,
+        entry_taper_curve=1.0,
+        exit_taper_speed=540.0,
+        exit_taper_strength=0.036,
+        exit_taper_curve=1.01,
         tail_alpha_fade=0.0,
         jitter_strength=0.0,
     ),
@@ -2477,103 +2686,103 @@ PEN_STYLE_CONFIGS: Dict[PenStyle, PenStyleConfig] = {
         key="fountain",
         display_name="钢笔",
         description="顺滑钢笔笔触，粗细随速度与转折自然呼应，细节清晰。",
-        slider_range=(5, 24),
+        slider_range=(4, 24),
         default_base=10,
-        width_multiplier=1.04,
-        smoothing=0.86,
-        speed_base_multiplier=24.0,
-        speed_base_offset=38.0,
-        target_min_factor=0.62,
-        target_speed_factor=0.18,
-        target_curve_factor=0.24,
+        width_multiplier=1.01,
+        smoothing=0.945,
+        speed_base_multiplier=15.5,
+        speed_base_offset=25.0,
+        target_min_factor=0.44,
+        target_speed_factor=0.44,
+        target_curve_factor=0.46,
         target_blend=0.3,
-        curve_sensitivity=0.56,
-        pressure_factor=0.24,
-        width_memory=0.9,
-        pressure_time_weight=2.9,
-        travel_weight=0.22,
-        fade_min_alpha=150,
-        fade_max_alpha=242,
-        fade_speed_weight=110.0,
-        fade_curve_weight=70.0,
-        base_alpha=255,
-        shadow_alpha=70,
-        shadow_alpha_scale=0.34,
-        shadow_width_scale=1.14,
+        curve_sensitivity=0.92,
+        pressure_factor=0.62,
+        width_memory=0.975,
+        pressure_time_weight=2.2,
+        travel_weight=0.36,
+        fade_min_alpha=206,
+        fade_max_alpha=250,
+        fade_speed_weight=92.0,
+        fade_curve_weight=66.0,
+        base_alpha=250,
+        shadow_alpha=0,
+        shadow_alpha_scale=0.0,
+        shadow_width_scale=1.0,
         texture=None,
         composition_mode=QPainter.CompositionMode.CompositionMode_SourceOver,
         color_lighten=1.0,
-        target_max_factor=1.14,
-        width_change_limit=0.03,
+        target_max_factor=1.38,
+        width_change_limit=0.012,
         noise_strength=0.0,
-        fill_alpha_boost=12,
+        fill_alpha_boost=24,
         feather_strength=0.12,
-        edge_highlight_alpha=48,
+        edge_highlight_alpha=26,
         solid_fill=True,
-        target_responsiveness=0.4,
-        width_accel=0.22,
-        width_velocity_limit=0.22,
-        width_velocity_damping=0.72,
-        width_gamma=0.78,
-        entry_taper_distance=32.0,
-        entry_taper_strength=0.56,
+        target_responsiveness=0.46,
+        width_accel=0.12,
+        width_velocity_limit=0.11,
+        width_velocity_damping=0.84,
+        width_gamma=0.62,
+        entry_taper_distance=30.0,
+        entry_taper_strength=1.08,
         entry_taper_curve=1.7,
-        exit_taper_speed=320.0,
-        exit_taper_strength=0.56,
-        exit_taper_curve=1.6,
-        tail_alpha_fade=0.24,
+        exit_taper_speed=210.0,
+        exit_taper_strength=1.4,
+        exit_taper_curve=1.72,
+        tail_alpha_fade=0.9,
         jitter_strength=0.0,
     ),
     PenStyle.BRUSH: PenStyleConfig(
         key="brush",
         display_name="毛笔",
         description="毛笔墨韵饱满，起收笔灵动，线条富有弹性层次。",
-        slider_range=(6, 20),
-        default_base=12,
-        width_multiplier=1.46,
-        smoothing=0.86,
-        speed_base_multiplier=22.0,
-        speed_base_offset=34.0,
-        target_min_factor=0.7,
-        target_speed_factor=0.26,
-        target_curve_factor=0.3,
-        target_blend=0.32,
-        curve_sensitivity=0.68,
-        pressure_factor=0.34,
-        width_memory=0.88,
-        pressure_time_weight=3.1,
-        travel_weight=0.26,
-        fade_min_alpha=150,
+        slider_range=(6, 28),
+        default_base=13,
+        width_multiplier=2.2,
+        smoothing=0.8,
+        speed_base_multiplier=15.0,
+        speed_base_offset=25.0,
+        target_min_factor=0.68,
+        target_speed_factor=0.34,
+        target_curve_factor=0.36,
+        target_blend=0.28,
+        curve_sensitivity=0.7,
+        pressure_factor=0.58,
+        width_memory=0.94,
+        pressure_time_weight=2.8,
+        travel_weight=0.4,
+        fade_min_alpha=188,
         fade_max_alpha=255,
-        fade_speed_weight=120.0,
-        fade_curve_weight=72.0,
+        fade_speed_weight=142.0,
+        fade_curve_weight=86.0,
         base_alpha=255,
-        shadow_alpha=110,
-        shadow_alpha_scale=0.34,
-        shadow_width_scale=1.2,
+        shadow_alpha=0,
+        shadow_alpha_scale=0.0,
+        shadow_width_scale=1.0,
         texture=None,
         composition_mode=QPainter.CompositionMode.CompositionMode_SourceOver,
         color_lighten=1.0,
-        target_max_factor=1.28,
-        width_change_limit=0.034,
-        noise_strength=0.0,
-        fill_alpha_boost=36,
-        feather_strength=0.22,
-        edge_highlight_alpha=80,
+        target_max_factor=1.55,
+        width_change_limit=0.022,
+        noise_strength=0.2,
+        fill_alpha_boost=26,
+        feather_strength=0.34,
+        edge_highlight_alpha=34,
         solid_fill=True,
         target_responsiveness=0.36,
-        width_accel=0.26,
-        width_velocity_limit=0.26,
-        width_velocity_damping=0.64,
-        width_gamma=0.82,
-        entry_taper_distance=30.0,
-        entry_taper_strength=0.5,
-        entry_taper_curve=1.46,
-        exit_taper_speed=360.0,
-        exit_taper_strength=0.6,
-        exit_taper_curve=1.42,
-        tail_alpha_fade=0.24,
-        jitter_strength=0.0,
+        width_accel=0.18,
+        width_velocity_limit=0.18,
+        width_velocity_damping=0.8,
+        width_gamma=1.12,
+        entry_taper_distance=38.0,
+        entry_taper_strength=1.1,
+        entry_taper_curve=1.62,
+        exit_taper_speed=224.0,
+        exit_taper_strength=1.38,
+        exit_taper_curve=1.52,
+        tail_alpha_fade=0.72,
+        jitter_strength=0.22,
     ),
 }
 
@@ -2767,6 +2976,15 @@ class _PenStyleEffects:
             body_color = QColor(color)
             body_color.setAlpha(fill_alpha)
             _fill(stroke_area, body_color)
+            if config.noise_strength > 0:
+                noise_alpha = int(fill_alpha * clamp(config.noise_strength * 0.95, 0.0, 1.0))
+                if noise_alpha > 0:
+                    noise_brush = cls._noise_brush(body_color, noise_alpha, config.noise_strength * 1.1, scale=2)
+                    painter.save()
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.setBrush(noise_brush)
+                    painter.drawPath(stroke_area)
+                    painter.restore()
 
             edge_color = QColor(body_color)
             edge_color.setAlpha(int(fill_alpha * 0.42))
@@ -2815,7 +3033,7 @@ class _PenStyleEffects:
                 halo_color.setAlpha(int(fill_alpha * clamp(config.feather_strength, 0.0, 0.6) * 0.4))
                 halo_pen = QPen(
                     halo_color,
-                    max(0.6, width * (1.0 + config.feather_strength * 0.5)),
+                    max(0.6, width * (1.1 + config.feather_strength * 0.6)),
                     Qt.PenStyle.SolidLine,
                     Qt.PenCapStyle.RoundCap,
                     Qt.PenJoinStyle.RoundJoin,
@@ -2827,14 +3045,114 @@ class _PenStyleEffects:
                 painter.restore()
             return updated
 
-        if style_key == "brush":
-            stroke_area = cls._stroke_path(path, width * 1.05)
+        if style_key == "fountain":
+            stroke_area = cls._stroke_path(path, width * 1.03)
             body_color = QColor(color)
             body_color.setAlpha(fill_alpha)
             _fill(stroke_area, body_color, composition=QPainter.CompositionMode.CompositionMode_SourceOver)
+            core_color = QColor(body_color)
+            core_color.setAlpha(int(fill_alpha * 0.68))
+            core_pen = QPen(
+                core_color.darker(112),
+                max(0.7, width * 0.22),
+                Qt.PenStyle.SolidLine,
+                Qt.PenCapStyle.RoundCap,
+                Qt.PenJoinStyle.RoundJoin,
+            )
+            painter.save()
+            painter.setPen(core_pen)
+            painter.drawPath(path)
+            painter.restore()
+            sheen_pen = QPen(
+                QColor(255, 255, 255, max(12, int(fill_alpha * 0.18))),
+                max(0.5, width * 0.08),
+                Qt.PenStyle.SolidLine,
+                Qt.PenCapStyle.RoundCap,
+                Qt.PenJoinStyle.RoundJoin,
+            )
+            painter.save()
+            painter.setPen(sheen_pen)
+            painter.drawPath(path)
+            painter.restore()
+            highlight_alpha = min(
+                fill_alpha,
+                max(0, min(config.edge_highlight_alpha, int(fill_alpha * 0.35))),
+            )
+            if highlight_alpha > 0:
+                highlight_pen = QPen(
+                    QColor(255, 255, 255, highlight_alpha),
+                    max(0.6, width * 0.1),
+                    Qt.PenStyle.SolidLine,
+                    Qt.PenCapStyle.RoundCap,
+                    Qt.PenJoinStyle.RoundJoin,
+                )
+                painter.save()
+                painter.setPen(highlight_pen)
+                painter.drawPath(path)
+                painter.restore()
             return stroke_coverage
 
-        # fountain & fallback styles
+        if style_key == "brush":
+            stroke_area = cls._stroke_path(path, width * 1.08)
+            body_color = QColor(color)
+            body_color.setAlpha(fill_alpha)
+            _fill(
+                stroke_area,
+                body_color,
+                composition=config.composition_mode or QPainter.CompositionMode.CompositionMode_SourceOver,
+            )
+            if config.noise_strength > 0:
+                noise_alpha = int(fill_alpha * clamp(config.noise_strength * 0.5, 0.0, 1.0))
+                if noise_alpha > 0:
+                    noise_brush = cls._noise_brush(
+                        body_color, noise_alpha, config.noise_strength * 0.95, scale=3
+                    )
+                    painter.save()
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.setBrush(noise_brush)
+                    painter.drawPath(stroke_area)
+                    painter.restore()
+            if config.feather_strength > 0:
+                wash_color = QColor(body_color)
+                wash_color.setAlpha(int(fill_alpha * clamp(config.feather_strength, 0.0, 0.6) * 0.25))
+                wash_pen = QPen(
+                    wash_color,
+                    max(0.9, width * (1.02 + config.feather_strength * 0.4)),
+                    Qt.PenStyle.SolidLine,
+                    Qt.PenCapStyle.RoundCap,
+                    Qt.PenJoinStyle.RoundJoin,
+                )
+                painter.save()
+                painter.setPen(wash_pen)
+                painter.drawPath(path)
+                painter.restore()
+            edge_pen = QPen(
+                QColor(body_color).darker(100),
+                max(0.9, width * 0.28),
+                Qt.PenStyle.SolidLine,
+                Qt.PenCapStyle.RoundCap,
+                Qt.PenJoinStyle.RoundJoin,
+            )
+            painter.save()
+            painter.setPen(edge_pen)
+            painter.drawPath(path)
+            painter.restore()
+            sheen_alpha = min(fill_alpha, max(18, min(config.edge_highlight_alpha, 44)))
+            if sheen_alpha > 0:
+                sheen_pen = QPen(
+                    QColor(255, 255, 255, sheen_alpha),
+                    max(0.7, width * 0.1),
+                    Qt.PenStyle.SolidLine,
+                    Qt.PenCapStyle.RoundCap,
+                    Qt.PenJoinStyle.RoundJoin,
+                )
+                painter.save()
+                painter.setPen(sheen_pen)
+                painter.drawPath(path)
+                painter.restore()
+            return stroke_coverage
+
+        # fallback styles
         stroke_area = cls._stroke_path(path, width * 1.03)
         if config.solid_fill:
             body_color = QColor(color)
@@ -2846,9 +3164,11 @@ def render_pen_preview_pixmap(
     style: PenStyle,
     base_size: float,
     *,
-    size: QSize = QSize(200, 64),
+    size: Optional[QSize] = None,
     opacity_override: Optional[int] = None,
 ) -> QPixmap:
+    if size is None:
+        size = QSize(200, 64)
     width = max(60, size.width())
     height = max(36, size.height())
     pixmap = QPixmap(width, height)
@@ -2947,11 +3267,9 @@ class PenSettingsDialog(_EnsureOnScreenMixin, QDialog):
     """画笔粗细与颜色选择对话框。"""
 
     COLORS = {
-        "#FF0000": "红",
         "#FFFF00": "黄",
         "#FFA500": "橙",
         "#24B47E": "绿",
-        "#1E90FF": "蓝",
         "#800080": "紫",
         "#FFFFFF": "白",
     }
@@ -3005,12 +3323,11 @@ class PenSettingsDialog(_EnsureOnScreenMixin, QDialog):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
 
-        disabled_control_keys = {"ms_word", "wps_word"}
         control_defaults = {
             "ms_ppt": True,
-            "ms_word": False,
+            "ms_word": True,
             "wps_ppt": True,
-            "wps_word": False,
+            "wps_word": True,
         }
         if initial_control_flags:
             for key in list(control_defaults):
@@ -3018,9 +3335,8 @@ class PenSettingsDialog(_EnsureOnScreenMixin, QDialog):
                     control_defaults[key] = parse_bool(
                         initial_control_flags[key], control_defaults[key]
                     )
-        for key in disabled_control_keys:
-            control_defaults[key] = False
         self._control_checkboxes: Dict[str, QCheckBox] = {}
+        disabled_control_keys = {"ms_word", "wps_word"}
 
         style_layout = QHBoxLayout()
         style_layout.setContentsMargins(0, 0, 0, 0)
@@ -3052,7 +3368,7 @@ class PenSettingsDialog(_EnsureOnScreenMixin, QDialog):
 
         self.style_description = QLabel("", self)
         self.style_description.setWordWrap(True)
-        self.style_description.setStyleSheet("color: #5f6368; font-size: 12px;")
+        STYLE_MANAGER.apply_description_style(self.style_description)
         layout.addWidget(self.style_description)
 
         size_layout = QHBoxLayout()
@@ -3117,9 +3433,11 @@ class PenSettingsDialog(_EnsureOnScreenMixin, QDialog):
         ]
         for index, (key, text) in enumerate(control_items):
             checkbox = QCheckBox(text, self)
-            checkbox.setChecked(control_defaults.get(key, True))
+            checked = control_defaults.get(key, True)
             if key in disabled_control_keys:
-                checkbox.setChecked(False)
+                checked = False
+            checkbox.setChecked(checked)
+            if key in disabled_control_keys:
                 checkbox.setEnabled(False)
             checkbox.setToolTip("关闭后将不会向对应应用发送翻页或滚动指令。")
             self._control_checkboxes[key] = checkbox
@@ -3382,7 +3700,7 @@ class ShapeSettingsDialog(_EnsureOnScreenMixin, QDialog):
             apply_button_style(
                 button,
                 ButtonStyles.TOOLBAR,
-                height=recommended_control_height(button.font(), extra=10, minimum=32),
+                height=recommended_control_height(button.font(), extra=8, minimum=30),
             )
             button.clicked.connect(lambda _checked, key=shape_key: self._select_shape(key))
             layout.addWidget(button, index // 2, index % 2)
@@ -3510,60 +3828,7 @@ class FloatingToolbar(_EnsureOnScreenMixin, QWidget):
         self._ensure_min_height = self.height()
 
     def _build_ui(self) -> None:
-        self.setStyleSheet(
-            """
-            #container {
-                background-color: rgba(28, 29, 32, 235);
-                border-radius: 10px;
-                border: 1px solid rgba(255, 255, 255, 45);
-            }
-            QPushButton {
-                color: #f1f3f4;
-                background: rgba(60, 64, 67, 240);
-                border: 1px solid rgba(255, 255, 255, 45);
-                border-radius: 6px;
-                padding: 3px;
-                min-width: 28px;
-                min-height: 28px;
-            }
-            QPushButton:hover {
-                background: rgba(138, 180, 248, 245);
-                border-color: rgba(138, 180, 248, 255);
-                color: #202124;
-            }
-            QPushButton:checked {
-                background: rgba(138, 180, 248, 255);
-                color: #202124;
-            }
-            QPushButton#eraserButton {
-                background: rgba(241, 243, 244, 235);
-                color: #3c4043;
-                border-color: rgba(138, 180, 248, 170);
-            }
-            QPushButton#eraserButton:hover,
-            QPushButton#eraserButton:checked {
-                background: rgba(202, 225, 255, 255);
-                border-color: #1a73e8;
-                color: #174ea6;
-            }
-            QPushButton#clearButton {
-                background: rgba(255, 236, 232, 240);
-                color: #a03a1e;
-                border-color: rgba(255, 173, 153, 230);
-            }
-            QPushButton#clearButton:hover,
-            QPushButton#clearButton:checked {
-                background: rgba(255, 210, 204, 255);
-                border-color: rgba(255, 138, 101, 255);
-                color: #5f2121;
-            }
-            #whiteboardButtonActive {
-                background: rgba(255, 214, 102, 240);
-                border-color: rgba(251, 188, 5, 255);
-                color: #202124;
-            }
-            """
-        )
+        self.setStyleSheet(StyleConfig.floating_toolbar_style())
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -3572,8 +3837,8 @@ class FloatingToolbar(_EnsureOnScreenMixin, QWidget):
         root.addWidget(container)
 
         layout = QVBoxLayout(container)
-        layout.setContentsMargins(6, 5, 6, 6)
-        layout.setSpacing(5)
+        layout.setContentsMargins(6, 4, 6, 5)
+        layout.setSpacing(4)
         self.title_bar = TitleBar(self)
         layout.addWidget(self.title_bar)
 
@@ -3592,11 +3857,10 @@ class FloatingToolbar(_EnsureOnScreenMixin, QWidget):
             brush_buttons.append(button)
         self.btn_settings = QPushButton(IconManager.get_icon("settings"), "")
         self.btn_shape = QPushButton(IconManager.get_icon("shape"), "")
-        self.btn_slide_down = QPushButton(IconManager.get_icon("arrow_down"), "")
-        self.btn_slide_up = QPushButton(IconManager.get_icon("arrow_up"), "")
         self.btn_undo = QPushButton(IconManager.get_icon("undo"), "")
         self.btn_eraser = QPushButton(IconManager.get_icon("eraser"), "")
         self.btn_eraser.setObjectName("eraserButton")
+        self.btn_region_delete = QPushButton(IconManager.get_icon("selection_delete"), "")
         self.btn_clear_all = QPushButton(IconManager.get_icon("clear_all"), "")
         self.btn_clear_all.setObjectName("clearButton")
         self.btn_whiteboard = QPushButton(IconManager.get_icon("whiteboard"), "")
@@ -3612,19 +3876,18 @@ class FloatingToolbar(_EnsureOnScreenMixin, QWidget):
             self.btn_cursor,
             *brush_buttons,
             self.btn_settings,
-            self.btn_shape,
         ]
         bottom_buttons = [
-            self.btn_slide_down,
-            self.btn_slide_up,
             self.btn_undo,
             self.btn_eraser,
+            self.btn_region_delete,
             self.btn_clear_all,
             self.btn_whiteboard,
+            self.btn_shape,
         ]
 
         def _configure_toolbar_button(btn: QPushButton) -> None:
-            btn.setIconSize(QSize(18, 18))
+            btn.setIconSize(QSize(16, 16))
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
@@ -3639,11 +3902,10 @@ class FloatingToolbar(_EnsureOnScreenMixin, QWidget):
 
         tooltip_text = {
             self.btn_cursor: "光标",
-            self.btn_slide_down: "下一页",
-            self.btn_slide_up: "上一页",
             self.btn_shape: "图形",
             self.btn_undo: "撤销",
             self.btn_eraser: "橡皮（再次点击恢复画笔）",
+            self.btn_region_delete: "框选删除（框选区域后清除笔迹）",
             self.btn_clear_all: "清除（并恢复画笔）",
             self.btn_whiteboard: "白板（单击开关 / 双击换色）",
             self.btn_settings: "画笔设置",
@@ -3655,23 +3917,24 @@ class FloatingToolbar(_EnsureOnScreenMixin, QWidget):
             btn.installEventFilter(self)
 
         self.tool_buttons = QButtonGroup(self)
-        for btn in (self.btn_cursor, *brush_buttons, self.btn_shape, self.btn_eraser):
+        for btn in (
+            self.btn_cursor,
+            *brush_buttons,
+            self.btn_shape,
+            self.btn_eraser,
+            self.btn_region_delete,
+        ):
             btn.setCheckable(True)
             self.tool_buttons.addButton(btn)
         self.tool_buttons.setExclusive(True)
 
         self.btn_cursor.clicked.connect(self.overlay.toggle_cursor_mode)
-        for color_hex, button in zip([c for c, _ in brush_configs], brush_buttons):
+        for color_hex, button in zip([c for c, _ in brush_configs], brush_buttons, strict=False):
             button.clicked.connect(lambda _checked, c=color_hex: self.overlay.use_brush_color(c))
         self.btn_shape.clicked.connect(self._select_shape)
-        self.btn_slide_down.clicked.connect(
-            lambda _checked=False: self.overlay.go_to_next_slide(via_toolbar=True)
-        )
-        self.btn_slide_up.clicked.connect(
-            lambda _checked=False: self.overlay.go_to_previous_slide(via_toolbar=True)
-        )
         self.btn_undo.clicked.connect(self.overlay.undo_last_action)
         self.btn_eraser.clicked.connect(self.overlay.toggle_eraser_mode)
+        self.btn_region_delete.clicked.connect(self.overlay.toggle_region_erase_mode)
         self.btn_clear_all.clicked.connect(self.overlay.clear_all)
         self.btn_settings.clicked.connect(self.overlay.open_pen_settings)
         self.btn_whiteboard.clicked.connect(self._handle_whiteboard_click)
@@ -3697,6 +3960,7 @@ class FloatingToolbar(_EnsureOnScreenMixin, QWidget):
             ("cursor", self.btn_cursor),
             ("shape", self.btn_shape),
             ("eraser", self.btn_eraser),
+            ("region_erase", self.btn_region_delete),
         ):
             prev = button.blockSignals(True)
             button.setChecked(mode == tool)
@@ -3714,7 +3978,7 @@ class FloatingToolbar(_EnsureOnScreenMixin, QWidget):
                 opacity_percent=self.overlay._get_active_opacity_percent(),
             )
         if self._whiteboard_locked:
-            for button in (self.btn_cursor, self.btn_slide_down, self.btn_slide_up):
+            for button in (self.btn_cursor,):
                 button.setEnabled(False)
                 prev = button.blockSignals(True)
                 button.setChecked(False)
@@ -3774,7 +4038,7 @@ class FloatingToolbar(_EnsureOnScreenMixin, QWidget):
 
     def set_whiteboard_locked(self, locked: bool) -> None:
         self._whiteboard_locked = locked
-        for button in (self.btn_cursor, self.btn_slide_down, self.btn_slide_up):
+        for button in (self.btn_cursor,):
             button.setEnabled(not locked)
             if locked:
                 prev = button.blockSignals(True)
@@ -3877,10 +4141,6 @@ class _PresentationWindowMixin:
                 ),
                 has_writer_signature=self.flags.get("has_writer_signature", False),
             )
-
-        @property
-        def is_complete(self) -> bool:
-            return self.remaining == 0
 
     @dataclass(slots=True)
     class _WPSPredicateManager:
@@ -4123,9 +4383,7 @@ class _PresentationWindowMixin:
         _WORD_HOST_CLASSES,
         _WPS_DOC_VIEW_CLASSES,
     )
-    _KNOWN_PRESENTATION_PREFIXES: Tuple[str, ...] = (
-        ("kwpp", "kwps", "wpsframe", "wpsmain") if win32gui is not None else tuple()
-    )
+    _KNOWN_PRESENTATION_PREFIXES: Tuple[str, ...] = ("kwpp", "kwps", "wpsframe", "wpsmain")
     _SLIDESHOW_PRIORITY_CLASSES: FrozenSet[str] = _ClassTokens.freeze("screenclass")
     _SLIDESHOW_SECONDARY_CLASSES: FrozenSet[str] = _ClassTokens.freeze(
         "pptviewwndclass",
@@ -4133,6 +4391,7 @@ class _PresentationWindowMixin:
         "kwppshowframe",
         "kwppshowwndclass",
         "kwpsshowframe",
+        "wpsshowwndclass",
     )
     _WPS_SLIDESHOW_CLASSES: FrozenSet[str] = _ClassTokens.freeze(
         "kwppshowframeclass",
@@ -4140,6 +4399,7 @@ class _PresentationWindowMixin:
         "kwppshowwndclass",
         "kwpsshowframe",
         "wpsshowframe",
+        "wpsshowwndclass",
     )
     _PRESENTATION_EDITOR_CLASSES: FrozenSet[str] = _ClassTokens.freeze(
         (
@@ -4232,6 +4492,18 @@ class _PresentationWindowMixin:
             class_name, self._normalized_is_wps_slideshow_class
         )
 
+    def _is_slideshow_class(self, class_name: str) -> bool:
+        if not class_name:
+            return False
+        if class_name in self._SLIDESHOW_PRIORITY_CLASSES:
+            return True
+        if class_name in self._SLIDESHOW_SECONDARY_CLASSES:
+            return True
+        return False
+
+    def _is_preferred_presentation_class(self, class_name: str) -> bool:
+        return self._is_slideshow_class(class_name)
+
     def _is_word_like_class(self, class_name: str) -> bool:
         normalized = self._normalize_class_hint(class_name)
         if not normalized:
@@ -4306,7 +4578,18 @@ class _PresentationWindowMixin:
         return tuple(normalized)
 
     def _normalize_process_name(self, value: Any) -> str:
-        return _normalize_text_token(value, empty_on_falsy=False)
+        if value is None:
+            return ""
+        try:
+            if isinstance(value, (bytes, bytearray, memoryview)):
+                text = bytes(value).decode("utf-8", "ignore")
+            else:
+                text = str(value)
+        except Exception:
+            return ""
+        if not text:
+            return ""
+        return _casefold_cached(text)
 
     def _normalized_process_context(
         self, process_name: Any, classes: Iterable[Any]
@@ -4314,6 +4597,16 @@ class _PresentationWindowMixin:
         normalized_name = self._normalize_process_name(process_name)
         normalized_classes = self._normalized_class_hints(*classes)
         return normalized_name, normalized_classes
+
+    def _is_wps_presentation_process_name(self, process_name: Any) -> bool:
+        """Return True if the process name looks like WPS 演示进程（含新版 wppt/wpspresentation）。"""
+
+        name = self._normalize_process_name(process_name)
+        if not name:
+            return False
+        if name.startswith(("wpp", "wppt")):
+            return True
+        return "wpspresentation" in name
 
     def _empty_wps_process_hints(
         self, classes: Tuple[str, ...]
@@ -4367,7 +4660,7 @@ class _PresentationWindowMixin:
         cache = getattr(self, "_cached_wps_predicate_delegates", None)
         if cache is None:
             cache = {}
-            setattr(self, "_cached_wps_predicate_delegates", cache)
+            self._cached_wps_predicate_delegates = cache
         return cast(
             Dict[Tuple[Any, ...], Tuple[Tuple[str, Callable[[str], bool]], ...]],
             cache,
@@ -4409,18 +4702,6 @@ class _PresentationWindowMixin:
                 )
             )
         return (debug_key, tuple(spec_keys))
-
-    def _prepare_wps_predicate_delegates(
-        self,
-        predicate_specs: Iterable["_PresentationWindowMixin._PredicateSpec"],
-        debug: Optional[Callable[..., None]],
-    ) -> Tuple[Tuple[str, Callable[[str], bool]], ...]:
-        manager = self._WPSPredicateManager(
-            owner=self,
-            debug=debug,
-            specs=tuple(predicate_specs),
-        )
-        return manager.delegates()
 
     def _summarize_wps_process_hints(
         self, normalized_classes: Iterable[str]
@@ -4536,9 +4817,35 @@ class _PresentationWindowMixin:
             return None
         return candidates
 
-    @classmethod
-    def _normalize_class_hint(cls, value: Any) -> str:
-        return cls._PrefixKeywordClassifier._normalize(value)
+    def _enumerate_overlay_candidate_windows_win32(self, overlay_hwnd: int) -> Optional[List[int]]:
+        """Collect visible, intersecting windows via win32gui."""
+
+        if win32gui is None:
+            return None
+
+        candidates: List[int] = []
+
+        def _enum_callback(hwnd: int, acc: List[int]) -> bool:
+            if hwnd == overlay_hwnd:
+                return True
+            if self._should_ignore_window(hwnd):
+                return True
+            try:
+                if not win32gui.IsWindowVisible(hwnd) or win32gui.IsIconic(hwnd):
+                    return True
+                rect = win32gui.GetWindowRect(hwnd)
+            except Exception:
+                return True
+            if not rect or not self._rect_intersects_overlay(rect):
+                return True
+            acc.append(hwnd)
+            return True
+
+        try:
+            win32gui.EnumWindows(_enum_callback, candidates)
+        except Exception:
+            return None
+        return candidates
 
     def _overlay_child_widget(self, attribute: str) -> Optional[QWidget]:
         overlay = self._overlay_widget()
@@ -4568,7 +4875,7 @@ class _PresentationWindowMixin:
     def _photo_overlay_hwnd(self) -> int:
         return self._widget_hwnd(self._photo_overlay_widget())
 
-    def _overlay_rect_tuple(self) -> Optional[Tuple[int, int, int, int]]:
+    def _overlay_rect_tuple(self) -> Optional[RectTuple]:
         widget = self._overlay_widget()
         if widget is None:
             return None
@@ -4581,14 +4888,7 @@ class _PresentationWindowMixin:
         bottom = top + rect.height()
         return left, top, right, bottom
 
-    def _overlay_center_point(self) -> Optional[Tuple[int, int]]:
-        rect = self._overlay_rect_tuple()
-        if rect is None:
-            return None
-        left, top, right, bottom = rect
-        return ((left + right) // 2, (top + bottom) // 2)
-
-    def _rect_intersects_overlay(self, rect: Tuple[int, int, int, int]) -> bool:
+    def _rect_intersects_overlay(self, rect: RectTuple) -> bool:
         overlay_rect = self._overlay_rect_tuple()
         if overlay_rect is None:
             return False
@@ -4616,6 +4916,19 @@ class _PresentationWindowMixin:
             return ""
         return os.path.basename(path).strip().lower()
 
+    def _window_class_name(self, hwnd: int) -> str:
+        if hwnd == 0:
+            return ""
+        if win32gui is not None:
+            try:
+                return win32gui.GetClassName(hwnd).strip().lower()
+            except Exception:
+                return ""
+        return _user32_window_class_name(hwnd)
+
+    def _presentation_window_class(self, hwnd: int) -> str:
+        return self._window_class_name(hwnd)
+
     def _is_own_process_window(self, hwnd: int) -> bool:
         try:
             pid = self._window_process_id(hwnd)
@@ -4637,6 +4950,47 @@ class _PresentationWindowMixin:
             return True
         return self._is_own_process_window(hwnd)
 
+    def _matches_overlay_geometry(self, rect: RectTuple) -> bool:
+        overlay_rect = self._overlay_rect_tuple()
+        if overlay_rect is None:
+            return False
+        left, top, right, bottom = rect
+        width = max(0, right - left)
+        height = max(0, bottom - top)
+        if width < 1 or height < 1:
+            return False
+        o_left, o_top, o_right, o_bottom = overlay_rect
+        o_width = o_right - o_left
+        o_height = o_bottom - o_top
+        if o_width <= 0 or o_height <= 0:
+            return False
+        width_diff = abs(width - o_width)
+        height_diff = abs(height - o_height)
+        cx = (o_left + o_right) // 2
+        cy = (o_top + o_bottom) // 2
+        contains_center = left <= cx <= right and top <= cy <= bottom
+        size_match = width >= 400 and height >= 300 and width_diff <= 64 and height_diff <= 64
+        if contains_center and width >= 400 and height >= 300:
+            return True
+        return size_match
+
+    def _fallback_is_candidate_window(self, hwnd: int) -> bool:
+        if _USER32 is None or hwnd == 0:
+            return False
+        if self._should_ignore_window(hwnd):
+            return False
+        class_name = _user32_window_class_name(hwnd)
+        if not class_name:
+            return False
+        if class_name in self._KNOWN_PRESENTATION_CLASSES:
+            return True
+        if any(class_name.startswith(prefix) for prefix in self._KNOWN_PRESENTATION_PREFIXES):
+            return True
+        rect = _user32_window_rect(hwnd)
+        if not rect:
+            return False
+        return self._matches_overlay_geometry(rect)
+
     def _fallback_is_target_window_valid(self, hwnd: int) -> bool:
         if _USER32 is None or hwnd == 0:
             return False
@@ -4648,6 +5002,26 @@ class _PresentationWindowMixin:
         if not _user32_is_window_visible(hwnd) or _user32_is_window_iconic(hwnd):
             return False
         rect = _user32_window_rect(hwnd)
+        if not rect:
+            return False
+        return self._rect_intersects_overlay(rect)
+
+    def _is_target_window_valid(self, hwnd: int) -> bool:
+        """Validate a target window using win32gui, falling back to ctypes when needed."""
+
+        if win32gui is None:
+            return self._fallback_is_target_window_valid(hwnd)
+        overlay_hwnd = self._overlay_hwnd()
+        try:
+            if hwnd == 0 or hwnd == overlay_hwnd:
+                return False
+            if not win32gui.IsWindow(hwnd) or not win32gui.IsWindowVisible(hwnd):
+                return False
+            if win32gui.IsIconic(hwnd):
+                return False
+            rect = win32gui.GetWindowRect(hwnd)
+        except Exception:
+            return False
         if not rect:
             return False
         return self._rect_intersects_overlay(rect)
@@ -4676,10 +5050,26 @@ class _PresentationWindowMixin:
 class _PresentationForwarder(_PresentationWindowMixin):
     """在绘图模式下将特定输入事件转发给下层演示窗口。"""
 
-    __slots__ = ("overlay", "_last_target_hwnd", "_child_buffer")
+    __slots__ = (
+        "overlay",
+        "_last_target_hwnd",
+        "_child_buffer",
+        "_probe_failure_count",
+        "_probe_cooldown_until",
+    )
 
     def _overlay_widget(self) -> Optional[QWidget]:
         return self.overlay
+
+    def _is_hwnd_valid(self, hwnd: int) -> bool:
+        """Return True if *hwnd* looks like a usable window handle."""
+
+        if hwnd == 0 or _USER32 is None:
+            return False
+        try:
+            return bool(_USER32.IsWindow(wintypes.HWND(hwnd)))
+        except Exception:
+            return False
 
     _SMTO_ABORTIFHUNG = 0x0002
     _MAX_CHILD_FORWARDS = 32
@@ -4749,21 +5139,17 @@ class _PresentationForwarder(_PresentationWindowMixin):
         _InputUnion = None  # type: ignore[assignment]
         _Input = None  # type: ignore[assignment]
 
-    _KEY_FORWARD_MAP: Dict[int, int] = (
-        {
-            int(Qt.Key.Key_PageUp): win32con.VK_PRIOR,
-            int(Qt.Key.Key_PageDown): win32con.VK_NEXT,
-            int(Qt.Key.Key_Up): win32con.VK_UP,
-            int(Qt.Key.Key_Down): win32con.VK_DOWN,
-            int(Qt.Key.Key_Left): win32con.VK_LEFT,
-            int(Qt.Key.Key_Right): win32con.VK_RIGHT,
-            int(Qt.Key.Key_Space): win32con.VK_SPACE,
-            int(Qt.Key.Key_Return): win32con.VK_RETURN,
-            int(Qt.Key.Key_Enter): win32con.VK_RETURN,
-        }
-        if win32con is not None
-        else {}
-    )
+    _KEY_FORWARD_MAP: Dict[int, int] = {
+        int(Qt.Key.Key_PageUp): VK_PRIOR,
+        int(Qt.Key.Key_PageDown): VK_NEXT,
+        int(Qt.Key.Key_Up): VK_UP,
+        int(Qt.Key.Key_Down): VK_DOWN,
+        int(Qt.Key.Key_Left): VK_LEFT,
+        int(Qt.Key.Key_Right): VK_RIGHT,
+        int(Qt.Key.Key_Space): getattr(win32con, "VK_SPACE", 0x20),
+        int(Qt.Key.Key_Return): getattr(win32con, "VK_RETURN", 0x0D),
+        int(Qt.Key.Key_Enter): getattr(win32con, "VK_RETURN", 0x0D),
+    }
     _EXTENDED_KEY_CODES: Set[int] = (
         {
             win32con.VK_UP,
@@ -4783,6 +5169,8 @@ class _PresentationForwarder(_PresentationWindowMixin):
         self.overlay = overlay
         self._last_target_hwnd: Optional[int] = None
         self._child_buffer: List[int] = []
+        self._probe_failure_count = 0
+        self._probe_cooldown_until = 0.0
 
     def _log_debug(self, message: str, *args: Any) -> None:
         if logger.isEnabledFor(logging.DEBUG):
@@ -4790,29 +5178,37 @@ class _PresentationForwarder(_PresentationWindowMixin):
 
     def clear_cached_target(self) -> None:
         self._last_target_hwnd = None
+        self._probe_failure_count = 0
+        self._probe_cooldown_until = 0.0
 
-    def _window_class_name(self, hwnd: int) -> str:
-        if hwnd == 0:
-            return ""
-        if win32gui is not None:
-            try:
-                return win32gui.GetClassName(hwnd).strip().lower()
-            except Exception:
-                return ""
-        return _user32_window_class_name(hwnd)
+    def _register_input_activity(self) -> None:
+        self._probe_failure_count = 0
+        self._probe_cooldown_until = 0.0
+
+    def _update_probe_backoff(self, found: bool) -> None:
+        now = time.monotonic()
+        if found:
+            self._probe_failure_count = 0
+            self._probe_cooldown_until = 0.0
+            return
+        self._probe_failure_count = min(self._probe_failure_count + 1, 8)
+        delay = min(1.0, 0.1 * (2 ** self._probe_failure_count))
+        self._probe_cooldown_until = now + delay
 
     def _is_wps_slideshow_window(self, hwnd: int) -> bool:
+        if not self._is_hwnd_valid(hwnd):
+            return False
         class_name = self._window_class_name(hwnd)
         if self._is_wps_slideshow_class(class_name):
             return True
         if class_name in self._SLIDESHOW_PRIORITY_CLASSES or class_name in self._SLIDESHOW_SECONDARY_CLASSES:
             process_name = self._window_process_name(self._top_level_hwnd(hwnd))
-            if process_name.startswith("wpp"):
+            if self._is_wps_presentation_process_name(process_name):
                 return True
         return False
 
     def _is_ms_slideshow_window(self, hwnd: int) -> bool:
-        if hwnd == 0:
+        if not self._is_hwnd_valid(hwnd):
             return False
         if self._is_wps_slideshow_window(hwnd):
             return False
@@ -4821,32 +5217,30 @@ class _PresentationForwarder(_PresentationWindowMixin):
             return False
         process_name = self._window_process_name(self._top_level_hwnd(hwnd))
         if not process_name:
+            if self._class_has_ms_presentation_signature(class_name):
+                return True
+            if not self._class_has_wps_presentation_signature(class_name):
+                return True
             return False
         return "powerpnt" in process_name
 
     def _is_word_window(self, hwnd: int) -> bool:
-        if hwnd == 0:
+        if not self._is_hwnd_valid(hwnd):
             return False
         class_name = self._window_class_name(hwnd)
+        top_level = self._top_level_hwnd(hwnd)
+        process_name = self._window_process_name(top_level or hwnd)
+        if process_name and self._is_wps_presentation_process_name(process_name):
+            return False
         if class_name in self._WORD_CONTENT_CLASSES:
             return True
         if class_name in self._WORD_WINDOW_CLASSES or class_name in self._WORD_HOST_CLASSES:
             return True
         if class_name and class_name.startswith("_ww"):
             return True
-        process_name = self._window_process_name(self._top_level_hwnd(hwnd))
         if not process_name:
             return False
         return "winword" in process_name or process_name.startswith("wps")
-
-    def _is_slideshow_class(self, class_name: str) -> bool:
-        if not class_name:
-            return False
-        if class_name in self._SLIDESHOW_PRIORITY_CLASSES:
-            return True
-        if class_name in self._SLIDESHOW_SECONDARY_CLASSES:
-            return True
-        return False
 
     def _should_refresh_cached_target(self, hwnd: int) -> bool:
         class_name = self._window_class_name(hwnd)
@@ -4887,6 +5281,7 @@ class _PresentationForwarder(_PresentationWindowMixin):
     def focus_presentation_window(self) -> bool:
         if not self.is_supported():
             return False
+        self._register_input_activity()
         target = self._resolve_presentation_target()
         if not target:
             target = self._detect_presentation_window()
@@ -4912,6 +5307,7 @@ class _PresentationForwarder(_PresentationWindowMixin):
         if not self._can_forward(allow_cursor=allow_cursor):
             self.clear_cached_target()
             return False
+        self._register_input_activity()
         delta_vec = event.angleDelta()
         delta = int(delta_vec.y() or delta_vec.x())
         if delta == 0:
@@ -4958,9 +5354,13 @@ class _PresentationForwarder(_PresentationWindowMixin):
                     delivered = True
                     if update_cache:
                         self._last_target_hwnd = target
+                    if is_wps_target:
+                        return True
                     break
             if not delivered and focus_ok:
                 delivered = self._deliver_mouse_wheel(target, w_param, l_param)
+                if delivered and is_wps_target:
+                    return True
         if not delivered:
             self.clear_cached_target()
         if logger.isEnabledFor(logging.DEBUG):
@@ -4982,6 +5382,7 @@ class _PresentationForwarder(_PresentationWindowMixin):
         if not self._can_forward(allow_cursor=allow_cursor):
             self.clear_cached_target()
             return False
+        self._register_input_activity()
         vk_code = self._resolve_vk_code(event)
         if vk_code is None:
             return False
@@ -5033,16 +5434,12 @@ class _PresentationForwarder(_PresentationWindowMixin):
             self.clear_cached_target()
             return False
         if self._is_wps_slideshow_window(target):
-            success = self._send_key_message_sequence(target, vk_code)
+            down_param = self._build_basic_key_lparam(vk_code, is_press=True)
+            success = self._deliver_key_message(target, win32con.WM_KEYDOWN, vk_code, down_param)
             if success:
                 self._last_target_hwnd = target
             else:
-                self._log_debug(
-                    "send_virtual_key: wps slideshow delivery failed vk=%s press=%s release=%s",
-                    vk_code,
-                    False,
-                    False,
-                )
+                self._log_debug("send_virtual_key: wps slideshow delivery failed vk=%s", vk_code)
             return success
         if self._is_ms_slideshow_window(target) or self._is_word_window(target):
             success = False
@@ -5240,7 +5637,7 @@ class _PresentationForwarder(_PresentationWindowMixin):
                         pass
 
     def _activate_window_for_input(self, hwnd: int) -> bool:
-        if _USER32 is None or hwnd == 0:
+        if not self._is_hwnd_valid(hwnd):
             return False
         if self._is_wps_slideshow_window(hwnd):
             return True
@@ -5361,7 +5758,7 @@ class _PresentationForwarder(_PresentationWindowMixin):
         return False
 
     def _locate_word_content_window(self, hwnd: int) -> Optional[int]:
-        if win32gui is None or hwnd == 0:
+        if win32gui is None or not self._is_hwnd_valid(hwnd):
             return None
         handles: List[int] = []
         top_hwnd = self._top_level_hwnd(hwnd)
@@ -5380,34 +5777,36 @@ class _PresentationForwarder(_PresentationWindowMixin):
             return None
         seen: Set[int] = set(handles)
         buffer = self._child_buffer
-        for root in roots:
-            queue: deque[int] = deque([root])
-            while queue:
-                parent = queue.popleft()
-                buffer.clear()
 
-                def _collector(child_hwnd: int, acc: List[int]) -> bool:
-                    if child_hwnd in seen:
-                        return True
-                    seen.add(child_hwnd)
-                    acc.append(child_hwnd)
+        def _collect_children(parent: int) -> Iterable[int]:
+            buffer.clear()
+
+            def _collector(child_hwnd: int, acc: List[int]) -> bool:
+                if child_hwnd in seen:
                     return True
+                seen.add(child_hwnd)
+                acc.append(child_hwnd)
+                return True
 
-                try:
-                    win32gui.EnumChildWindows(parent, _collector, buffer)
-                except Exception:
-                    continue
-                for child in list(buffer):
-                    class_name = self._window_class_name(child)
-                    if self._is_word_content_class(class_name):
-                        if self._is_target_window_valid(child):
-                            return child
-                    if self._is_word_host_class(class_name) or self._is_word_like_class(class_name):
-                        queue.append(child)
+            try:
+                win32gui.EnumChildWindows(parent, _collector, buffer)
+            except Exception:
+                return ()
+            return tuple(buffer)
+
+        queue: deque[int] = deque(roots)
+        while queue:
+            parent = queue.popleft()
+            for child in _collect_children(parent):
+                class_name = self._window_class_name(child)
+                if self._is_word_content_class(class_name):
+                    if self._is_target_window_valid(child):
+                        return child
+                queue.append(child)
         return None
 
     def _word_host_chain(self, hwnd: int) -> Tuple[int, ...]:
-        if win32gui is None or hwnd == 0:
+        if win32gui is None or not self._is_hwnd_valid(hwnd):
             return ()
         chain: List[int] = []
         seen: Set[int] = set()
@@ -5437,7 +5836,7 @@ class _PresentationForwarder(_PresentationWindowMixin):
         return tuple(chain)
 
     def _normalize_presentation_target(self, hwnd: int) -> Optional[int]:
-        if hwnd == 0:
+        if not self._is_hwnd_valid(hwnd):
             return None
         word_hwnd = self._locate_word_content_window(hwnd)
         if word_hwnd and self._is_target_window_valid(word_hwnd):
@@ -5453,7 +5852,9 @@ class _PresentationForwarder(_PresentationWindowMixin):
     def _target_priority(self, hwnd: int, *, base: int) -> int:
         score = base
         class_name = self._window_class_name(hwnd)
-        if self._is_slideshow_class(class_name):
+        if self._is_wps_slideshow_window(hwnd) or self._is_ms_slideshow_window(hwnd):
+            score += 10000
+        elif self._is_slideshow_class(class_name):
             score += 520
         elif class_name in self._KNOWN_PRESENTATION_CLASSES:
             score += 300
@@ -5481,43 +5882,18 @@ class _PresentationForwarder(_PresentationWindowMixin):
             score += 40
         return score
 
-    def _iter_key_targets(self, target: int) -> Iterable[Tuple[int, bool]]:
-        seen: Set[int] = set()
-        ranked: List[Tuple[int, int, bool]] = []
-
-        def _register(
-            hwnd: int,
-            *,
-            cache: bool,
-            require_visible: bool,
-            base: int,
-        ) -> None:
-            if hwnd in seen:
-                return
-            if not self._is_keyboard_target(hwnd, require_visible=require_visible):
-                return
-            seen.add(hwnd)
-            priority = self._target_priority(hwnd, base=base)
-            ranked.append((priority, hwnd, cache))
-
-        for focus_hwnd in self._gather_thread_focus_handles(target):
-            _register(focus_hwnd, cache=False, require_visible=False, base=900)
-        _register(target, cache=True, require_visible=True, base=820)
-        target_class = self._window_class_name(target)
-        if self._is_word_like_class(target_class):
-            word_content = self._locate_word_content_window(target)
-            if word_content and word_content != target:
-                _register(word_content, cache=True, require_visible=True, base=860)
-            for ancestor in self._word_host_chain(target):
-                _register(ancestor, cache=True, require_visible=True, base=780)
-        for child_hwnd in self._collect_descendant_windows(target):
-            _register(child_hwnd, cache=False, require_visible=False, base=780)
-
-        ranked.sort(key=lambda item: item[0], reverse=True)
-        for _priority, hwnd, cache in ranked:
-            yield hwnd, cache
-
-    def _iter_wheel_targets(self, target: int) -> Iterable[Tuple[int, bool]]:
+    def _iter_targets_with_priority(
+        self,
+        target: int,
+        *,
+        focus_base: int,
+        target_base: int,
+        word_base: int,
+        ancestor_base: int,
+        child_base: int,
+    ) -> Iterable[Tuple[int, bool]]:
+        if target == 0 or not self._is_hwnd_valid(target):
+            return ()
         seen: Set[int] = set()
         ranked: List[Tuple[int, int, bool]] = []
 
@@ -5537,21 +5913,41 @@ class _PresentationForwarder(_PresentationWindowMixin):
             ranked.append((priority, hwnd, cache))
 
         for focus_hwnd in self._gather_thread_focus_handles(target):
-            _append(focus_hwnd, cache=False, require_visible=False, base=880)
-        _append(target, cache=True, require_visible=True, base=800)
+            _append(focus_hwnd, cache=False, require_visible=False, base=focus_base)
+        _append(target, cache=True, require_visible=True, base=target_base)
         target_class = self._window_class_name(target)
         if self._is_word_like_class(target_class):
             word_content = self._locate_word_content_window(target)
             if word_content and word_content != target:
-                _append(word_content, cache=True, require_visible=True, base=840)
+                _append(word_content, cache=True, require_visible=True, base=word_base)
             for ancestor in self._word_host_chain(target):
-                _append(ancestor, cache=True, require_visible=True, base=780)
+                _append(ancestor, cache=True, require_visible=True, base=ancestor_base)
         for child_hwnd in self._collect_descendant_windows(target):
-            _append(child_hwnd, cache=False, require_visible=False, base=760)
+            _append(child_hwnd, cache=False, require_visible=False, base=child_base)
 
         ranked.sort(key=lambda item: item[0], reverse=True)
         for _priority, hwnd, cache in ranked:
             yield hwnd, cache
+
+    def _iter_key_targets(self, target: int) -> Iterable[Tuple[int, bool]]:
+        yield from self._iter_targets_with_priority(
+            target,
+            focus_base=900,
+            target_base=820,
+            word_base=860,
+            ancestor_base=780,
+            child_base=780,
+        )
+
+    def _iter_wheel_targets(self, target: int) -> Iterable[Tuple[int, bool]]:
+        yield from self._iter_targets_with_priority(
+            target,
+            focus_base=880,
+            target_base=800,
+            word_base=840,
+            ancestor_base=780,
+            child_base=760,
+        )
 
     def _build_key_lparam(self, vk_code: int, event: QKeyEvent, is_press: bool) -> int:
         repeat_getter = getattr(event, "count", None)
@@ -5593,6 +5989,8 @@ class _PresentationForwarder(_PresentationWindowMixin):
         return l_param & 0xFFFFFFFF
 
     def _deliver_key_message(self, hwnd: int, message: int, vk_code: int, l_param: int) -> bool:
+        if not self._is_hwnd_valid(hwnd):
+            return False
         delivered = False
         if win32api is not None:
             try:
@@ -5619,7 +6017,7 @@ class _PresentationForwarder(_PresentationWindowMixin):
         return bool(sent)
 
     def _deliver_mouse_wheel(self, hwnd: int, w_param: int, l_param: int) -> bool:
-        if hwnd == 0:
+        if not self._is_hwnd_valid(hwnd):
             return False
         delivered = False
         if win32api is not None and win32con is not None:
@@ -5658,12 +6056,21 @@ class _PresentationForwarder(_PresentationWindowMixin):
             return False
         if self._should_ignore_window(hwnd):
             return False
-        if win32gui is None:
+        if win32gui is not None:
+            try:
+                if not win32gui.IsWindow(hwnd):
+                    return False
+                if require_visible and not win32gui.IsWindowVisible(hwnd):
+                    return False
+            except Exception:
+                return False
+            return True
+        if _USER32 is None:
             return False
         try:
-            if not win32gui.IsWindow(hwnd):
+            if not _USER32.IsWindow(wintypes.HWND(hwnd)):
                 return False
-            if require_visible and not win32gui.IsWindowVisible(hwnd):
+            if require_visible and not _USER32.IsWindowVisible(wintypes.HWND(hwnd)):
                 return False
         except Exception:
             return False
@@ -5699,7 +6106,7 @@ class _PresentationForwarder(_PresentationWindowMixin):
         return tuple(int(h) for h in handles if h)
 
     def _collect_descendant_windows(self, root: int) -> Iterable[int]:
-        if win32gui is None:
+        if not self._is_hwnd_valid(root):
             return ()
         queue: deque[int] = deque([root])
         discovered: Set[int] = {root}
@@ -5707,19 +6114,35 @@ class _PresentationForwarder(_PresentationWindowMixin):
         buffer = self._child_buffer
         while queue and len(results) < self._MAX_CHILD_FORWARDS:
             parent = queue.popleft()
-            buffer.clear()
+            snapshot: List[int] = []
+            if win32gui is not None:
+                buffer.clear()
 
-            def _collector(child_hwnd: int, acc: List[int]) -> bool:
-                if child_hwnd not in discovered:
-                    acc.append(child_hwnd)
-                return len(acc) < self._MAX_CHILD_FORWARDS
+                def _collector(child_hwnd: int, acc: List[int]) -> bool:
+                    if child_hwnd not in discovered:
+                        acc.append(child_hwnd)
+                    return len(acc) < self._MAX_CHILD_FORWARDS
 
-            try:
-                win32gui.EnumChildWindows(parent, _collector, buffer)
-            except Exception:
-                continue
-            snapshot = list(buffer)
-            buffer.clear()
+                try:
+                    win32gui.EnumChildWindows(parent, _collector, buffer)
+                except Exception:
+                    continue
+                snapshot = list(buffer)
+                buffer.clear()
+            elif _USER32 is not None and _WNDENUMPROC is not None:
+                def _enum_child(child_hwnd: int, _lparam: int) -> int:
+                    if child_hwnd not in discovered:
+                        snapshot.append(int(child_hwnd))
+                    return int(len(snapshot) < self._MAX_CHILD_FORWARDS)
+
+                enum_proc = _WNDENUMPROC(_enum_child)
+                try:
+                    _USER32.EnumChildWindows(wintypes.HWND(parent), enum_proc, 0)
+                except Exception:
+                    continue
+            else:
+                break
+
             for child in snapshot:
                 if child in discovered:
                     continue
@@ -5730,44 +6153,11 @@ class _PresentationForwarder(_PresentationWindowMixin):
                 queue.append(child)
         return tuple(results)
 
-    def _fallback_is_candidate_window(self, hwnd: int) -> bool:
-        if _USER32 is None or hwnd == 0:
-            return False
-        if self._should_ignore_window(hwnd):
-            return False
-        class_name = _user32_window_class_name(hwnd)
-        if not class_name:
-            return False
-        if class_name in self._KNOWN_PRESENTATION_CLASSES:
-            return True
-        if any(class_name.startswith(prefix) for prefix in self._KNOWN_PRESENTATION_PREFIXES):
-            return True
-        rect = _user32_window_rect(hwnd)
-        if not rect:
-            return False
-        left, top, right, bottom = rect
-        width = max(0, right - left)
-        height = max(0, bottom - top)
-        overlay_rect = self._overlay_rect_tuple()
-        if overlay_rect is None:
-            return False
-        o_width = overlay_rect[2] - overlay_rect[0]
-        o_height = overlay_rect[3] - overlay_rect[1]
-        if o_width <= 0 or o_height <= 0:
-            return False
-        width_diff = abs(width - o_width)
-        height_diff = abs(height - o_height)
-        center = self._overlay_center_point()
-        contains_center = False
-        if center is not None:
-            cx, cy = center
-            contains_center = left <= cx <= right and top <= cy <= bottom
-        size_match = width >= 400 and height >= 300 and width_diff <= 64 and height_diff <= 64
-        if contains_center and width >= 400 and height >= 300:
-            return True
-        return size_match
-
     def _get_window_styles(self, hwnd: int) -> Tuple[Optional[int], Optional[int]]:
+        if hwnd == 0:
+            return None, None
+        if _USER32 is not None and not self._is_hwnd_valid(hwnd):
+            return None, None
         style: Optional[int] = None
         ex_style: Optional[int] = None
         try:
@@ -5875,6 +6265,9 @@ class _PresentationForwarder(_PresentationWindowMixin):
     def _fallback_detect_presentation_window_user32(self) -> Optional[int]:
         if _USER32 is None:
             return None
+        now = time.monotonic()
+        if self._probe_cooldown_until and now < self._probe_cooldown_until:
+            return None
         overlay_hwnd = int(self.overlay.winId()) if self.overlay.winId() else 0
         best_hwnd: Optional[int] = None
         best_score = -1
@@ -5899,26 +6292,8 @@ class _PresentationForwarder(_PresentationWindowMixin):
             if score > best_score and self._is_control_allowed(hwnd, log=False):
                 best_score = score
                 best_hwnd = hwnd
+        self._update_probe_backoff(bool(best_hwnd))
         return best_hwnd
-
-    def _is_target_window_valid(self, hwnd: int) -> bool:
-        if win32gui is None:
-            return self._fallback_is_target_window_valid(hwnd)
-        try:
-            if hwnd == 0:
-                return False
-            if hwnd == int(self.overlay.winId()):
-                return False
-            if not win32gui.IsWindow(hwnd) or not win32gui.IsWindowVisible(hwnd):
-                return False
-            if win32gui.IsIconic(hwnd):
-                return False
-            rect = win32gui.GetWindowRect(hwnd)
-        except Exception:
-            return False
-        if not rect:
-            return False
-        return self._rect_intersects_overlay(rect)
 
     def _is_candidate_window(self, hwnd: int) -> bool:
         if win32gui is None:
@@ -5942,31 +6317,14 @@ class _PresentationForwarder(_PresentationWindowMixin):
             return False
         if not rect:
             return False
-        left, top, right, bottom = rect
-        width = max(0, right - left)
-        height = max(0, bottom - top)
-        overlay_rect = self._overlay_rect_tuple()
-        if overlay_rect is None:
-            return False
-        o_width = overlay_rect[2] - overlay_rect[0]
-        o_height = overlay_rect[3] - overlay_rect[1]
-        if o_width <= 0 or o_height <= 0:
-            return False
-        width_diff = abs(width - o_width)
-        height_diff = abs(height - o_height)
-        center = self._overlay_center_point()
-        contains_center = False
-        if center is not None:
-            cx, cy = center
-            contains_center = left <= cx <= right and top <= cy <= bottom
-        size_match = width >= 400 and height >= 300 and width_diff <= 64 and height_diff <= 64
-        if contains_center and width >= 400 and height >= 300:
-            return True
-        return size_match
+        return self._matches_overlay_geometry(rect)
 
     def _detect_presentation_window(self) -> Optional[int]:
         if win32gui is None:
             return self._fallback_detect_presentation_window_user32()
+        now = time.monotonic()
+        if self._probe_cooldown_until and now < self._probe_cooldown_until:
+            return None
         overlay_hwnd = int(self.overlay.winId()) if self.overlay.winId() else 0
         try:
             foreground = win32gui.GetForegroundWindow()
@@ -5991,27 +6349,8 @@ class _PresentationForwarder(_PresentationWindowMixin):
                     best_score = score
                     best_hwnd = normalized
 
-        candidates: List[int] = []
-
-        def _enum_callback(hwnd: int, acc: List[int]) -> bool:
-            if hwnd == overlay_hwnd:
-                return True
-            if self._should_ignore_window(hwnd):
-                return True
-            try:
-                if not win32gui.IsWindowVisible(hwnd) or win32gui.IsIconic(hwnd):
-                    return True
-                rect = win32gui.GetWindowRect(hwnd)
-            except Exception:
-                return True
-            if not rect or not self._rect_intersects_overlay(rect):
-                return True
-            acc.append(hwnd)
-            return True
-
-        try:
-            win32gui.EnumWindows(_enum_callback, candidates)
-        except Exception:
+        candidates = self._enumerate_overlay_candidate_windows_win32(overlay_hwnd)
+        if candidates is None:
             return best_hwnd
         for hwnd in candidates:
             if not self._is_candidate_window(hwnd):
@@ -6025,6 +6364,7 @@ class _PresentationForwarder(_PresentationWindowMixin):
             if score > best_score:
                 best_score = score
                 best_hwnd = normalized
+        self._update_probe_backoff(bool(best_hwnd))
         return best_hwnd
 
     def _resolve_presentation_target(self) -> Optional[int]:
@@ -6105,6 +6445,7 @@ class _PresentationForwarder(_PresentationWindowMixin):
 class OverlayWindow(QWidget, _PresentationWindowMixin):
     _NAVIGATION_RESTORE_DELAY_MS = 600
     _NAVIGATION_HOLD_DURATION_MS = 2400
+    _WPS_NAV_DEBOUNCE_MS = 200  # suppress identical WPS导航事件的最小间隔
 
     def _overlay_widget(self) -> Optional[QWidget]:
         return self
@@ -6113,23 +6454,22 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.settings_manager = settings_manager
-        paint_settings = self.settings_manager.load_settings().get("Paint", {})
+        paint_config = self.settings_manager.get_paint_settings()
+        self.paint_config = paint_config
+        paint_mapping = paint_config.to_mapping()
         self._presentation_control_flags: Dict[str, bool] = {}
-        self._update_presentation_control_flags(paint_settings)
-        style_value = paint_settings.get("brush_style", _DEFAULT_PEN_STYLE.value)
-        try:
-            self.pen_style = PenStyle(style_value)
-        except ValueError:
-            self.pen_style = _DEFAULT_PEN_STYLE
-        base_size_value = paint_settings.get("brush_base_size")
-        if base_size_value is None:
-            base_size_value = paint_settings.get("brush_size", "12")
-        try:
-            parsed_base = float(base_size_value)
-        except (TypeError, ValueError):
-            parsed_base = 12.0
-        self.pen_base_size = clamp_base_size_for_style(self.pen_style, parsed_base)
-        color_hex = paint_settings.get("brush_color", "#ff0000")
+        self._update_presentation_control_flags(
+            {
+                "ms_ppt": paint_config.control_ms_ppt,
+                "ms_word": paint_config.control_ms_word,
+                "wps_ppt": paint_config.control_wps_ppt,
+                "wps_word": paint_config.control_wps_word,
+            }
+        )
+        self.pen_style = paint_config.brush_style
+        parsed_base = clamp_base_size_for_style(self.pen_style, float(paint_config.brush_base_size))
+        self.pen_base_size = parsed_base
+        color_hex = paint_config.brush_color
         self.pen_color = QColor(color_hex)
         if not self.pen_color.isValid():
             self.pen_color = QColor("#ff0000")
@@ -6139,7 +6479,7 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             if not config.opacity_range:
                 continue
             key = f"{style.value}_opacity"
-            raw_value = paint_settings.get(key)
+            raw_value = paint_mapping.get(key)
             if raw_value is None:
                 if config.default_opacity is not None:
                     value = int(config.default_opacity)
@@ -6157,7 +6497,7 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         for style in PEN_STYLE_ORDER:
             style_config = get_pen_style_config(style)
             key = f"{style.value}_base_size"
-            raw_base = paint_settings.get(key)
+            raw_base = paint_mapping.get(key)
             if raw_base is None:
                 if style == self.pen_style:
                     stored = float(self.pen_base_size)
@@ -6179,12 +6519,11 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         self.current_shape: Optional[str] = None
         self.shape_start_point: Optional[QPoint] = None
         self.drawing = False
-        self.last_point = QPointF(); self.prev_point = QPointF()
+        self.last_point = QPointF()
         self.last_width = max(1.0, self.pen_base_size * config.target_min_factor)
         self._stroke_target_width = float(self.last_width)
         self.last_time = time.time()
         self._last_brush_color = QColor(self.pen_color)
-        self._last_brush_size = max(1, int(self.pen_size))
         self._last_pen_style: PenStyle = self.pen_style
         self._last_pen_base_size: float = float(self.pen_base_size)
         self._last_draw_mode = "brush"
@@ -6206,7 +6545,6 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         self.navigation_active = False
         self._navigation_reasons: Dict[str, int] = {}
         self._active_navigation_keys: Set[int] = set()
-        self._cursor_button_navigation = False
         self._nav_pointer_button = Qt.MouseButton.NoButton
         self._nav_pointer_press_pos = QPointF()
         self._nav_pointer_press_global = QPointF()
@@ -6229,8 +6567,9 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         self._wps_binding_retry_timer: Optional[QTimer] = None
         self._wps_binding_retry_attempts = 0
         self._pending_wps_cursor_pulse = False
-        self._pending_wps_cursor_reset = False
         self._wps_cursor_reset_timer: Optional[QTimer] = None
+        self._last_wps_nav_event: Optional[Tuple[int, int, float]] = None
+        self._wps_nav_block_until: float = 0.0
         base_width = self._effective_brush_width()
         self._brush_pen = QPen(
             self.pen_color,
@@ -6273,6 +6612,9 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         self.setMouseTracking(True)
         self._keyboard_grabbed = False
         self._dispatch_suppress_override = False
+        self._region_select_start: Optional[QPoint] = None
+        self._region_preview_bounds: Optional[QRect] = None
+        self._region_previewing = False
 
         self._build_scene()
         self.history: List[QPixmap] = []
@@ -6441,12 +6783,12 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         if self.whiteboard_active:
             if self._mode_before_whiteboard is None:
                 self._mode_before_whiteboard = getattr(self, "mode", "brush")
+            self._cancel_region_selection()
             if getattr(self, "mode", "brush") == "cursor":
                 self.set_mode("brush")
             self._navigation_reasons.clear()
             self._active_navigation_keys.clear()
             self.navigation_active = False
-            self._cursor_button_navigation = False
             self.update_cursor()
             return
         restore_mode = self._mode_before_whiteboard
@@ -6531,12 +6873,13 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         prev_mode = getattr(self, "mode", None)
         if prev_mode != mode:
             self._release_canvas_painters()
+            if prev_mode == "region_erase":
+                self._cancel_region_selection()
         if mode != "cursor":
             self._cancel_navigation_cursor_hold()
             self._set_navigation_reason("cursor-button", False)
         else:
             self._set_navigation_reason("cursor-button", False)
-            self._cursor_button_navigation = False
         focus_on_cursor = bool(self._forwarder) and mode == "cursor" and not initial
         pending_focus_target: Optional[int] = None
         self.mode = mode
@@ -6547,6 +6890,14 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         if mode != "shape":
             self.shape_start_point = None
             self._last_preview_bounds = None
+        if mode != "region_erase":
+            self._region_previewing = False
+            self._region_select_start = None
+            self._region_preview_bounds = None
+        else:
+            self._navigation_reasons.clear()
+            self.navigation_active = False
+            self._nav_pointer_button = Qt.MouseButton.NoButton
         if self.mode != "eraser":
             self._eraser_last_point = None
         if self._forwarder and mode == "cursor":
@@ -6577,8 +6928,6 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
     def _update_last_tool_snapshot(self) -> None:
         if self.pen_color.isValid():
             self._last_brush_color = QColor(self.pen_color)
-        if self.pen_size > 0:
-            self._last_brush_size = max(1, int(self.pen_size))
         self._last_pen_style = self.pen_style
         if self.pen_base_size > 0:
             self._last_pen_base_size = float(self.pen_base_size)
@@ -6631,9 +6980,16 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             self._set_navigation_reason("cursor-button", True)
             return
         self._set_navigation_reason("cursor-button", False)
-        self._cursor_button_navigation = False
         self._update_last_tool_snapshot()
         self.set_mode("cursor")
+
+    def toggle_region_erase_mode(self) -> None:
+        """框选删除模式；再次点击恢复最近的画笔或图形设置。"""
+        if self.mode == "region_erase":
+            self._restore_last_tool()
+            return
+        self._update_last_tool_snapshot()
+        self.set_mode("region_erase")
 
     def go_to_next_slide(
         self,
@@ -6674,6 +7030,37 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             return 120
         return 0
 
+    def _normalize_wps_nav_code(self, code: int) -> int:
+        """将不同输入来源统一成方向编码，便于对同向的重复事件去重。"""
+
+        forward_codes = {VK_RIGHT, VK_DOWN, VK_NEXT, 1}
+        backward_codes = {VK_LEFT, VK_UP, VK_PRIOR, -1}
+        if code in forward_codes:
+            return 1
+        if code in backward_codes:
+            return -1
+        return code
+
+    def _should_suppress_wps_nav(self, code: int, target: Optional[int]) -> bool:
+        if not target or not self._is_wps_slideshow_target(target):
+            return False
+        if self._wps_nav_block_until and time.monotonic() < self._wps_nav_block_until:
+            return True
+        normalized = self._normalize_wps_nav_code(code)
+        prev = self._last_wps_nav_event
+        if not prev:
+            return False
+        prev_code, prev_target, prev_ts = prev
+        if prev_code != normalized or prev_target != target:
+            return False
+        return (time.monotonic() - prev_ts) * 1000 < self._WPS_NAV_DEBOUNCE_MS
+
+    def _remember_wps_nav(self, code: int, target: Optional[int]) -> None:
+        if target and self._is_wps_slideshow_target(target):
+            normalized = self._normalize_wps_nav_code(code)
+            self._last_wps_nav_event = (normalized, target, time.monotonic())
+            self._wps_nav_block_until = time.monotonic() + (self._WPS_NAV_DEBOUNCE_MS / 1000.0)
+
     def _is_presentation_category_allowed(self, category: str) -> bool:
         if not category or category == "other":
             return True
@@ -6696,9 +7083,18 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             return False
         process_name = self._window_process_name(_user32_top_level_hwnd(hwnd) or hwnd)
         if not process_name:
+            category = self._presentation_target_category(hwnd)
+            if category == "wps_ppt":
+                return not getattr(self, "control_wps_ppt", True)
+            if category == "wps_word":
+                return not getattr(self, "control_wps_word", True)
+            if category == "ms_ppt":
+                return not getattr(self, "control_ms_ppt", True)
+            if category == "ms_word":
+                return not getattr(self, "control_ms_word", True)
             return False
         name = process_name.lower()
-        if name.startswith("wpp"):
+        if self._is_wps_presentation_process_name(name):
             return not getattr(self, "control_wps_ppt", True)
         if name.startswith("wps"):
             return not getattr(self, "control_wps_word", True)
@@ -6849,6 +7245,10 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                 forwarder.clear_cached_target()
             except Exception:
                 pass
+        try:
+            self._last_target_hwnd = None
+        except Exception:
+            pass
         candidate: Optional[int] = None
         try:
             candidate = self._find_wps_slideshow_target()
@@ -6936,11 +7336,9 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         else:
             if timer.isActive():
                 timer.stop()
-        self._pending_wps_cursor_reset = True
         timer.start(0)
 
     def _apply_wps_cursor_reactivation(self) -> None:
-        self._pending_wps_cursor_reset = False
         self._reset_wps_presentation_state()
 
     def _auto_activate_cursor_for_wps(self) -> None:
@@ -6986,7 +7384,7 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         if class_name in self._SLIDESHOW_PRIORITY_CLASSES or class_name in self._SLIDESHOW_SECONDARY_CLASSES:
             top_hwnd = _user32_top_level_hwnd(hwnd)
             process_name = self._window_process_name(top_hwnd or hwnd)
-            if process_name.startswith("wpp"):
+            if self._is_wps_presentation_process_name(process_name):
                 return True
         return False
 
@@ -7011,9 +7409,27 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             return True
         top_hwnd = _user32_top_level_hwnd(hwnd)
         process_name = self._window_process_name(top_hwnd or hwnd)
-        if process_name and "powerpnt" in process_name:
+        if process_name and ("powerpnt" in process_name or process_name.startswith("pptview")):
             return True
         return False
+
+    def _wps_target_has_foreground_focus(self, hwnd: Optional[int]) -> bool:
+        """Return True if the WPS放映窗口已经位于前台，可直接接收用户输入。"""
+
+        if not hwnd or _USER32 is None:
+            return False
+        if not self._is_wps_slideshow_target(hwnd):
+            return False
+        try:
+            target_top = _user32_top_level_hwnd(hwnd) or hwnd
+        except Exception:
+            target_top = hwnd
+        try:
+            foreground = _user32_get_foreground_window()
+            foreground_top = _user32_top_level_hwnd(foreground) if foreground else 0
+        except Exception:
+            return False
+        return bool(target_top and foreground_top and target_top == foreground_top)
 
     def _word_navigation_vk(self, vk_code: int, target_hwnd: Optional[int]) -> int:
         if win32con is None or not target_hwnd:
@@ -7074,20 +7490,48 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             target_hwnd = ms_override
             effective_target = ms_override
         target_class = self._presentation_window_class(target_hwnd) if target_hwnd else ""
+        wps_slideshow_target = (
+            effective_target if effective_target and self._is_wps_slideshow_target(effective_target) else None
+        )
         if effective_target and not self._presentation_control_allowed(effective_target):
             if originating_key is not None:
                 self._release_keyboard_navigation_state(originating_key)
             if via_toolbar:
                 self._cancel_navigation_cursor_hold()
             return
-        wps_slideshow_target = (
-            effective_target if effective_target and self._is_wps_slideshow_target(effective_target) else None
-        )
-        if wps_slideshow_target and self._send_wps_slideshow_virtual_key(wps_slideshow_target, vk_code):
+        # WPS 放映：统一只发送一次按下（内部去重），避免按下/抬起各触发一次动画或误判退出
+        if wps_slideshow_target:
+            if self._should_suppress_wps_nav(vk_code, wps_slideshow_target):
+                if originating_key is not None:
+                    self._release_keyboard_navigation_state(originating_key)
+                if via_toolbar:
+                    self._cancel_navigation_cursor_hold()
+                return
+            sent = self._send_wps_slideshow_virtual_key(wps_slideshow_target, vk_code)
+            if sent:
+                self._remember_wps_nav(vk_code, wps_slideshow_target)
+                try:
+                    self._last_target_hwnd = wps_slideshow_target
+                except Exception:
+                    pass
+                forwarder = getattr(self, "_forwarder", None)
+                if forwarder is not None:
+                    try:
+                        forwarder._last_target_hwnd = wps_slideshow_target  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
+                if originating_key is not None:
+                    self._release_keyboard_navigation_state(originating_key)
+                if via_toolbar:
+                    self._cancel_navigation_cursor_hold()
+                return
+        if (
+            effective_target
+            and self._wps_target_has_foreground_focus(effective_target)
+            and not via_toolbar
+        ):
             if originating_key is not None:
                 self._release_keyboard_navigation_state(originating_key)
-            if via_toolbar:
-                self._cancel_navigation_cursor_hold()
             return
         ms_slideshow_target = (
             effective_target if effective_target and self._is_ms_slideshow_target(effective_target) else None
@@ -7135,12 +7579,12 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                     self._last_target_hwnd = effective_target
                 except Exception:
                     pass
-                    forwarder = getattr(self, "_forwarder", None)
-                    if forwarder is not None:
-                        try:
-                            forwarder._last_target_hwnd = effective_target  # type: ignore[attr-defined]
-                        except Exception:
-                            pass
+                forwarder = getattr(self, "_forwarder", None)
+                if forwarder is not None:
+                    try:
+                        forwarder._last_target_hwnd = effective_target  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
         if (
             is_word_category
             and not self.whiteboard_active
@@ -7312,6 +7756,17 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                         forwarder._last_target_hwnd = target_hwnd  # type: ignore[attr-defined]
                     except Exception:
                         pass
+            if target_hwnd and self._is_wps_slideshow_target(target_hwnd):
+                vk_code = VK_DOWN if delta < 0 else VK_UP
+                sent = self._send_wps_slideshow_virtual_key(target_hwnd, vk_code)
+                if sent:
+                    self._remember_wps_nav(vk_code, target_hwnd)
+                return sent
+            suppress_code = -1 if delta < 0 else 1 if delta > 0 else 0
+            if target_hwnd and self._is_wps_slideshow_target(target_hwnd):
+                if self._should_suppress_wps_nav(suppress_code or delta, target_hwnd):
+                    return True
+                self._wps_nav_block_until = time.monotonic() + (self._WPS_NAV_DEBOUNCE_MS / 1000.0)
             if target_hwnd and not self._presentation_control_allowed(target_hwnd):
                 self._log_navigation_debug(
                     "wheel_blocked",
@@ -7320,6 +7775,9 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                     category=self._presentation_target_category(target_hwnd),
                 )
                 return False
+            if suppress_code and self._should_suppress_wps_nav(suppress_code, target_hwnd):
+                handled = True
+                return True
             if self._forwarder is not None:
                 try:
                     global_pos = QCursor.pos()
@@ -7341,11 +7799,15 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                 except Exception:
                     handled = False
             if handled:
+                if suppress_code and target_hwnd:
+                    self._remember_wps_nav(suppress_code, target_hwnd)
                 return True
             focused = self._focus_presentation_window_fallback()
             fallback = self._fallback_send_wheel(delta)
             if not fallback and not focused:
                 return False
+            if fallback and suppress_code and target_hwnd:
+                self._remember_wps_nav(suppress_code, target_hwnd)
             return fallback
         finally:
             self._set_navigation_reason("wheel", False)
@@ -7358,21 +7820,21 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             return False
         try:
             down_param = forwarder._build_basic_key_lparam(vk_code, is_press=True)
-            up_param = forwarder._build_basic_key_lparam(vk_code, is_press=False)
         except Exception:
             return False
         try:
             press = forwarder._deliver_key_message(hwnd, win32con.WM_KEYDOWN, vk_code, down_param)
-            release = forwarder._deliver_key_message(hwnd, win32con.WM_KEYUP, vk_code, up_param)
         except Exception:
             return False
-        if press and release:
-            try:
-                forwarder._last_target_hwnd = hwnd
-            except Exception:
-                pass
-            return True
-        return False
+        if not press:
+            return False
+        # 仅发送按下，避免 WPS 对抬起再次触发动画或误判为退出
+        self._remember_wps_nav(vk_code, hwnd)
+        try:
+            forwarder._last_target_hwnd = hwnd
+        except Exception:
+            pass
+        return True
 
     def _send_ms_slideshow_virtual_key(self, hwnd: int, vk_code: int) -> bool:
         if not hwnd or vk_code == 0:
@@ -7581,18 +8043,12 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             return
         if active:
             self._navigation_reasons[reason] = self._navigation_reasons.get(reason, 0) + 1
-            if reason == "cursor-button":
-                self._cursor_button_navigation = True
         else:
             count = self._navigation_reasons.get(reason)
             if count is None:
-                if reason == "cursor-button":
-                    self._cursor_button_navigation = False
                 return
             if count <= 1:
                 self._navigation_reasons.pop(reason, None)
-                if reason == "cursor-button":
-                    self._cursor_button_navigation = False
             else:
                 self._navigation_reasons[reason] = count - 1
         self._update_navigation_state()
@@ -7674,6 +8130,8 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             self.setCursor(Qt.CursorShape.ArrowCursor); return
         if self.navigation_active:
             self.setCursor(Qt.CursorShape.ArrowCursor); return
+        if self.mode == "region_erase":
+            self.setCursor(Qt.CursorShape.CrossCursor); return
         if self.mode == "shape":
             self.setCursor(Qt.CursorShape.CrossCursor); return
         d = max(10, int(self.pen_size * (3.2 if self.mode == "eraser" else 2.2)))
@@ -7766,43 +8224,6 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             if restore and had_keyboard_grab:
                 self._ensure_keyboard_capture()
 
-    def _fallback_is_candidate_window(self, hwnd: int) -> bool:
-        if _USER32 is None or hwnd == 0:
-            return False
-        if self._should_ignore_window(hwnd):
-            return False
-        class_name = _user32_window_class_name(hwnd)
-        if not class_name:
-            return False
-        if class_name in self._KNOWN_PRESENTATION_CLASSES:
-            return True
-        if any(class_name.startswith(prefix) for prefix in self._KNOWN_PRESENTATION_PREFIXES):
-            return True
-        rect = _user32_window_rect(hwnd)
-        if not rect:
-            return False
-        left, top, right, bottom = rect
-        width = max(0, right - left)
-        height = max(0, bottom - top)
-        overlay = self._overlay_rect_tuple()
-        if overlay is None:
-            return False
-        o_width = overlay[2] - overlay[0]
-        o_height = overlay[3] - overlay[1]
-        if o_width <= 0 or o_height <= 0:
-            return False
-        width_diff = abs(width - o_width)
-        height_diff = abs(height - o_height)
-        center = self._overlay_center_point()
-        contains_center = False
-        if center is not None:
-            cx, cy = center
-            contains_center = left <= cx <= right and top <= cy <= bottom
-        size_match = width >= 400 and height >= 300 and width_diff <= 64 and height_diff <= 64
-        if contains_center and width >= 400 and height >= 300:
-            return True
-        return size_match
-
     def _fallback_detect_presentation_window_user32(self) -> Optional[int]:
         if _USER32 is None:
             return None
@@ -7845,16 +8266,6 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                 if self._presentation_control_allowed(candidate, log=False):
                     return candidate
         return None
-
-    def _presentation_window_class(self, hwnd: int) -> str:
-        if hwnd == 0:
-            return ""
-        if win32gui is not None:
-            try:
-                return win32gui.GetClassName(hwnd).strip().lower()
-            except Exception:
-                return ""
-        return _user32_window_class_name(hwnd)
 
     def _normalize_presentation_target(self, hwnd: Optional[int]) -> Optional[int]:
         if not hwnd:
@@ -7905,15 +8316,6 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                 target = None
         return target
 
-    def _is_preferred_presentation_class(self, class_name: str) -> bool:
-        if not class_name:
-            return False
-        if class_name in self._SLIDESHOW_PRIORITY_CLASSES:
-            return True
-        if class_name in self._SLIDESHOW_SECONDARY_CLASSES:
-            return True
-        return False
-
     def _should_refresh_cached_presentation_target(self, hwnd: int) -> bool:
         class_name = self._presentation_window_class(hwnd)
         return not self._is_preferred_presentation_class(class_name)
@@ -7957,23 +8359,6 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         finally:
             self._detach_from_target_thread(attach_pair)
 
-    def _is_target_window_valid(self, hwnd: int) -> bool:
-        if win32gui is None:
-            return self._fallback_is_target_window_valid(hwnd)
-        try:
-            if hwnd == 0 or hwnd == int(self.winId()):
-                return False
-            if not win32gui.IsWindow(hwnd) or not win32gui.IsWindowVisible(hwnd):
-                return False
-            if win32gui.IsIconic(hwnd):
-                return False
-            rect = win32gui.GetWindowRect(hwnd)
-        except Exception:
-            return False
-        if not rect:
-            return False
-        return self._rect_intersects_overlay(rect)
-
     def _detect_presentation_window(self) -> Optional[int]:
         if win32gui is None:
             return self._fallback_detect_presentation_window_user32()
@@ -8000,27 +8385,8 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             for candidate in candidates:
                 if self._presentation_control_allowed(candidate, log=False):
                     return candidate
-        candidates: List[int] = []
-
-        def _enum_callback(hwnd: int, result: List[int]) -> bool:
-            if hwnd == overlay_hwnd:
-                return True
-            if self._should_ignore_window(hwnd):
-                return True
-            try:
-                if not win32gui.IsWindowVisible(hwnd) or win32gui.IsIconic(hwnd):
-                    return True
-                rect = win32gui.GetWindowRect(hwnd)
-            except Exception:
-                return True
-            if not rect or not self._rect_intersects_overlay(rect):
-                return True
-            result.append(hwnd)
-            return True
-
-        try:
-            win32gui.EnumWindows(_enum_callback, candidates)
-        except Exception:
+        candidates = self._enumerate_overlay_candidate_windows_win32(overlay_hwnd)
+        if candidates is None:
             return None
         for hwnd in candidates:
             if not self._is_candidate_presentation_window(hwnd):
@@ -8130,27 +8496,7 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             return False
         if not rect:
             return False
-        left, top, right, bottom = rect
-        width = max(0, right - left)
-        height = max(0, bottom - top)
-        overlay = self._overlay_rect_tuple()
-        if overlay is None:
-            return False
-        o_width = overlay[2] - overlay[0]
-        o_height = overlay[3] - overlay[1]
-        if o_width <= 0 or o_height <= 0:
-            return False
-        width_diff = abs(width - o_width)
-        height_diff = abs(height - o_height)
-        center = self._overlay_center_point()
-        contains_center = False
-        if center is not None:
-            cx, cy = center
-            contains_center = left <= cx <= right and top <= cy <= bottom
-        size_match = width >= 400 and height >= 300 and width_diff <= 64 and height_diff <= 64
-        if contains_center and width >= 400 and height >= 300:
-            return True
-        return size_match
+        return self._matches_overlay_geometry(rect)
 
     def _update_visibility_for_mode(self, *, initial: bool = False) -> None:
         passthrough = (self.mode == "cursor") and (not self.whiteboard_active)
@@ -8187,6 +8533,80 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         if getattr(self, "toolbar", None):
             self.toolbar.update_undo_state(bool(self.history))
 
+    def _cancel_region_selection(self) -> None:
+        self._region_select_start = None
+        self._region_preview_bounds = None
+        self._region_previewing = False
+        try:
+            self.temp_canvas.fill(Qt.GlobalColor.transparent)
+        except Exception:
+            pass
+
+    def _begin_region_selection(self, event: QMouseEvent) -> None:
+        self._region_select_start = event.pos()
+        self._region_preview_bounds = None
+        self._region_previewing = True
+        try:
+            self.temp_canvas.fill(Qt.GlobalColor.transparent)
+        except Exception:
+            pass
+        self._update_region_selection_preview(event.pos())
+
+    def _update_region_selection_preview(self, current) -> None:
+        if not self._region_previewing or self._region_select_start is None:
+            return
+        self.temp_canvas.fill(Qt.GlobalColor.transparent)
+        if isinstance(current, QPointF):
+            end_point = current.toPoint()
+        else:
+            end_point = QPoint(current)
+        rect = QRect(self._region_select_start, end_point).normalized()
+        self._region_preview_bounds = None
+        if rect.isNull() or rect.width() < 2 or rect.height() < 2:
+            self.update()
+            return
+        painter = QPainter(self.temp_canvas)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        fill_color = QColor(self.pen_color)
+        fill_color.setAlpha(40)
+        painter.fillRect(rect, fill_color)
+        pen = QPen(QColor("#f1f3f4"))
+        pen.setCosmetic(True)
+        pen.setWidth(2)
+        pen.setStyle(Qt.PenStyle.DashLine)
+        painter.setPen(pen)
+        painter.drawRect(rect)
+        painter.end()
+        margin = 6
+        self._region_preview_bounds = rect.adjusted(-margin, -margin, margin, margin)
+        self._apply_dirty_region(self._region_preview_bounds or rect)
+
+    def _finalize_region_selection(self, release_pos: QPoint) -> None:
+        start = self._region_select_start
+        preview_bounds = self._region_preview_bounds
+        self._cancel_region_selection()
+        if start is None:
+            if preview_bounds:
+                self._apply_dirty_region(preview_bounds)
+            return
+        rect = QRect(start, release_pos).normalized()
+        if rect.isNull() or rect.width() < 2 or rect.height() < 2:
+            if preview_bounds:
+                self._apply_dirty_region(preview_bounds)
+            return
+        target = rect.intersected(self.rect())
+        if target.isNull():
+            return
+        self._push_history()
+        self._release_canvas_painters()
+        painter = QPainter(self.canvas)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+        painter.fillRect(target, QColor(0, 0, 0, 0))
+        painter.end()
+        self._apply_dirty_region(target)
+        self._update_undo_button()
+
     def clear_all(self) -> None:
         """清除整块画布，同时根据需要恢复画笔模式。"""
         restore_needed = self.mode not in {"brush", "shape"}
@@ -8195,6 +8615,7 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         self.canvas.fill(Qt.GlobalColor.transparent)
         self.temp_canvas.fill(Qt.GlobalColor.transparent)
         self._last_preview_bounds = None
+        self._cancel_region_selection()
         self.update()
         self._eraser_last_point = None
         if restore_needed:
@@ -8228,6 +8649,7 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         else:
             self._update_undo_button()
             return
+        self._cancel_region_selection()
         self.temp_canvas.fill(Qt.GlobalColor.transparent)
         self.drawing = False
         self._last_preview_bounds = None
@@ -8270,6 +8692,19 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                     pass
             if hasattr(self, "_last_target_hwnd"):
                 self._last_target_hwnd = None
+            try:
+                QTimer.singleShot(50, lambda: self._resolve_control_target())
+            except Exception:
+                try:
+                    self._resolve_control_target()
+                except Exception:
+                    pass
+            else:
+                if forwarder is not None:
+                    try:
+                        QTimer.singleShot(50, lambda: forwarder.get_presentation_target())
+                    except Exception:
+                        pass
         if not resolved.get("wps_ppt"):
             self._cancel_wps_slideshow_binding_retry()
         if resolved.get("wps_ppt") and not parse_bool(previous_flags.get("wps_ppt"), True):
@@ -8291,41 +8726,38 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                 pass
 
     def save_settings(self) -> None:
-        settings = self.settings_manager.load_settings()
-        paint = settings.get("Paint", {})
-        paint["brush_size"] = str(self.pen_size)
-        paint["brush_base_size"] = f"{self.pen_base_size:.2f}"
-        paint["brush_color"] = self.pen_color.name()
-        paint["brush_style"] = self.pen_style.value
-        self._style_base_sizes[self.pen_style] = float(
-            clamp_base_size_for_style(self.pen_style, float(self.pen_base_size))
-        )
+        self.paint_config.brush_base_size = float(self.pen_base_size)
+        self.paint_config.brush_color = self.pen_color.name()
+        self.paint_config.brush_style = self.pen_style
+        self.paint_config.control_ms_ppt = bool(self.control_ms_ppt)
+        self.paint_config.control_ms_word = bool(self.control_ms_word)
+        self.paint_config.control_wps_ppt = bool(self.control_wps_ppt)
+        self.paint_config.control_wps_word = bool(self.control_wps_word)
         for style in PEN_STYLE_ORDER:
             config = get_pen_style_config(style)
             base_value = clamp_base_size_for_style(
                 style,
                 float(self._style_base_sizes.get(style, float(config.default_base))),
             )
-            paint[f"{style.value}_base_size"] = f"{base_value:.2f}"
-            if not config.opacity_range:
-                continue
-            default_alpha = int(config.default_opacity or config.base_alpha)
-            value = int(self._style_opacity_overrides.get(style, default_alpha))
-            paint[f"{style.value}_opacity"] = str(value)
-        paint["control_ms_ppt"] = "True" if self.control_ms_ppt else "False"
-        paint["control_ms_word"] = "True" if self.control_ms_word else "False"
-        paint["control_wps_ppt"] = "True" if self.control_wps_ppt else "False"
-        paint["control_wps_word"] = "True" if self.control_wps_word else "False"
-        settings["Paint"] = paint
-        self.settings_manager.save_settings(settings)
+            self._style_base_sizes[style] = base_value
+            self.paint_config.base_size_overrides[f"{style.value}_base_size"] = base_value
+            if config.opacity_range:
+                default_alpha = int(config.default_opacity or config.base_alpha)
+                value = int(self._style_opacity_overrides.get(style, default_alpha))
+                self.paint_config.opacity_overrides[f"{style.value}_opacity"] = value
+        try:
+            self.settings_manager.update_paint_settings(self.paint_config)
+        except Exception:
+            logger.error("Failed to persist paint settings", exc_info=True)
 
     def save_window_position(self) -> None:
-        settings = self.settings_manager.load_settings()
-        paint = settings.get("Paint", {})
         pos = self.toolbar.pos()
-        paint["x"] = str(pos.x()); paint["y"] = str(pos.y())
-        settings["Paint"] = paint
-        self.settings_manager.save_settings(settings)
+        self.paint_config.x = int(pos.x())
+        self.paint_config.y = int(pos.y())
+        try:
+            self.settings_manager.update_paint_settings(self.paint_config)
+        except Exception:
+            logger.error("Failed to persist paint window position", exc_info=True)
 
     # ---- 画图事件 ----
     def wheelEvent(self, e) -> None:
@@ -8334,6 +8766,9 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         allow_cursor = self.mode == "cursor" or self.navigation_active
         target = self._resolve_control_target()
         if target and not self._presentation_control_allowed(target):
+            super().wheelEvent(e)
+            return
+        if self._wps_target_has_foreground_focus(target):
             super().wheelEvent(e)
             return
         if (
@@ -8382,7 +8817,6 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         self.drawing = True
         origin = QPointF(event.position())
         self.last_point = QPointF(origin)
-        self.prev_point = QPointF(origin)
         now = time.time()
         self.last_time = now
         self._reset_brush_tracking()
@@ -8432,7 +8866,7 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         inside_toolbar = self._toolbar_contains_global(global_point)
         if (
             not inside_toolbar
-            and self.mode != "cursor"
+            and self.mode not in {"cursor", "region_erase"}
             and e.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton)
         ):
             self._nav_pointer_button = e.button()
@@ -8440,7 +8874,8 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             self._nav_pointer_press_global = QPointF(e.globalPosition())
             self._nav_pointer_press_modifiers = e.modifiers()
             self._nav_pointer_started_draw = False
-            self._set_navigation_reason("pointer", True)
+            if self.mode != "region_erase":
+                self._set_navigation_reason("pointer", True)
             self.cancel_pending_tool_restore()
             self._cancel_navigation_cursor_hold()
         if (
@@ -8449,7 +8884,11 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             and not self.navigation_active
         ):
             self._ensure_keyboard_capture()
-            self._start_paint_session(e)
+            if self.mode == "region_erase":
+                self._begin_region_selection(e)
+                self.update_cursor()
+            else:
+                self._start_paint_session(e)
             self.raise_toolbar()
             e.accept()
         super().mousePressEvent(e)
@@ -8459,6 +8898,7 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             self._nav_pointer_button == Qt.MouseButton.LeftButton
             and not self._nav_pointer_started_draw
             and (e.buttons() & Qt.MouseButton.LeftButton)
+            and self.mode != "region_erase"
         ):
             delta = e.position() - self._nav_pointer_press_pos
             if abs(delta.x()) >= 2 or abs(delta.y()) >= 2:
@@ -8476,6 +8916,13 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                 self._start_paint_session(synthetic_press)
                 self.raise_toolbar()
                 self._nav_pointer_button = Qt.MouseButton.NoButton
+        if (
+            self.mode == "region_erase"
+            and self._region_previewing
+            and (e.buttons() & Qt.MouseButton.LeftButton)
+        ):
+            self._update_region_selection_preview(e.pos())
+            self.raise_toolbar()
         if self.drawing and self.mode != "cursor":
             p = e.pos(); pf = e.position()
             dirty_region = None
@@ -8494,6 +8941,12 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             self._set_navigation_reason("pointer", False)
             self._nav_pointer_button = Qt.MouseButton.NoButton
             self._nav_pointer_started_draw = False
+        if e.button() == Qt.MouseButton.LeftButton and self._region_previewing:
+            self._finalize_region_selection(e.pos())
+            self.raise_toolbar()
+            e.accept()
+            super().mouseReleaseEvent(e)
+            return
         if e.button() == Qt.MouseButton.LeftButton and self.drawing:
             dirty_region = self._finalize_paint_session(e.pos())
             if dirty_region is not None:
@@ -8584,6 +9037,7 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         pressure: float,
         tail_state: float,
         fade_alpha: int,
+        prev_width: Optional[float] = None,
     ) -> Tuple[float, int]:
         fade_min = getattr(self, "_active_fade_min", 0)
         fade_max = getattr(self, "_active_fade_max", 255)
@@ -8595,34 +9049,83 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             return int(clamp(value, fade_min, fade_max))
 
         if style_key == PenStyle.HIGHLIGHTER.value:
-            stable = _clamp_width(effective_base * (1.0 + min(0.08, curve_scale * 0.25)))
-            cur_width = _clamp_width(cur_width * 0.35 + stable * 0.65)
-            fade_alpha = _clamp_alpha(fade_max * 0.95 + fade_alpha * 0.05)
+            stable = _clamp_width(effective_base * (1.0 + min(0.03, curve_scale * 0.08)))
+            base_target = _clamp_width(stable * (0.985 + speed_scale * 0.035))
+            if prev_width is not None:
+                easing = clamp(0.86 + speed_scale * 0.08, 0.86, 0.95)
+                cur_width = _clamp_width(prev_width * easing + base_target * (1.0 - easing))
+                step_limit = max(0.1, effective_base * 0.006)
+                delta = cur_width - prev_width
+                if abs(delta) > step_limit:
+                    cur_width = _clamp_width(prev_width + math.copysign(step_limit, delta))
+            else:
+                cur_width = _clamp_width(cur_width * 0.1 + base_target * 0.9)
+            fade_alpha = _clamp_alpha(fade_max)
             return cur_width, fade_alpha
 
         if style_key == PenStyle.CHALK.value:
             rng = getattr(self, "_stroke_rng", None)
             if rng is not None:
-                grain = (rng.random() - 0.5) * max(0.0, effective_base * 0.05)
+                grain = (rng.random() - 0.5) * max(0.0, effective_base * 0.08)
                 cur_width = _clamp_width(cur_width + grain)
-            fade_alpha = _clamp_alpha(fade_alpha * 1.04)
+            softness = clamp(0.1 + speed_scale * 0.18 + tail_state * 0.12, 0.1, 0.36)
+            cur_width = _clamp_width(cur_width * (1.0 - softness) + min_width * softness)
+            if prev_width is not None:
+                easing = clamp(0.78 + speed_scale * 0.1, 0.78, 0.92)
+                cur_width = _clamp_width(prev_width * easing + cur_width * (1.0 - easing))
+                step_limit = max(0.16, effective_base * 0.01)
+                delta = cur_width - prev_width
+                if abs(delta) > step_limit:
+                    cur_width = _clamp_width(prev_width + math.copysign(step_limit, delta))
+            fade_alpha = _clamp_alpha(fade_alpha * (1.02 - tail_state * 0.1))
             return cur_width, fade_alpha
 
         if style_key == PenStyle.FOUNTAIN.value:
-            slim_factor = clamp(0.25 + speed_scale * 1.1, 0.25, 0.92)
-            curve_gain = clamp(curve_scale * 0.55 + pressure * 0.35, 0.0, 0.8)
-            expressive_target = _clamp_width(
-                effective_base * (0.68 + curve_gain * 0.6 + (1.0 - slim_factor) * 0.4)
-            )
-            cur_width = _clamp_width(cur_width * 0.55 + expressive_target * 0.45)
-            fade_alpha = _clamp_alpha(fade_alpha * (0.94 + curve_gain * 0.08))
-            return cur_width, fade_alpha
+            thinness = clamp(0.32 + speed_scale * 0.6 - tail_state * 0.28, 0.22, 0.92)
+            curve_gain = clamp(curve_scale * 0.74 + pressure * 0.32, 0.0, 1.0)
+            body = _clamp_width(effective_base * (0.58 + curve_gain * 0.82))
+            tapered = _clamp_width(body * thinness)
+            blend = clamp(0.44 + curve_gain * 0.24, 0.44, 0.92)
+            profile_target = _clamp_width(cur_width * (1.0 - blend) + tapered * blend)
+            end_tip = clamp(tail_state * (1.0 - speed_scale) * 1.4, 0.0, 1.0)
+            profile_target = _clamp_width(profile_target * (1.0 - 0.38 * end_tip) + min_width * 0.38 * end_tip)
+            if prev_width is not None:
+                easing = clamp(0.84 + speed_scale * 0.1, 0.84, 0.96)
+                profile_target = _clamp_width(prev_width * easing + profile_target * (1.0 - easing))
+                step_limit = max(0.12, effective_base * 0.008)
+                delta = profile_target - prev_width
+                if abs(delta) > step_limit:
+                    profile_target = _clamp_width(prev_width + math.copysign(step_limit, delta))
+                nib_memory = clamp(0.82 + curve_gain * 0.08, 0.82, 0.92)
+                profile_target = _clamp_width(prev_width * nib_memory + profile_target * (1.0 - nib_memory))
+                accel_clamp = max(0.06, effective_base * 0.005)
+                accel_delta = profile_target - prev_width
+                if abs(accel_delta) > accel_clamp:
+                    profile_target = _clamp_width(prev_width + math.copysign(accel_clamp, accel_delta))
+            fade_shrink = 0.9 + (1.0 - speed_scale) * 0.08 - tail_state * 0.22 - end_tip * 0.16
+            fade_alpha = _clamp_alpha(fade_alpha * clamp(fade_shrink, 0.64, 1.0))
+            return profile_target, fade_alpha
 
         if style_key == PenStyle.BRUSH.value:
-            expressiveness = clamp(pressure * 0.6 + curve_scale * 0.25 + tail_state * 0.3, 0.0, 1.1)
-            target = _clamp_width(effective_base * (0.74 + expressiveness * 0.62))
-            cur_width = _clamp_width(cur_width * 0.4 + target * 0.6)
-            fade_alpha = _clamp_alpha(fade_alpha * (1.0 + expressiveness * 0.12))
+            body_gain = clamp(pressure * 0.6 + curve_scale * 0.4, 0.0, 1.2)
+            speed_relief = clamp(speed_scale * 0.4, 0.08, 0.7)
+            base_target = _clamp_width(effective_base * (0.72 + body_gain * 0.62 + speed_relief * 0.2))
+            tip_mix = clamp(tail_state * 0.7 + (1.0 - speed_scale) * 0.2, 0.0, 1.0)
+            tapered = _clamp_width(base_target * (0.54 + tip_mix * 0.26))
+            profile_target = _clamp_width(
+                base_target * (0.5 - tip_mix * 0.04) + tapered * (0.5 + tip_mix * 0.12)
+            )
+            easing = clamp(0.66 + speed_scale * 0.16 - curve_scale * 0.08, 0.6, 0.88)
+            cur_width = _clamp_width(cur_width * easing + profile_target * (1.0 - easing))
+            if prev_width is not None and prev_width > 0.0:
+                step_limit = max(0.22, effective_base * 0.02)
+                delta = cur_width - prev_width
+                if abs(delta) > step_limit:
+                    cur_width = _clamp_width(prev_width + math.copysign(step_limit, delta))
+            end_tip = clamp(tip_mix * (1.0 - speed_scale) * 1.0, 0.0, 1.0)
+            cur_width = _clamp_width(cur_width * (1.0 - 0.16 * end_tip) + min_width * 0.16 * end_tip)
+            fade_factor = 1.0 - tip_mix * 0.08 + body_gain * 0.05 - end_tip * 0.05
+            fade_alpha = _clamp_alpha(fade_alpha * clamp(fade_factor, 0.8, 1.05))
             return cur_width, fade_alpha
 
         return _clamp_width(cur_width), _clamp_alpha(fade_alpha)
@@ -8635,7 +9138,6 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             self._stroke_timestamps.clear()
             self._stroke_points.append(QPointF(cur_point))
             self._stroke_timestamps.append(now)
-            self.prev_point = QPointF(cur_point)
             self.last_point = QPointF(cur_point)
             self._stroke_last_midpoint = QPointF(cur_point)
             self._stroke_filter_point = QPointF(cur_point)
@@ -8747,6 +9249,8 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         velocity = getattr(self, "_stroke_width_velocity", 0.0)
         accel = clamp(getattr(config, "width_accel", 0.18), 0.02, 0.6)
         velocity += (smoothed_target - self.last_width) * accel
+        if config.key == PenStyle.FOUNTAIN.value:
+            velocity += (target_w - smoothed_target) * 0.04
         damping = clamp(getattr(config, "width_velocity_damping", 0.7), 0.4, 0.95)
         velocity *= damping
         velocity_limit = max(
@@ -8815,6 +9319,7 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             pressure=pressure,
             tail_state=tail_state,
             fade_alpha=fade_alpha,
+            prev_width=self.last_width,
         )
         self._update_brush_pen_appearance(cur_w, fade_alpha)
         shadow_alpha_current = (
@@ -8838,7 +9343,6 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         if isinstance(updated_coverage, QPainterPath):
             self._stroke_fill_coverage = QPainterPath(updated_coverage)
 
-        self.prev_point = QPointF(last_point)
         self.last_point = QPointF(cur_point)
         self._stroke_last_midpoint = QPointF(current_mid)
         self.last_width = cur_w
@@ -8934,7 +9438,8 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         else:
             p.fillRect(self.rect(), QColor(0, 0, 0, 1))
         p.drawPixmap(0, 0, self.canvas)
-        if self.drawing and self.mode == "shape": p.drawPixmap(0, 0, self.temp_canvas)
+        if (self.drawing and self.mode == "shape") or self._region_previewing:
+            p.drawPixmap(0, 0, self.temp_canvas)
         p.end()
 
     def showEvent(self, e) -> None:
@@ -8952,23 +9457,52 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
 class TTSManager(QObject):
     """简单封装语音播报，优先使用 pyttsx3，必要时回退到 PowerShell。"""
 
-    def __init__(self, preferred_voice_id: str = "", parent: Optional[QObject] = None) -> None:
+    def __init__(
+        self,
+        preferred_voice_id: str = "",
+        preferred_output_id: str = "",
+        preferred_engine: str = "pyttsx3",
+        parent: Optional[QObject] = None,
+    ) -> None:
         super().__init__(parent)
         self.engine = None
         self.voice_ids: List[str] = []
         self.default_voice_id = ""
         self.current_voice_id = ""
+        self.output_ids: List[str] = []
+        self.default_output_id = ""
+        self.current_output_id = ""
+        self.supports_output_selection = False
         self.failure_reason = ""
         self.failure_suggestions: List[str] = []
         self.supports_voice_selection = False
         self._mode: str = "none"
         self._powershell_path = ""
         self._powershell_busy = False
+        self._sapi_voice = None
+        self._sapi_busy = False
+        self._sapi_outputs: Dict[str, Any] = {}
+        self._output_descriptions: Dict[str, str] = {}
         self._queue: Queue[str] = Queue()
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._pump)
+        self._preferred_voice_id = preferred_voice_id
+        self._preferred_output_id = preferred_output_id
+        self._preferred_engine = preferred_engine.strip().lower() or "pyttsx3"
+        self._initialized = False
+
+    def _lazy_init(self) -> None:
+        if self._initialized:
+            return
+        self._initialized = True
         missing_reason = ""
-        if pyttsx3 is not None:
+        preferred = self._preferred_engine
+
+        def _try_pyttsx3() -> bool:
+            nonlocal missing_reason
+            if pyttsx3 is None:
+                missing_reason = "未检测到 pyttsx3 模块"
+                return False
             try:
                 init_kwargs = {"driverName": "sapi5"} if sys.platform == "win32" else {}
                 self.engine = pyttsx3.init(**init_kwargs)
@@ -8977,31 +9511,53 @@ class TTSManager(QObject):
                 if not self.voice_ids:
                     self._record_failure("未检测到任何可用的发音人")
                     self.engine = None
-                else:
-                    self.default_voice_id = self.voice_ids[0]
-                    self.current_voice_id = (
-                        preferred_voice_id if preferred_voice_id in self.voice_ids else self.default_voice_id
-                    )
-                    if self.current_voice_id:
-                        try:
-                            self.engine.setProperty("voice", self.current_voice_id)
-                        except Exception as exc:
-                            self._record_failure("无法设置默认发音人", exc)
-                            self.engine = None
-                    if self.engine is not None:
-                        self.supports_voice_selection = True
-                        self._mode = "pyttsx3"
-                        self.engine.startLoop(False)
-                        self._timer.start(100)
-                        return
+                    return False
+                self.default_voice_id = self.voice_ids[0]
+                preferred_voice = self._preferred_voice_id or self.default_voice_id
+                self.current_voice_id = preferred_voice if preferred_voice in self.voice_ids else self.default_voice_id
+                if self.current_voice_id:
+                    try:
+                        self.engine.setProperty("voice", self.current_voice_id)
+                    except Exception as exc:
+                        self._record_failure("无法设置默认发音人", exc)
+                        self.engine = None
+                        return False
+                if self.engine is not None:
+                    self.supports_voice_selection = True
+                    self._mode = "pyttsx3"
+                    # pyttsx3 不支持在此路径下切换输出设备，交给系统默认设备。
+                    self.supports_output_selection = False
+                    self.engine.startLoop(False)
+                    self._timer.start(100)
+                    return True
             except Exception as exc:
                 self._record_failure("初始化语音引擎失败", exc)
                 self.engine = None
+            return False
+
+        def _try_win32com() -> bool:
+            self._init_win32com_fallback()
+            return self.available and self._mode == "win32com"
+
+        def _try_powershell() -> bool:
+            self._init_powershell_fallback()
+            return self.available and self._mode == "powershell"
+
+        # 根据用户偏好选择初始化顺序
+        if preferred == "sapi":
+            if _try_win32com():
+                return
+            if _try_pyttsx3():
+                return
         else:
-            missing_reason = "未检测到 pyttsx3 模块"
-        self._init_powershell_fallback()
-        if self.available:
+            if _try_pyttsx3():
+                return
+            if _try_win32com():
+                return
+
+        if _try_powershell():
             return
+
         if missing_reason:
             if self.failure_reason:
                 if missing_reason not in self.failure_reason:
@@ -9021,9 +9577,11 @@ class TTSManager(QObject):
 
     @property
     def available(self) -> bool:
-        return self._mode in {"pyttsx3", "powershell"}
+        self._lazy_init()
+        return self._mode in {"pyttsx3", "win32com", "powershell"}
 
     def diagnostics(self) -> tuple[str, List[str]]:
+        self._lazy_init()
         reason = self.failure_reason
         suggestions = list(self.failure_suggestions)
         env_reason, env_suggestions = detect_speech_environment_issues()
@@ -9035,6 +9593,67 @@ class TTSManager(QObject):
                 reason = env_reason
         suggestions.extend(env_suggestions)
         return reason, dedupe_strings(suggestions)
+
+    def _init_win32com_fallback(self) -> None:
+        if sys.platform != "win32" or not WIN32COM_AVAILABLE:
+            return
+        try:
+            speaker = win32com.client.Dispatch("SAPI.SpVoice")  # type: ignore[attr-defined]
+            voices = list(getattr(speaker, "GetVoices", lambda: [])())  # type: ignore[call-arg]
+            outputs = list(getattr(speaker, "GetAudioOutputs", lambda: [])())  # type: ignore[call-arg]
+        except Exception as exc:
+            self._record_failure("初始化 SAPI 语音失败", exc)
+            return
+        voice_ids: List[str] = []
+        for v in voices:
+            vid = getattr(v, "Id", None)
+            if vid:
+                voice_ids.append(str(vid))
+        output_ids: List[str] = []
+        output_map: Dict[str, Any] = {}
+        output_descriptions: Dict[str, str] = {}
+        for out in outputs:
+            oid = getattr(out, "Id", None)
+            if not oid:
+                continue
+            oid_str = str(oid)
+            output_ids.append(oid_str)
+            output_map[oid_str] = out
+            try:
+                desc = str(out.GetDescription())
+            except Exception:
+                desc = ""
+            output_descriptions[oid_str] = desc
+        if not voice_ids:
+            self._record_failure("未检测到任何可用的发音人")
+            return
+        self.voice_ids = voice_ids
+        self.default_voice_id = voice_ids[0]
+        preferred = self._preferred_voice_id or self.default_voice_id
+        self.current_voice_id = preferred if preferred in voice_ids else self.default_voice_id
+        try:
+            if self.current_voice_id:
+                for v in voices:
+                    if str(getattr(v, "Id", "")) == self.current_voice_id:
+                        speaker.Voice = v  # type: ignore[attr-defined]
+                        break
+        except Exception:
+            pass
+        self.output_ids = output_ids
+        self._sapi_outputs = output_map
+        self._output_descriptions = output_descriptions
+        if self.output_ids:
+            self.default_output_id = self.output_ids[0]
+            preferred_out = self._preferred_output_id or self.default_output_id
+            self.current_output_id = preferred_out if preferred_out in self.output_ids else self.default_output_id
+            self.supports_output_selection = True
+            self._apply_sapi_output_device(speaker)
+        self._sapi_voice = speaker
+        self.supports_voice_selection = True
+        self.failure_reason = ""
+        self.failure_suggestions = []
+        self._mode = "win32com"
+        self._timer.start(60)
 
     def _init_powershell_fallback(self) -> None:
         if sys.platform != "win32":
@@ -9058,7 +9677,7 @@ class TTSManager(QObject):
         self.failure_reason = ""
         self.failure_suggestions = []
         self._mode = "powershell"
-        self._timer.start(120)
+        self._timer.start(80)
 
     def _record_failure(self, fallback: str, exc: Optional[Exception] = None) -> None:
         message = ""
@@ -9088,7 +9707,24 @@ class TTSManager(QObject):
                 suggestions.append(hint)
         self.failure_suggestions = suggestions
 
+    def _apply_sapi_output_device(self, speaker: Any) -> None:
+        if not self.supports_output_selection or speaker is None:
+            return
+        target_id = self.current_output_id or self.default_output_id
+        token = None
+        if target_id and target_id in self._sapi_outputs:
+            token = self._sapi_outputs.get(target_id)
+        elif self._sapi_outputs:
+            token = next(iter(self._sapi_outputs.values()))
+        if token is None:
+            return
+        try:
+            speaker.AudioOutput = token  # type: ignore[attr-defined]
+        except Exception:
+            return
+
     def set_voice(self, voice_id: str) -> None:
+        self._lazy_init()
         if not self.supports_voice_selection:
             return
         if voice_id in self.voice_ids:
@@ -9099,7 +9735,17 @@ class TTSManager(QObject):
                 except Exception:
                     pass
 
+    def set_output(self, output_id: str) -> None:
+        self._lazy_init()
+        if not self.supports_output_selection:
+            return
+        if output_id in self.output_ids:
+            self.current_output_id = output_id
+            if self._mode == "win32com" and self._sapi_voice is not None:
+                self._apply_sapi_output_device(self._sapi_voice)
+
     def speak(self, text: str) -> None:
+        self._lazy_init()
         if not self.available:
             return
         while not self._queue.empty():
@@ -9126,6 +9772,16 @@ class TTSManager(QObject):
             except Exception as exc:
                 self._record_failure("语音引擎运行异常", exc)
                 self.shutdown()
+        elif self._mode == "win32com":
+            if self._sapi_busy or self._sapi_voice is None:
+                return
+            try:
+                text = self._queue.get_nowait()
+            except Empty:
+                return
+            self._sapi_busy = True
+            worker = threading.Thread(target=self._run_win32com_speech, args=(text,), daemon=True)
+            worker.start()
         elif self._mode == "powershell":
             if self._powershell_busy:
                 return
@@ -9136,6 +9792,43 @@ class TTSManager(QObject):
             self._powershell_busy = True
             worker = threading.Thread(target=self._run_powershell_speech, args=(text,), daemon=True)
             worker.start()
+
+    def _run_win32com_speech(self, text: str) -> None:
+        try:
+            if not text or self._sapi_voice is None:
+                return
+            if pythoncom is not None:
+                try:
+                    pythoncom.CoInitialize()
+                except Exception:
+                    pass
+            try:
+                if self.current_voice_id:
+                    voices = getattr(self._sapi_voice, "GetVoices", lambda: [])()  # type: ignore[call-arg]
+                    for v in voices:
+                        if str(getattr(v, "Id", "")) == self.current_voice_id:
+                            try:
+                                self._sapi_voice.Voice = v  # type: ignore[attr-defined]
+                            except Exception:
+                                pass
+                            break
+            except Exception:
+                pass
+            try:
+                self._apply_sapi_output_device(self._sapi_voice)
+            except Exception:
+                pass
+            self._sapi_voice.Speak(text)  # type: ignore[attr-defined]
+        except Exception as exc:
+            self._record_failure("SAPI 语音播报失败", exc)
+            QTimer.singleShot(0, self.shutdown)
+        finally:
+            self._sapi_busy = False
+            if pythoncom is not None:
+                try:
+                    pythoncom.CoUninitialize()
+                except Exception:
+                    pass
 
     def _run_powershell_speech(self, text: str) -> None:
         try:
@@ -9175,9 +9868,12 @@ class TTSManager(QObject):
             except Exception:
                 pass
         self.engine = None
+        self._sapi_voice = None
         self._mode = "none"
         self._powershell_busy = False
+        self._sapi_busy = False
         self._timer.stop()
+        self._initialized = False
 
 
 # ---------- 点名/计时 ----------
@@ -9236,26 +9932,12 @@ class ClickableFrame(QFrame):
         super().mousePressEvent(e)
 
 
-def preferred_calligraphy_font(default: str = "Microsoft YaHei UI") -> str:
-    """返回系统中更具书法风格的字体，若不可用则回退到默认字体。"""
-
-    try:
-        families = set(QFontDatabase().families())
-    except Exception:
-        return default
-    for candidate in ("楷体", "KaiTi", "Kaiti SC", "STKaiti", "DFKai-SB", "FZKai-Z03S"):
-        if candidate in families:
-            return candidate
-    return default
-
-
 class StudentListDialog(QDialog):
-    def __init__(self, parent: Optional[QWidget], students: List[tuple[str, str, int]], uncalled_indices: Optional[Set[int]] = None) -> None:
+    def __init__(self, parent: Optional[QWidget], students: List[tuple[str, str, int, bool]]) -> None:
         super().__init__(parent)
         self.setWindowTitle("学生名单")
         self.setModal(True)
         self._selected_index: Optional[int] = None
-        uncalled_set: Set[int] = set(uncalled_indices or [])
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -9269,22 +9951,21 @@ class StudentListDialog(QDialog):
 
         button_font = QFont("Microsoft YaHei UI", 10, QFont.Weight.Medium)
         metrics = QFontMetrics(button_font)
-        prepared_entries: List[tuple[str, str, int]] = []
-        max_text = 120
-        for sid, name, data_index in students:
-            base_text = f"{sid} {name}"
-            safe_base = html.escape(base_text)
-            mark_uncalled = data_index in uncalled_set
-            plain_text = f"{base_text} \u25cf" if mark_uncalled else base_text
-            rich_text = (
-                f"{safe_base}&nbsp;<span style=\"color:#d93025;\">&#9679;</span>"
-                if mark_uncalled
-                else safe_base
-            )
-            prepared_entries.append((rich_text, plain_text, data_index))
-            max_text = max(max_text, metrics.horizontalAdvance(plain_text))
+
+        def _format_entry_text(sid: str, name: str) -> str:
+            return f"{sid} {name}".strip()
+
+        def _measure_text(sid: str, name: str, called: bool) -> int:
+            base = f"{sid} {name}".strip()
+            extra = metrics.horizontalAdvance(" ●") if not called else 0
+            return metrics.horizontalAdvance(base) + extra
+
+        max_text = max(
+            (_measure_text(sid, name, called) for sid, name, _, called in students),
+            default=120,
+        )
         min_button_width = max(120, max_text + 24)
-        button_height = recommended_control_height(button_font, extra=16, minimum=38)
+        button_height = recommended_control_height(button_font, extra=12, minimum=34)
 
         screen = QApplication.primaryScreen()
         available_width = screen.availableGeometry().width() if screen else 1280
@@ -9292,7 +9973,7 @@ class StudentListDialog(QDialog):
         button_width = min(min_button_width, max_width_per_button)
         button_size = QSize(button_width, button_height)
 
-        total_rows = max(1, math.ceil(len(prepared_entries) / 10))
+        total_rows = max(1, math.ceil(len(students) / 10))
 
         for column in range(10):
             grid.setColumnStretch(column, 0)
@@ -9302,20 +9983,38 @@ class StudentListDialog(QDialog):
             grid.setRowStretch(row, 0)
             grid.setRowMinimumHeight(row, button_height)
 
-        for position, (rich_text, _plain_text, data_index) in enumerate(prepared_entries):
+        dot_size = 10
+        dot_pixmap = QPixmap(dot_size, dot_size)
+        dot_pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(dot_pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setBrush(QColor("#d93025"))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(1, 1, dot_size - 2, dot_size - 2)
+        painter.end()
+        dot_icon = QIcon(dot_pixmap)
+
+        for position, (sid, name, data_index, called) in enumerate(students):
             row = position // 10
             column = position % 10
-            button = QPushButton()
-            button.setTextFormat(Qt.TextFormat.RichText)
-            button.setText(rich_text)
+            button = QPushButton(_format_entry_text(sid, name))
             button.setFont(button_font)
             button.setFixedSize(button_size)
             button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             apply_button_style(button, ButtonStyles.GRID, height=button_height)
+            button.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+            button.setIcon(dot_icon if not called else QIcon())
+            button.setIconSize(dot_pixmap.size())
+            button.setToolTip("本轮已点名" if called else "本轮未点名")
             button.clicked.connect(lambda _checked=False, value=data_index: self._select_student(value))
             grid.addWidget(button, row, column, Qt.AlignmentFlag.AlignCenter)
 
         layout.addLayout(grid)
+
+        legend = QLabel("红点标记本轮未点名（无标记即已点名）")
+        legend.setStyleSheet("color: #5f6368;")
+        legend.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(legend)
 
         box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=self)
         box.rejected.connect(self.reject)
@@ -9325,7 +10024,7 @@ class StudentListDialog(QDialog):
             apply_button_style(
                 close_button,
                 ButtonStyles.PRIMARY,
-                height=recommended_control_height(close_button.font(), extra=14, minimum=36),
+                height=recommended_control_height(close_button.font(), extra=10, minimum=32),
             )
         layout.addWidget(box)
 
@@ -9348,546 +10047,6 @@ class StudentListDialog(QDialog):
     @property
     def selected_index(self) -> Optional[int]:
         return self._selected_index
-
-
-class ScoreboardDialog(QDialog):
-    ORDER_RANK = "rank"
-    ORDER_ID = "id"
-
-    @dataclass
-    class _CardMetrics:
-        count: int
-        columns: int
-        rows: int
-        card_width: int
-        card_height: int
-        padding_h: int
-        padding_v: int
-        inner_spacing: int
-        font_size: int
-        horizontal_spacing: int
-        vertical_spacing: int
-
-    def __init__(
-        self,
-        parent: Optional[QWidget],
-        students: List[tuple[str, str, int]],
-        order: str = "rank",
-        order_changed: Optional[Callable[[str], None]] = None,
-    ) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("成绩展示")
-        self.setModal(True)
-        self.setObjectName("ScoreboardDialog")
-        self._pending_maximize = True
-
-        self.students = list(students)
-        self._order_changed_callback = order_changed
-        self._order = order if order in {self.ORDER_RANK, self.ORDER_ID} else self.ORDER_RANK
-        self._grid_row_count = 0
-        self._grid_column_count = 0
-        self._card_metrics: Optional[ScoreboardDialog._CardMetrics] = None
-        self._card_metrics_key: Optional[tuple[int, int, int]] = None
-
-        calligraphy_font = preferred_calligraphy_font()
-        self._calligraphy_font = calligraphy_font
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(32, 32, 32, 32)
-        layout.setSpacing(24)
-
-        title = QLabel("成绩展示")
-        title.setObjectName("ScoreboardHeader")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setFont(QFont(calligraphy_font, 44, QFont.Weight.Bold))
-        layout.addWidget(title)
-
-        order_layout = QHBoxLayout()
-        order_layout.setContentsMargins(0, 0, 0, 0)
-        order_layout.setSpacing(12)
-        order_label = QLabel("排序方式：")
-        order_label.setFont(QFont(calligraphy_font, 28, QFont.Weight.Bold))
-        order_layout.addWidget(order_label, 0, Qt.AlignmentFlag.AlignLeft)
-
-        button_font = QFont(calligraphy_font, 22, QFont.Weight.Bold)
-        self.order_button_group = QButtonGroup(self)
-        self.order_button_group.setExclusive(True)
-        self.order_buttons: Dict[str, QPushButton] = {}
-        for key, text in ((self.ORDER_RANK, "按排名"), (self.ORDER_ID, "按学号")):
-            button = QPushButton(text)
-            button.setCheckable(True)
-            button.setFont(button_font)
-            height = recommended_control_height(button_font, extra=16, minimum=44)
-            apply_button_style(button, ButtonStyles.ORDER_TOGGLE, height=height)
-            button.setMinimumWidth(140)
-            button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-            self.order_button_group.addButton(button)
-            button.clicked.connect(lambda _checked=False, value=key: self._on_order_button_clicked(value))
-            order_layout.addWidget(button, 0, Qt.AlignmentFlag.AlignLeft)
-            self.order_buttons[key] = button
-        order_layout.addStretch(1)
-        layout.addLayout(order_layout)
-
-        grid_container = QWidget()
-        grid_container.setObjectName("ScoreboardGridContainer")
-        grid_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.grid_layout = QGridLayout(grid_container)
-        self.grid_layout.setContentsMargins(18, 18, 18, 18)
-        self.grid_layout.setHorizontalSpacing(20)
-        self.grid_layout.setVerticalSpacing(20)
-        layout.addWidget(grid_container, 1)
-
-        box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=self)
-        box.setFont(QFont(calligraphy_font, 22, QFont.Weight.Bold))
-        close_button = box.button(QDialogButtonBox.StandardButton.Close)
-        if close_button is not None:
-            close_button.setText("关闭")
-            close_button.setFont(QFont(calligraphy_font, 22, QFont.Weight.Bold))
-            apply_button_style(
-                close_button,
-                ButtonStyles.PRIMARY,
-                height=recommended_control_height(close_button.font(), extra=18, minimum=46),
-            )
-        box.rejected.connect(self.reject)
-        layout.addWidget(box)
-
-        self.setStyleSheet(
-            "#ScoreboardDialog {"
-            "    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,"
-            "        stop:0 #f7f9fc, stop:1 #e3edff);"
-            "}"
-            "#ScoreboardGridContainer {"
-            "    background-color: rgba(255, 255, 255, 0.85);"
-            "    border-radius: 24px;"
-            "}"
-            "QLabel#ScoreboardHeader {"
-            "    color: #0b3d91;"
-            "}"
-            "QLabel[class=\"scoreboardName\"] {"
-            "    color: #103d73;"
-            "}"
-            "QLabel[class=\"scoreboardScore\"] {"
-            "    color: #103d73;"
-            "}"
-            "QWidget[class=\"scoreboardWrapper\"] {"
-            "    background-color: rgba(255, 255, 255, 0.95);"
-            "    border-radius: 18px;"
-            "    border: 1px solid rgba(16, 61, 115, 0.12);"
-            "}"
-            "QPushButton[class=\"orderButton\"] {"
-            "    background-color: rgba(255, 255, 255, 0.88);"
-            "    border-radius: 22px;"
-            "    border: 1px solid rgba(16, 61, 115, 0.24);"
-            "    padding: 4px 18px;"
-            "    color: #0b3d91;"
-            "}"
-            "QPushButton[class=\"orderButton\"]:hover {"
-            "    border-color: #1a73e8;"
-            "    background-color: rgba(26, 115, 232, 0.12);"
-            "}"
-            "QPushButton[class=\"orderButton\"]:checked {"
-            "    background-color: #1a73e8;"
-            "    border-color: #1a73e8;"
-            "    color: #ffffff;"
-            "}"
-        )
-
-        screen = QApplication.primaryScreen()
-        self._available_geometry = screen.availableGeometry() if screen is not None else QRect(0, 0, 1920, 1080)
-
-        self._update_order_buttons()
-        self._populate_grid()
-
-        if screen is not None:
-            self.setGeometry(self._available_geometry)
-
-    def _update_order_buttons(self) -> None:
-        for key, button in self.order_buttons.items():
-            block = button.blockSignals(True)
-            button.setChecked(key == self._order)
-            button.blockSignals(block)
-
-    def _on_order_button_clicked(self, order: str) -> None:
-        if order not in {self.ORDER_RANK, self.ORDER_ID}:
-            self._update_order_buttons()
-            return
-        if order == self._order:
-            self._update_order_buttons()
-            return
-        self._order = order
-        if callable(self._order_changed_callback):
-            try:
-                self._order_changed_callback(order)
-            except Exception:
-                pass
-        self._update_order_buttons()
-        self._populate_grid()
-
-    def _clear_grid(self) -> None:
-        while self.grid_layout.count():
-            item = self.grid_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-        for row in range(self._grid_row_count):
-            self.grid_layout.setRowStretch(row, 0)
-            self.grid_layout.setRowMinimumHeight(row, 0)
-        for column in range(self._grid_column_count):
-            self.grid_layout.setColumnStretch(column, 0)
-            self.grid_layout.setColumnMinimumWidth(column, 0)
-        self._grid_row_count = 0
-        self._grid_column_count = 0
-
-    def _collect_display_candidates(self) -> tuple[List[tuple[int, str, str]], List[str], List[str]]:
-        sorted_students = self._sort_students()
-        alternate_order = (
-            self.ORDER_ID if self._order == self.ORDER_RANK else self.ORDER_RANK
-        )
-        alternate_students = self._sort_students(alternate_order)
-
-        display_entries: List[tuple[int, str, str]] = []
-        display_candidates: List[str] = []
-        score_candidates: List[str] = []
-
-        for idx, (sid, name, score) in enumerate(sorted_students):
-            display_text = self._format_display_text(idx, sid, name)
-            score_text = self._format_score_text(score)
-            display_entries.append((idx, display_text, score_text))
-            display_candidates.append(display_text)
-            score_candidates.append(score_text)
-
-        for idx, (sid, name, score) in enumerate(alternate_students):
-            display_candidates.append(
-                self._format_display_text_for_order(
-                    alternate_order, idx, sid, name
-                )
-            )
-            score_candidates.append(self._format_score_text(score))
-
-        return display_entries, display_candidates, score_candidates
-
-    def _compute_card_metrics(self) -> Optional[_CardMetrics]:
-        count = len(self.students)
-        if count == 0:
-            return None
-
-        available = self._available_geometry
-        key = (count, available.width(), available.height())
-        if self._card_metrics is not None and self._card_metrics_key == key:
-            return self._card_metrics
-
-        columns = 10
-        rows = max(1, math.ceil(count / columns))
-
-        usable_width = max(available.width() - 160, 640)
-        usable_height = max(available.height() - 240, 520)
-
-        margins = self.grid_layout.contentsMargins()
-        horizontal_spacing = max(14, int(usable_width * 0.01))
-        vertical_spacing = max(18, int(usable_height * 0.035 / rows))
-
-        spacing_total_x = horizontal_spacing * max(0, columns - 1)
-        spacing_total_y = vertical_spacing * max(0, rows - 1)
-
-        available_width_for_cards = (
-            usable_width - margins.left() - margins.right() - spacing_total_x
-        )
-        available_height_for_cards = (
-            usable_height - margins.top() - margins.bottom() - spacing_total_y
-        )
-
-        per_card_width = max(1.0, available_width_for_cards / columns)
-        per_card_height = max(1.0, available_height_for_cards / rows)
-
-        card_width = int(math.floor(per_card_width))
-        card_height = int(math.floor(per_card_height))
-
-        if per_card_width >= 120:
-            card_width = max(card_width, 120)
-        if per_card_height >= 180:
-            card_height = max(card_height, 180)
-
-        padding_h = max(12, int(card_width * 0.08))
-        padding_v = max(14, int(card_height * 0.1))
-        inner_spacing = max(6, int(card_height * 0.045))
-
-        display_entries, display_candidates, score_candidates = self._collect_display_candidates()
-
-        if not display_candidates:
-            return None
-
-        calligraphy_font = self._calligraphy_font or QApplication.font().family()
-        if not calligraphy_font:
-            calligraphy_font = QFont().family()
-
-        try:
-            probe_font = QFont(calligraphy_font, 64, QFont.Weight.Bold)
-            metrics = QFontMetrics(probe_font)
-        except Exception:
-            probe_font = QFont()
-            metrics = QFontMetrics(probe_font)
-
-        widest_display = max(
-            display_candidates,
-            key=lambda text: metrics.tightBoundingRect(text).width(),
-        )
-        widest_score = max(
-            score_candidates,
-            key=lambda text: metrics.tightBoundingRect(text).width(),
-        )
-
-        usable_name_width = max(60, card_width - 2 * padding_h)
-        content_height = max(80, card_height - 2 * padding_v - inner_spacing)
-        name_height = int(content_height * 0.58)
-        score_height = max(32, content_height - name_height)
-
-        font_upper_bound = int(min(card_width * 0.28, card_height * 0.36))
-        font_upper_bound = max(20, font_upper_bound)
-        fit_minimum = 14
-
-        name_fit = self._fit_font_size(
-            widest_display,
-            calligraphy_font,
-            QFont.Weight.Bold,
-            usable_name_width,
-            name_height,
-            fit_minimum,
-            font_upper_bound,
-        )
-        score_fit = self._fit_font_size(
-            widest_score,
-            calligraphy_font,
-            QFont.Weight.Bold,
-            usable_name_width,
-            score_height,
-            fit_minimum,
-            font_upper_bound,
-        )
-
-        final_font_size = max(fit_minimum, min(name_fit, score_fit, font_upper_bound))
-
-        self._card_metrics = ScoreboardDialog._CardMetrics(
-            count=count,
-            columns=columns,
-            rows=rows,
-            card_width=card_width,
-            card_height=card_height,
-            padding_h=padding_h,
-            padding_v=padding_v,
-            inner_spacing=inner_spacing,
-            font_size=final_font_size,
-            horizontal_spacing=horizontal_spacing,
-            vertical_spacing=vertical_spacing,
-        )
-        self._card_metrics_key = key
-        return self._card_metrics
-
-    def _ensure_metrics(self) -> Optional[_CardMetrics]:
-        metrics = self._compute_card_metrics()
-        if metrics is not None:
-            return metrics
-        self._card_metrics = None
-        self._card_metrics_key = None
-        return None
-
-    def _sort_students(self, order: Optional[str] = None) -> List[tuple[str, str, int]]:
-        data = list(self.students)
-        current_order = self._order if order is None else order
-        if current_order == self.ORDER_ID:
-            def _id_key(item: tuple[str, str, int]) -> tuple[int, str, str]:
-                sid_text = str(item[0]).strip()
-                try:
-                    sid_value = int(sid_text)
-                except (TypeError, ValueError):
-                    sid_value = sys.maxsize
-                return (sid_value, sid_text, item[1])
-
-            data.sort(key=_id_key)
-        else:
-            def _rank_key(item: tuple[str, str, int]) -> tuple[int, int, str]:
-                sid_text = str(item[0]).strip()
-                try:
-                    sid_value = int(sid_text)
-                except (TypeError, ValueError):
-                    sid_value = sys.maxsize
-                return (-item[2], sid_value, item[1])
-
-            data.sort(key=_rank_key)
-        return data
-
-    def _create_card(
-        self,
-        display_text: str,
-        score_text: str,
-        card_width: int,
-        card_height: int,
-        font_size: int,
-        padding_h: int,
-        padding_v: int,
-        inner_spacing: int,
-    ) -> QWidget:
-        calligraphy_font = self._calligraphy_font
-        wrapper = QWidget()
-        wrapper.setProperty("class", "scoreboardWrapper")
-        wrapper.setFixedSize(card_width, card_height)
-        wrapper.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-
-        layout = QVBoxLayout(wrapper)
-        layout.setContentsMargins(padding_h, padding_v, padding_h, padding_v)
-        layout.setSpacing(inner_spacing)
-
-        name_label = QLabel(display_text or "未命名")
-        name_label.setProperty("class", "scoreboardName")
-        name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        name_label.setWordWrap(False)
-        name_label.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
-        )
-        name_label.setFont(QFont(calligraphy_font, font_size, QFont.Weight.Bold))
-        name_label.setStyleSheet("margin: 0px; padding: 0px;")
-        layout.addWidget(name_label)
-
-        score_label = QLabel(score_text)
-        score_label.setProperty("class", "scoreboardScore")
-        score_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        score_label.setWordWrap(False)
-        score_label.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
-        )
-        score_label.setFont(QFont(calligraphy_font, font_size, QFont.Weight.Bold))
-        score_label.setStyleSheet(f"margin-top: {max(6, inner_spacing // 2)}px;")
-        layout.addWidget(score_label)
-
-        layout.addStretch(1)
-        return wrapper
-
-    def _format_display_text(self, index: int, sid: str, name: str) -> str:
-        return self._format_display_text_for_order(self._order, index, sid, name)
-
-    def _format_display_text_for_order(
-        self, order: str, index: int, sid: str, name: str
-    ) -> str:
-        clean_name = (name or "").strip() or "未命名"
-        if order == self.ORDER_ID:
-            sid_display = str(sid).strip() or "—"
-            return f"{sid_display}.{clean_name}"
-        return f"{index + 1}.{clean_name}"
-
-    @staticmethod
-    def _format_score_text(score: int | float | str) -> str:
-        text = "—"
-        try:
-            value = float(score)
-        except (TypeError, ValueError):
-            score_str = str(score).strip()
-            if score_str and score_str.lower() != "none":
-                text = score_str
-        else:
-            if math.isfinite(value):
-                if abs(value - int(value)) < 1e-6:
-                    text = str(int(round(value)))
-                else:
-                    text = f"{value:.2f}".rstrip("0").rstrip(".")
-        return f"{text} 分"
-
-    @staticmethod
-    def _fit_font_size(
-        text: str,
-        family: str,
-        weight: QFont.Weight,
-        max_width: int,
-        max_height: int,
-        minimum: int,
-        maximum: int,
-    ) -> int:
-        if not text:
-            return max(6, min(minimum, maximum))
-        if max_width <= 0 or max_height <= 0:
-            return max(6, min(minimum, maximum))
-        lower = max(6, min(minimum, maximum))
-        upper = max(6, max(minimum, maximum))
-        for size in range(upper, lower - 1, -1):
-            font = QFont(family, size, weight)
-            metrics = QFontMetrics(font)
-            rect = metrics.tightBoundingRect(text)
-            if rect.width() <= max_width and rect.height() <= max_height:
-                return size
-        return lower
-
-    def _populate_grid(self) -> None:
-        self._clear_grid()
-        count = len(self.students)
-        layout = self.grid_layout
-        calligraphy_font = self._calligraphy_font
-
-        if count == 0:
-            empty = QLabel("暂无成绩数据")
-            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            empty.setFont(QFont(calligraphy_font, 28, QFont.Weight.Bold))
-            empty.setStyleSheet("color: #103d73;")
-            layout.addWidget(empty, 0, 0, Qt.AlignmentFlag.AlignCenter)
-            layout.setRowStretch(0, 1)
-            layout.setColumnStretch(0, 1)
-            self._grid_row_count = 1
-            self._grid_column_count = 1
-            return
-
-        metrics = self._ensure_metrics()
-        if metrics is None:
-            return
-
-        layout.setHorizontalSpacing(metrics.horizontal_spacing)
-        layout.setVerticalSpacing(metrics.vertical_spacing)
-
-        for column in range(metrics.columns):
-            layout.setColumnStretch(column, 1)
-            layout.setColumnMinimumWidth(column, metrics.card_width)
-        for row in range(metrics.rows):
-            layout.setRowStretch(row, 1)
-            layout.setRowMinimumHeight(row, metrics.card_height)
-
-        self._grid_row_count = metrics.rows
-        self._grid_column_count = metrics.columns
-
-        container = layout.parentWidget()
-        if container is not None:
-            margins = layout.contentsMargins()
-            total_width = (
-                metrics.columns * metrics.card_width
-                + metrics.horizontal_spacing * max(0, metrics.columns - 1)
-                + margins.left()
-                + margins.right()
-            )
-            total_height = (
-                metrics.rows * metrics.card_height
-                + metrics.vertical_spacing * max(0, metrics.rows - 1)
-                + margins.top()
-                + margins.bottom()
-            )
-            container.setMinimumSize(total_width, total_height)
-
-        display_entries, _, _ = self._collect_display_candidates()
-
-        for idx, display_text, score_text in display_entries:
-            row = idx // metrics.columns
-            column = idx % metrics.columns
-            card = self._create_card(
-                display_text,
-                score_text,
-                metrics.card_width,
-                metrics.card_height,
-                metrics.font_size,
-                metrics.padding_h,
-                metrics.padding_v,
-                metrics.inner_spacing,
-            )
-            layout.addWidget(card, row, column, Qt.AlignmentFlag.AlignCenter)
-
-    def showEvent(self, event) -> None:  # type: ignore[override]
-        super().showEvent(event)
-        if self._pending_maximize:
-            self._pending_maximize = False
-            self.setWindowState(self.windowState() | Qt.WindowState.WindowMaximized)
 
 
 @dataclass
@@ -9992,7 +10151,6 @@ class StudentPhotoOverlay(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setStyleSheet("background: transparent;")
         self._owner = owner
-        self._current_pixmap = QPixmap()
         self._auto_close_duration_ms = 0
         self._auto_close_timer = QTimer(self)
         self._auto_close_timer.setSingleShot(True)
@@ -10068,7 +10226,6 @@ class StudentPhotoOverlay(QWidget):
 
         self._auto_close_duration_ms = max(0, int(duration_ms))
         self._auto_close_timer.stop()
-        self._current_pixmap = pixmap
         available_size = screen_rect.size()
         original_size = pixmap.size()
         if (
@@ -10223,8 +10380,6 @@ class RollCallTimerWindow(QWidget):
 
     STUDENT_FILE = _STUDENT_RESOURCES.plain
     STUDENT_FILE_CANDIDATES = _STUDENT_RESOURCES.plain_candidates
-    ENCRYPTED_STUDENT_FILE = _STUDENT_RESOURCES.encrypted
-    ENCRYPTED_STUDENT_FILE_CANDIDATES = _STUDENT_RESOURCES.encrypted_candidates
     MIN_FONT_SIZE = 5
     MAX_FONT_SIZE = 220
 
@@ -10233,8 +10388,6 @@ class RollCallTimerWindow(QWidget):
         settings_manager: SettingsManager,
         student_workbook: Optional[StudentWorkbook],
         parent: Optional[QWidget] = None,
-        *,
-        defer_password_prompt: bool = False,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("点名 / 计时")
@@ -10248,66 +10401,49 @@ class RollCallTimerWindow(QWidget):
         self.setWindowFlags(flags)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.settings_manager = settings_manager
-        self._encrypted_file_path = self.ENCRYPTED_STUDENT_FILE
+        self._plain_file_path = self.STUDENT_FILE
         self.student_workbook: Optional[StudentWorkbook] = student_workbook
+        self._refresh_student_file_paths()
         base_dataframe: Optional[PandasDataFrame] = None
         if PANDAS_READY and self.student_workbook is not None:
             try:
                 base_dataframe = self.student_workbook.get_active_dataframe()
             except Exception:
-                base_dataframe = pd.DataFrame(columns=["学号", "姓名", "分组", "成绩"])
+                base_dataframe = _new_student_dataframe() or pd.DataFrame(columns=DEFAULT_STUDENT_COLUMNS)
         if base_dataframe is None and PANDAS_READY:
-            base_dataframe = pd.DataFrame(columns=["学号", "姓名", "分组", "成绩"])
+            base_dataframe = _new_student_dataframe() or pd.DataFrame(columns=DEFAULT_STUDENT_COLUMNS)
         self.student_data = base_dataframe
         self._student_data_pending_load = False
-        encrypted_state, encrypted_password = _get_session_student_encryption()
-        self._student_file_encrypted = bool(encrypted_state)
-        self._student_password = encrypted_password
-        if defer_password_prompt:
-            base_empty = True
-            if PANDAS_READY and isinstance(self.student_data, pd.DataFrame):
-                base_empty = getattr(self.student_data, "empty", True)
-            elif self.student_data is not None:
-                base_empty = False
-            if base_empty:
-                has_plain = _any_existing_path(self.STUDENT_FILE_CANDIDATES) is not None
-                has_encrypted = _any_existing_path(self.ENCRYPTED_STUDENT_FILE_CANDIDATES) is not None
-                if has_plain or has_encrypted:
-                    self._student_data_pending_load = True
-                    if self.student_data is None and PANDAS_READY:
-                        self.student_data = pd.DataFrame(columns=["学号", "姓名", "分组", "成绩"])
         try:
             self._rng = random.SystemRandom()
         except NotImplementedError:
             self._rng = random.Random()
 
-        s = self.settings_manager.load_settings().get("RollCallTimer", {})
-        def _get_int(key: str, default: int) -> int:
-            try:
-                return int(s.get(key, str(default)))
-            except (TypeError, ValueError):
-                return default
-        apply_geometry_from_text(self, s.get("geometry", "420x240+180+180"))
+        self.roll_call_config = self.settings_manager.get_roll_call_settings()
+        config = self.roll_call_config
+        apply_geometry_from_text(self, config.geometry)
         self.setMinimumSize(260, 160)
-        # 记录初始最小宽高，供后续还原窗口尺寸时使用
+        # 记录初始最小宽高，便于在调整后恢复默认限制
         self._base_minimum_width = self.minimumWidth()
         self._base_minimum_height = self.minimumHeight()
         self._ensure_min_width = self._base_minimum_width
         self._ensure_min_height = self._base_minimum_height
 
-        self.mode = s.get("mode", "roll_call") if s.get("mode", "roll_call") in {"roll_call", "timer"} else "roll_call"
+        # 打开窗口默认进入点名模式，避免计时模式影响首屏体验
+        saved_mode = str(config.mode).strip().lower()
+        self.mode = saved_mode if saved_mode in {"roll_call", "timer"} else "roll_call"
         self.timer_modes = ["countdown", "stopwatch", "clock"]
-        self.timer_mode_index = self.timer_modes.index(s.get("timer_mode", "countdown")) if s.get("timer_mode", "countdown") in self.timer_modes else 0
+        self.timer_mode_index = self.timer_modes.index(config.timer_mode) if config.timer_mode in self.timer_modes else 0
         self._active_timer_mode: Optional[str] = None
 
-        self.timer_countdown_minutes = _get_int("timer_countdown_minutes", 5)
-        self.timer_countdown_seconds = _get_int("timer_countdown_seconds", 0)
-        self.timer_sound_enabled = str_to_bool(s.get("timer_sound_enabled", "True"), True)
+        self.timer_countdown_minutes = config.timer_countdown_minutes
+        self.timer_countdown_seconds = config.timer_countdown_seconds
+        self.timer_sound_enabled = config.timer_sound_enabled
 
-        self.show_id = str_to_bool(s.get("show_id", "True"), True)
-        self.show_name = str_to_bool(s.get("show_name", "True"), True)
-        self.show_photo = str_to_bool(s.get("show_photo", "False"), False)
-        self.photo_duration_seconds = max(0, _get_int("photo_duration_seconds", 0))
+        self.show_id = config.show_id
+        self.show_name = config.show_name
+        self.show_photo = config.show_photo
+        self.photo_duration_seconds = max(0, config.photo_duration_seconds)
         if not (self.show_id or self.show_name):
             self.show_name = True
 
@@ -10318,8 +10454,8 @@ class RollCallTimerWindow(QWidget):
         self._photo_manual_hidden = False
         self._ensure_photo_root_directory()
 
-        self.current_class_name = str(s.get("current_class", "")).strip()
-        self.current_group_name = s.get("current_group", "全部")
+        self.current_class_name = str(config.current_class).strip()
+        self.current_group_name = config.current_group
         self.groups = ["全部"]
 
         self.current_student_index: Optional[int] = None
@@ -10335,41 +10471,39 @@ class RollCallTimerWindow(QWidget):
         self._global_drawn_students: set[int] = set()
         self._student_groups: Dict[int, set[str]] = {}
         self._class_roll_states: Dict[str, ClassRollState] = {}
-        self.timer_seconds_left = max(0, _get_int("timer_seconds_left", self.timer_countdown_minutes * 60 + self.timer_countdown_seconds))
-        self.timer_stopwatch_seconds = max(0, _get_int("timer_stopwatch_seconds", 0))
-        self.timer_running = str_to_bool(s.get("timer_running", "False"), False)
+        self.timer_seconds_left = max(0, config.timer_seconds_left)
+        self.timer_stopwatch_seconds = max(0, config.timer_stopwatch_seconds)
+        self.timer_running = bool(config.timer_running)
 
-        order_value = str(s.get("scoreboard_order", "rank")).strip().lower()
-        self.scoreboard_order = order_value if order_value in {"rank", "id"} else "rank"
-        saved_encrypted = str_to_bool(s.get("students_encrypted", bool_to_str(self._student_file_encrypted)), self._student_file_encrypted)
-        plain_exists = _any_existing_path(self.STUDENT_FILE_CANDIDATES) is not None
-        encrypted_exists = _any_existing_path(self.ENCRYPTED_STUDENT_FILE_CANDIDATES) is not None
-        disk_encrypted = encrypted_exists and not plain_exists
-        if disk_encrypted:
-            self._student_file_encrypted = True
-        elif not saved_encrypted:
-            self._student_file_encrypted = False
-            self._student_password = None
-
-        self.last_id_font_size = max(self.MIN_FONT_SIZE, _get_int("id_font_size", 48))
-        self.last_name_font_size = max(self.MIN_FONT_SIZE, _get_int("name_font_size", 60))
-        self.last_timer_font_size = max(self.MIN_FONT_SIZE, _get_int("timer_font_size", 56))
+        self.last_id_font_size = max(self.MIN_FONT_SIZE, int(config.id_font_size))
+        self.last_name_font_size = max(self.MIN_FONT_SIZE, int(config.name_font_size))
+        self.last_timer_font_size = max(self.MIN_FONT_SIZE, int(config.timer_font_size))
 
         self.count_timer = QTimer(self); self.count_timer.setInterval(1000); self.count_timer.timeout.connect(self._on_count_timer)
         self.clock_timer = QTimer(self); self.clock_timer.setInterval(1000); self.clock_timer.timeout.connect(self._update_clock)
 
         self.tts_manager: Optional[TTSManager] = None
-        self.speech_enabled = str_to_bool(s.get("speech_enabled", "False"), False)
-        self.selected_voice_id = s.get("speech_voice_id", "")
-        manager = TTSManager(self.selected_voice_id, parent=self)
-        self.tts_manager = manager
-        if not manager.available:
-            self.speech_enabled = False
+        self.speech_enabled = bool(config.speech_enabled)
+        self.selected_voice_id = config.speech_voice_id
+        self.selected_output_id = config.speech_output_id
+        self.selected_engine = (config.speech_engine or "pyttsx3").strip().lower()
+        self.tts_manager = None
+        if self.speech_enabled:
+            manager = TTSManager(
+                self.selected_voice_id,
+                self.selected_output_id,
+                preferred_engine=self.selected_engine,
+                parent=self,
+            )
+            self.tts_manager = manager
+            if not manager.available:
+                self.speech_enabled = False
         self._speech_issue_reported = False
         self._speech_check_scheduled = False
         self._pending_passive_student: Optional[int] = None
-        self._score_persist_failed = False
-        self._score_write_lock = threading.Lock()
+        self._settings_write_lock = QMutex()
+        self._student_data_loading = False
+        self._io_pool = QThreadPool.globalInstance()
 
         # QFontDatabase 在 Qt 6 中以静态方法为主，这里直接调用类方法避免实例化失败
         families_list = []
@@ -10393,17 +10527,19 @@ class RollCallTimerWindow(QWidget):
         self._save_timer.timeout.connect(self.save_settings)
 
         self._build_ui()
-        if self.student_workbook is not None and not self._student_data_pending_load:
+        if self.student_workbook is not None:
             self._apply_student_workbook(self.student_workbook, propagate=False)
         else:
             self._set_student_dataframe(self.student_data, propagate=False)
+        embedded_state = _consume_embedded_roll_state()
+        if embedded_state:
+            self.roll_call_config.class_states = embedded_state
         self._apply_saved_fonts()
         self._update_menu_state()
-        self._restore_group_state(s)
+        self._restore_group_state(config.to_mapping())
         self.update_mode_ui(force_timer_reset=self.mode == "timer")
         self.on_group_change(initial=True)
         self.display_current_student()
-        self._update_encryption_button()
 
     def _build_ui(self) -> None:
         self.setStyleSheet("background-color: #f4f5f7;")
@@ -10482,20 +10618,12 @@ class RollCallTimerWindow(QWidget):
         _lock_button_width(self.reset_button)
         control_layout.addWidget(self.reset_button)
 
-        self.showcase_button = QPushButton("展示"); _setup_secondary_button(self.showcase_button)
-        self.showcase_button.clicked.connect(self.show_scoreboard)
-        control_layout.addWidget(self.showcase_button)
-
-        self.encrypt_button = QPushButton(""); _setup_secondary_button(self.encrypt_button)
-        self.encrypt_button.clicked.connect(self._on_encrypt_button_clicked)
-        control_layout.addWidget(self.encrypt_button)
-
         top.addWidget(control_bar, 0, Qt.AlignmentFlag.AlignLeft)
         top.addStretch(1)
 
         self.menu_button = QToolButton(); self.menu_button.setText("..."); self.menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.menu_button.setFixedSize(toolbar_height, toolbar_height)
-        self.menu_button.setStyleSheet("font-size: 18px; padding-bottom: 6px;")
+        self.menu_button.setStyleSheet(StyleConfig.MENU_BUTTON_STYLE)
         self.main_menu = self._build_menu(); self.menu_button.setMenu(self.main_menu)
         top.addWidget(self.menu_button, 0, Qt.AlignmentFlag.AlignRight)
         toolbar_layout.addLayout(top)
@@ -10538,12 +10666,6 @@ class RollCallTimerWindow(QWidget):
         _lock_button_width(self.list_button)
         group_container_layout.addWidget(self.list_button, 0, Qt.AlignmentFlag.AlignLeft)
 
-        self.add_score_button = QPushButton("加分"); _setup_secondary_button(self.add_score_button)
-        self.add_score_button.setEnabled(False)
-        self.add_score_button.clicked.connect(self.increment_current_score)
-        self.add_score_button.setMinimumWidth(self.add_score_button.sizeHint().width())
-        group_container_layout.addWidget(self.add_score_button, 0, Qt.AlignmentFlag.AlignLeft)
-
         group_row.addWidget(group_container, 1, Qt.AlignmentFlag.AlignLeft)
         group_row.addStretch(1)
         toolbar_layout.addLayout(group_row)
@@ -10558,19 +10680,8 @@ class RollCallTimerWindow(QWidget):
             lab.setAlignment(Qt.AlignmentFlag.AlignCenter)
             lab.setStyleSheet("color: #ffffff; background-color: #1a73e8; border-radius: 8px; padding: 8px;")
             lab.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.score_label = QLabel("成绩：--")
-        self.score_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.score_label.setFont(QFont("Microsoft YaHei UI", 24, QFont.Weight.DemiBold))
-        self.score_label.setStyleSheet(
-            "color: #0b57d0;"
-            " background-color: #e8f0fe;"
-            " border-radius: 12px;"
-            " padding: 2px 16px;"
-            " margin: 0px;"
-        )
 
         rl.addWidget(self.id_label, 0, 0); rl.addWidget(self.name_label, 0, 1)
-        rl.addWidget(self.score_label, 1, 0, 1, 2)
         self.stack.addWidget(self.roll_call_frame)
 
         self.timer_frame = QWidget(); tl = QVBoxLayout(self.timer_frame); tl.setContentsMargins(6, 6, 6, 6); tl.setSpacing(8)
@@ -10586,7 +10697,7 @@ class RollCallTimerWindow(QWidget):
         self.timer_set_button = QPushButton("设定"); self.timer_set_button.clicked.connect(self.set_countdown_time)
         for b in (self.timer_mode_button, self.timer_start_pause_button, self.timer_reset_button, self.timer_set_button):
             b.setFont(compact_font)
-        timer_height = recommended_control_height(compact_font, extra=14, minimum=36)
+        timer_height = recommended_control_height(compact_font, extra=12, minimum=34)
         for b in (self.timer_mode_button, self.timer_start_pause_button, self.timer_reset_button, self.timer_set_button):
             apply_button_style(b, ButtonStyles.TOOLBAR, height=timer_height)
             b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -10596,80 +10707,86 @@ class RollCallTimerWindow(QWidget):
         self.roll_call_frame.clicked.connect(self.roll_student)
         self.id_label.installEventFilter(self); self.name_label.installEventFilter(self)
 
-    def _update_encryption_button(self) -> None:
-        if not hasattr(self, "encrypt_button"):
-            return
-        plain_exists = _any_existing_path(self.STUDENT_FILE_CANDIDATES) is not None
-        encrypted_exists = _any_existing_path(self.ENCRYPTED_STUDENT_FILE_CANDIDATES) is not None
-        disk_encrypted = encrypted_exists and not plain_exists
-        if disk_encrypted and not self._student_file_encrypted:
-            self._student_file_encrypted = True
-        elif not disk_encrypted and self._student_file_encrypted and not encrypted_exists:
-            self._student_file_encrypted = False
-            self._student_password = None
-        self.encrypt_button.setText("解密" if self._student_file_encrypted else "加密")
-        if self._student_file_encrypted:
-            self.encrypt_button.setToolTip("当前学生数据已加密，点击输入密码以解密或更新。")
-        else:
-            self.encrypt_button.setToolTip("点击为 students.xlsx 设置密码并生成加密文件。")
-
-    def _on_encrypt_button_clicked(self) -> None:
-        if self._student_file_encrypted:
-            self._handle_decrypt_student_file()
-        else:
-            self._handle_encrypt_student_file()
-
-    def _prompt_new_encryption_password(self) -> Optional[str]:
-        password, ok = PasswordSetupDialog.get_new_password(
-            self,
-            "设置加密密码",
-            "请输入新的加密密码：",
-            "请再次输入密码以确认：",
-        )
-        if not ok or not password:
-            show_quiet_information(self, "未能成功设置密码，已取消加密操作。")
+    def _refresh_student_file_paths(self) -> None:
+        def _prefer_dir(target_dir: str, paths: tuple[str, ...]) -> Optional[str]:
+            target = os.path.normcase(os.path.abspath(target_dir))
+            for path in paths:
+                if path and os.path.exists(path):
+                    if os.path.normcase(os.path.dirname(os.path.abspath(path))) == target:
+                        return path
             return None
-        return password
 
-    def _prompt_existing_encryption_password(self, title: str) -> Optional[str]:
-        attempts = 0
-        while attempts < 3:
-            password, ok = PasswordPromptDialog.get_password(
-                self,
-                title,
-                "请输入当前的加密密码：",
-                allow_empty=False,
-            )
-            if not ok:
-                return None
-            password = password.strip()
-            if not password:
-                show_quiet_information(self, "密码不能为空，请重新输入。")
-                attempts += 1
-                continue
-            return password
-        show_quiet_information(self, "密码输入次数过多，操作已取消。")
-        return None
+        module_dir = os.path.dirname(os.path.abspath(__file__))
+        cwd = os.path.abspath(os.getcwd())
+
+        existing_plain_current = getattr(self, "_plain_file_path", None)
+        if existing_plain_current and os.path.exists(existing_plain_current) and _ensure_writable_directory(os.path.dirname(existing_plain_current) or os.getcwd()):
+            current_plain = os.path.abspath(existing_plain_current)
+        else:
+            current_plain = None
+
+        existing_plain = (
+            current_plain
+            or _prefer_dir(module_dir, self.STUDENT_FILE_CANDIDATES)
+            or _prefer_dir(cwd, self.STUDENT_FILE_CANDIDATES)
+            or _any_existing_path(self.STUDENT_FILE_CANDIDATES)
+        )
+
+        def _writable_target(path: str) -> bool:
+            directory = os.path.dirname(path) or os.getcwd()
+            return _ensure_writable_directory(directory)
+
+        plain_path = self.STUDENT_FILE
+        if existing_plain and _writable_target(existing_plain):
+            plain_path = existing_plain
+
+        plain_dir = os.path.dirname(plain_path) or os.getcwd()
+        if not _ensure_writable_directory(plain_dir):
+            fallback_plain = os.path.join(os.getcwd(), os.path.basename(self.STUDENT_FILE))
+            if _ensure_writable_directory(os.path.dirname(fallback_plain) or os.getcwd()):
+                plain_path = fallback_plain
+
+        self._plain_file_path = plain_path
+    def _collect_group_names(self, df: PandasDataFrame) -> List[str]:
+        """Extract and normalize unique group names from the '分组' column."""
+
+        if df is None or df.empty:
+            return []
+        if "分组" not in df.columns:
+            return []
+        try:
+            group_series = df["分组"].dropna()
+        except Exception:
+            return []
+        if group_series.empty:
+            return []
+        try:
+            normalized = group_series.astype(str).str.strip().str.upper()
+            group_values = [g for g in normalized if g]
+        except Exception:
+            group_values = [
+                str(g).strip().upper()
+                for g in group_series
+                if str(g).strip()
+            ]
+        return sorted(set(group_values))
 
     def _set_student_dataframe(self, df: Optional[PandasDataFrame], *, propagate: bool = True) -> None:
         if not PANDAS_READY:
             self.student_data = df
             return
         if df is None:
-            df = pd.DataFrame(columns=["学号", "姓名", "分组", "成绩"])
+            df = _new_student_dataframe() or pd.DataFrame(columns=DEFAULT_STUDENT_COLUMNS)
         try:
             working = df.copy()
         except Exception:
             working = pd.DataFrame(df)
         self.student_data = working
         self.groups = ["全部"]
-        if not working.empty:
-            group_values = {
-                str(g).strip().upper()
-                for g in working.get("分组", pd.Series([], dtype="object")).dropna()
-                if str(g).strip()
-            }
-            self.groups.extend(sorted(group_values))
+        group_values = self._collect_group_names(working)
+        if group_values:
+            self.groups.extend(group_values)
+
         if self.current_group_name not in self.groups:
             self.current_group_name = "全部"
         self._group_all_indices = {}
@@ -10684,27 +10801,31 @@ class RollCallTimerWindow(QWidget):
         self._ensure_group_pool(self.current_group_name, force_reset=True)
         self.current_student_index = None
         self._pending_passive_student = None
-        self._restore_active_class_state()
+        self._restore_active_class_state(restore_current_student=False)
         self._store_active_class_state()
         self._update_class_button_label()
         if propagate:
             self._propagate_student_dataframe()
         self.display_current_student()
 
-    def _apply_student_workbook(self, workbook: StudentWorkbook, *, propagate: bool, reset_current: bool = False) -> None:
+    def _apply_student_workbook(self, workbook: StudentWorkbook, *, propagate: bool) -> None:
         self.student_workbook = workbook
         self._prune_orphan_class_states()
         if not PANDAS_READY:
             self.current_class_name = workbook.active_class
             self.student_data = None
             return
-        if self.current_class_name:
-            workbook.set_active_class(self.current_class_name)
-        self.current_class_name = workbook.active_class
+        # 优先使用当前窗口或配置中记录的班级名称，避免每次都回落到第一个工作表
+        target_class = (self.current_class_name or getattr(self, "roll_call_config", None).current_class if hasattr(self, "roll_call_config") else "")  # type: ignore[attr-defined]
+        target_class = str(target_class or "").strip()
+        if target_class and target_class in workbook.class_names():
+            workbook.set_active_class(target_class)
+        else:
+            # 没有有效记录时，保持 workbook 自身的 active_class
+            target_class = workbook.active_class
+        self.current_class_name = target_class
         df = workbook.get_active_dataframe()
         self._set_student_dataframe(df, propagate=propagate)
-        if reset_current:
-            self._clear_current_student_display()
 
     def _snapshot_current_class(self) -> None:
         if not PANDAS_READY:
@@ -10823,6 +10944,13 @@ class RollCallTimerWindow(QWidget):
     def _store_active_class_state(self, class_name: Optional[str] = None) -> None:
         if not PANDAS_READY:
             return
+
+        # --- 核心修复：如果处于“等待加载”状态，绝对禁止保存当前状态 ---
+        # 原因：此时内存中的是空白模板数据，保存它会覆盖掉配置文件中读取的真实历史记录。
+        if getattr(self, "_student_data_pending_load", False):
+            return
+        # ---------------------------------------------------------
+
         self._prune_orphan_class_states()
         target = (class_name or self._resolve_active_class_name()).strip()
         if not target:
@@ -10835,6 +10963,10 @@ class RollCallTimerWindow(QWidget):
     def _prune_orphan_class_states(self) -> None:
         if not self._class_roll_states:
             return
+        # 修复：数据未加载时，不知道哪些班级有效，禁止清理以保护历史记录
+        if getattr(self, "_student_data_pending_load", False):
+            return
+
         workbook = self.student_workbook
         if workbook is None:
             return
@@ -10890,7 +11022,7 @@ class RollCallTimerWindow(QWidget):
         }
         return ClassRollState.from_mapping(payload_map)
 
-    def _restore_active_class_state(self) -> None:
+    def _restore_active_class_state(self, *, restore_current_student: bool = False) -> None:
         if not PANDAS_READY:
             return
         class_name = self._resolve_active_class_name()
@@ -10899,7 +11031,7 @@ class RollCallTimerWindow(QWidget):
         snapshot = self._class_roll_states.get(class_name)
         if snapshot is None:
             return
-        self._apply_roll_state(snapshot)
+        self._apply_roll_state(snapshot, restore_current_student=restore_current_student)
 
     def _can_apply_roll_state(self) -> bool:
         """检查当前是否具备恢复点名状态所需的数据上下文。"""
@@ -10910,7 +11042,7 @@ class RollCallTimerWindow(QWidget):
             return False
         return isinstance(self.student_data, pd.DataFrame)
 
-    def _apply_roll_state(self, snapshot: ClassRollState) -> None:
+    def _apply_roll_state(self, snapshot: ClassRollState, *, restore_current_student: bool = True) -> None:
         if not self._can_apply_roll_state():
             return
 
@@ -10995,8 +11127,12 @@ class RollCallTimerWindow(QWidget):
                 return None
             return idx
 
-        self.current_student_index = _valid_index(snapshot.current_student)
-        self._pending_passive_student = _valid_index(snapshot.pending_student)
+        if restore_current_student:
+            self.current_student_index = _valid_index(snapshot.current_student)
+            self._pending_passive_student = _valid_index(snapshot.pending_student)
+        else:
+            self.current_student_index = None
+            self._pending_passive_student = None
 
         self._store_active_class_state(self._resolve_active_class_name())
 
@@ -11065,167 +11201,46 @@ class RollCallTimerWindow(QWidget):
         if not self._ensure_student_data_ready():
             return
         self._snapshot_current_class()
+        # 通过统一的 apply 流程切换班级，确保状态与 UI 同步
         self.student_workbook.set_active_class(target)
         self.current_class_name = target
-        self._apply_student_workbook(self.student_workbook, propagate=True, reset_current=True)
+        self._apply_student_workbook(self.student_workbook, propagate=True)
+        self._persist_roll_state_immediately()
         self._schedule_save()
-
-    def _create_new_class(self) -> None:
-        if not self._ensure_student_data_ready():
-            return
-        if self.student_workbook is None:
-            self.student_workbook = StudentWorkbook(OrderedDict(), active_class="")
-        if not PANDAS_READY:
-            show_quiet_information(self, "当前环境缺少 pandas，无法创建班级。")
-            return
-        self._snapshot_current_class()
-        suggested = f"班级{len(self.student_workbook.class_names()) + 1}" if self.student_workbook.class_names() else "班级1"
-        name, ok = QInputDialog.getText(
-            self,
-            "新建班级",
-            "请输入班级名称：",
-            QLineEdit.EchoMode.Normal,
-            suggested,
-        )
-        if not ok:
-            return
-        new_name = self.student_workbook.add_class(name)
-        self.current_class_name = new_name
-        self._apply_student_workbook(self.student_workbook, propagate=True, reset_current=True)
-        self._schedule_save()
-        self._update_class_button_label()
 
     def _load_student_data_if_needed(self) -> bool:
-        if not self._student_data_pending_load:
+        if self.student_workbook is not None:
             return True
+        if self._student_data_loading:
+            return False
         if not (PANDAS_AVAILABLE and OPENPYXL_AVAILABLE):
             return False
-        workbook = load_student_data(self)
+        self._student_data_loading = True
+        try:
+            workbook = load_student_data(self)
+        finally:
+            self._student_data_loading = False
         if workbook is None:
             return False
+        self.student_workbook = workbook
+        self._apply_student_workbook(workbook, propagate=True)
         self._student_data_pending_load = False
-        self._apply_student_workbook(workbook, propagate=True, reset_current=True)
-        encrypted_state, encrypted_password = _get_session_student_encryption()
-        self._student_file_encrypted = bool(encrypted_state)
-        self._student_password = encrypted_password
-        saved = self.settings_manager.load_settings().get("RollCallTimer", {})
-        self._restore_group_state(saved)
-        self._update_encryption_button()
         self._update_class_button_label()
         self.display_current_student()
         self._schedule_save()
         return True
-
-    def _handle_encrypt_student_file(self) -> None:
-        if not PANDAS_READY:
-            show_quiet_information(self, "当前环境缺少 pandas，无法执行加密。")
-            return
-        password = self._prompt_new_encryption_password()
-        if not password:
-            return
-        if not self._ensure_student_data_ready():
-            return
-        if self.student_workbook is None:
-            if self.student_data is None or not isinstance(self.student_data, pd.DataFrame):
-                show_quiet_information(self, "没有可加密的学生数据。")
-                return
-            try:
-                snapshot = self.student_data.copy()
-            except Exception:
-                snapshot = pd.DataFrame(self.student_data)
-            class_name = self.current_class_name or "班级1"
-            self.current_class_name = class_name
-            self.student_workbook = StudentWorkbook(
-                OrderedDict({class_name: snapshot}),
-                active_class=class_name,
-            )
-        else:
-            self._snapshot_current_class()
-        try:
-            data = self.student_workbook.as_dict()
-            _save_student_workbook(
-                data,
-                self.STUDENT_FILE,
-                self._encrypted_file_path,
-                encrypted=True,
-                password=password,
-                plain_candidates=self.STUDENT_FILE_CANDIDATES,
-                encrypted_candidates=self.ENCRYPTED_STUDENT_FILE_CANDIDATES,
-            )
-            _set_session_student_encryption(True, password)
-            self._student_file_encrypted = True
-            self._student_password = password
-            self._update_encryption_button()
-            self._propagate_student_dataframe()
-            self._update_class_button_label()
-            show_quiet_information(self, "已生成加密文件 students.xlsx.enc，并移除明文数据。")
-            self._schedule_save()
-        except Exception as exc:
-            show_quiet_information(self, f"加密失败：{exc}")
-
-    def _handle_decrypt_student_file(self) -> None:
-        encrypted_path = self._encrypted_file_path
-        if not os.path.exists(encrypted_path):
-            show_quiet_information(self, "未找到加密文件，无法解密。")
-            self._student_file_encrypted = False
-            self._update_encryption_button()
-            return
-        password = self._prompt_existing_encryption_password("解密学生数据")
-        if not password:
-            return
-        try:
-            with open(encrypted_path, "rb") as fh:
-                payload = fh.read()
-            plain_bytes = _decrypt_student_bytes(password, payload)
-        except Exception as exc:
-            show_quiet_information(self, f"解密失败：{exc}")
-            return
-        try:
-            buffer = io.BytesIO(plain_bytes)
-            raw_data = pd.read_excel(buffer, sheet_name=None)
-            workbook = StudentWorkbook(OrderedDict(raw_data), active_class="")
-        except Exception as exc:
-            show_quiet_information(self, f"读取解密后的学生数据失败：{exc}")
-            return
-        try:
-            _save_student_workbook(
-                workbook.as_dict(),
-                self.STUDENT_FILE,
-                self._encrypted_file_path,
-                encrypted=False,
-                password=None,
-                plain_candidates=self.STUDENT_FILE_CANDIDATES,
-                encrypted_candidates=self.ENCRYPTED_STUDENT_FILE_CANDIDATES,
-            )
-        except Exception as exc:
-            show_quiet_information(self, f"写入学生数据失败：{exc}")
-            return
-        self._student_file_encrypted = False
-        self._student_password = None
-        _set_session_student_encryption(False, None)
-        self._apply_decrypted_student_data(workbook)
-        self._update_encryption_button()
-        show_quiet_information(self, "已成功解密学生数据并恢复 students.xlsx。")
-        self._schedule_save()
-
-    def _apply_decrypted_student_data(self, workbook: StudentWorkbook) -> None:
-        if not PANDAS_READY:
-            return
-        self._apply_student_workbook(workbook, propagate=True, reset_current=True)
-        self.display_current_student()
-
     def _propagate_student_dataframe(self) -> None:
         parent = self.parent()
         if parent is None:
             return
         if hasattr(parent, "student_data"):
             try:
-                setattr(parent, "student_data", self.student_data)
+                parent.student_data = self.student_data  # type: ignore[assignment]
             except Exception:
                 pass
         if hasattr(parent, "student_workbook"):
             try:
-                setattr(parent, "student_workbook", self.student_workbook)
+                parent.student_workbook = self.student_workbook  # type: ignore[assignment]
             except Exception:
                 pass
 
@@ -11294,24 +11309,28 @@ class RollCallTimerWindow(QWidget):
         self.speech_enabled_action = speech.addAction("启用语音播报"); self.speech_enabled_action.setCheckable(True)
         self.speech_enabled_action.setChecked(checked); self.speech_enabled_action.toggled.connect(self._toggle_speech)
         self.voice_menu = speech.addMenu("选择发音人"); self.voice_actions = []
+        self.engine_menu = speech.addMenu("语音引擎")
+        self.engine_actions: List[QAction] = []
+        engine_choices = [
+            ("pyttsx3", "pyttsx3（默认，跟随系统输出）"),
+            ("sapi", "SAPI（win32com，可选输出设备）"),
+        ]
+        for key, label in engine_choices:
+            action = self.engine_menu.addAction(label)
+            action.setCheckable(True)
+            action.setData(key)
+            action.setChecked(key == self.selected_engine)
+            action.triggered.connect(lambda _checked=False, k=key: self._set_engine(k))
+            self.engine_actions.append(action)
+        self.output_menu = speech.addMenu("选择输出设备"); self.output_actions = []
         if manager and manager.available:
             self.speech_enabled_action.setEnabled(True)
             self.speech_enabled_action.setToolTip("点名时自动朗读当前学生姓名。")
-            if manager.supports_voice_selection and manager.voice_ids:
-                for vid in manager.voice_ids:
-                    act = self.voice_menu.addAction(vid); act.setCheckable(True); act.setChecked(vid == manager.current_voice_id)
-                    act.triggered.connect(lambda _c, v=vid: self._set_voice(v)); self.voice_actions.append(act)
-            else:
-                self.voice_menu.setEnabled(False)
-                self.voice_menu.setToolTip("当前语音引擎不支持切换发音人。")
+            self._refresh_voice_menu_actions(manager)
+            self._refresh_output_menu_actions(manager)
         else:
-            self.voice_menu.setEnabled(False)
-            self.speech_enabled_action.setEnabled(False)
-            reason, suggestions = self._collect_speech_issue_details()
-            tooltip_lines = [reason] if reason else []
-            tooltip_lines.extend(suggestions)
-            if tooltip_lines:
-                self.speech_enabled_action.setToolTip("\n".join(tooltip_lines))
+            self._disable_voice_menu_with_reason()
+            self._disable_output_menu_with_reason()
 
         menu.addSeparator()
         self.timer_sound_action = menu.addAction("倒计时结束提示音"); self.timer_sound_action.setCheckable(True)
@@ -11322,11 +11341,26 @@ class RollCallTimerWindow(QWidget):
         if self.show_id_action.isChecked() != self.show_id: self.show_id_action.setChecked(self.show_id)
         if self.show_name_action.isChecked() != self.show_name: self.show_name_action.setChecked(self.show_name)
         self.timer_sound_action.setChecked(self.timer_sound_enabled)
+        for action in getattr(self, "engine_actions", []):
+            if not isinstance(action, QAction):
+                continue
+            data = action.data()
+            try:
+                key = str(data) if data is not None else ""
+            except Exception:
+                key = ""
+            block = action.blockSignals(True)
+            action.setChecked(key == self.selected_engine)
+            action.blockSignals(block)
         manager = self.tts_manager
         if manager and manager.available:
             self.speech_enabled_action.setEnabled(True)
             self.speech_enabled_action.setChecked(self.speech_enabled)
             self.speech_enabled_action.setToolTip("点名时自动朗读当前学生姓名。")
+            if (manager.supports_voice_selection and manager.voice_ids) and not self.voice_actions:
+                self._refresh_voice_menu_actions(manager)
+            if (manager.supports_output_selection and manager.output_ids) and not self.output_actions:
+                self._refresh_output_menu_actions(manager)
             if manager.supports_voice_selection and manager.voice_ids:
                 self.voice_menu.setEnabled(True)
                 for act in self.voice_actions:
@@ -11335,17 +11369,77 @@ class RollCallTimerWindow(QWidget):
             else:
                 self.voice_menu.setEnabled(False)
                 self.voice_menu.setToolTip("当前语音引擎不支持切换发音人。")
+            if manager.supports_output_selection and manager.output_ids:
+                self.output_menu.setEnabled(True)
+                for act in self.output_actions:
+                    data = act.data()
+                    try:
+                        value = str(data) if data is not None else ""
+                    except Exception:
+                        value = ""
+                    act.setChecked(value == manager.current_output_id)
+                self.output_menu.setToolTip("")
+            else:
+                self._disable_output_menu_with_reason()
         else:
-            self.voice_menu.setEnabled(False)
-            self.speech_enabled_action.setEnabled(False)
-            self.speech_enabled_action.setChecked(False)
-            reason, suggestions = self._collect_speech_issue_details()
-            tooltip_lines = [reason] if reason else []
-            tooltip_lines.extend(suggestions)
-            if tooltip_lines:
-                self.speech_enabled_action.setToolTip("\n".join(tooltip_lines))
+            self._disable_voice_menu_with_reason()
+            self._disable_output_menu_with_reason()
             if not self._speech_issue_reported:
                 self._diagnose_speech_engine()
+
+    def _refresh_voice_menu_actions(self, manager: Optional["TTSManager"]) -> None:
+        """在语音引擎延迟初始化后重建发音人菜单，保持 UI 可用。"""
+
+        if manager is None or not manager.available or self.voice_menu is None:
+            return
+        self.voice_menu.clear()
+        self.voice_actions = []
+        if manager.supports_voice_selection and manager.voice_ids:
+            for vid in manager.voice_ids:
+                act = self.voice_menu.addAction(vid); act.setCheckable(True); act.setChecked(vid == manager.current_voice_id)
+                act.triggered.connect(lambda _c, v=vid: self._set_voice(v)); self.voice_actions.append(act)
+            self.voice_menu.setEnabled(True)
+            self.voice_menu.setToolTip("")
+        else:
+            self.voice_menu.setEnabled(False)
+            self.voice_menu.setToolTip("当前语音引擎不支持切换发音人。")
+
+    def _refresh_output_menu_actions(self, manager: Optional["TTSManager"]) -> None:
+        """刷新输出设备菜单，支持 win32com SAPI 输出切换。"""
+
+        if manager is None or not manager.available or self.output_menu is None:
+            return
+        self.output_menu.clear()
+        self.output_actions = []
+        if manager.supports_output_selection and manager.output_ids:
+            for oid in manager.output_ids:
+                label = manager._output_descriptions.get(oid, "") if hasattr(manager, "_output_descriptions") else ""
+                text = label or oid
+                act = self.output_menu.addAction(text)
+                act.setCheckable(True)
+                act.setData(oid)
+                act.setChecked(oid == manager.current_output_id)
+                act.triggered.connect(lambda _c, v=oid: self._set_output(v))
+                self.output_actions.append(act)
+            self.output_menu.setEnabled(True)
+            self.output_menu.setToolTip("")
+        else:
+            self._disable_output_menu_with_reason()
+
+    def _disable_voice_menu_with_reason(self) -> None:
+        self.voice_menu.setEnabled(False)
+        self.speech_enabled_action.setEnabled(False)
+        self.speech_enabled_action.setChecked(False)
+        reason, suggestions = self._collect_speech_issue_details()
+        tooltip_lines = [reason] if reason else []
+        tooltip_lines.extend(suggestions)
+        if tooltip_lines:
+            self.speech_enabled_action.setToolTip("\n".join(tooltip_lines))
+
+    def _disable_output_menu_with_reason(self) -> None:
+        if hasattr(self, "output_menu") and self.output_menu is not None:
+            self.output_menu.setEnabled(False)
+            self.output_menu.setToolTip("当前语音引擎不支持切换输出设备。")
 
     def _default_speech_suggestions(self) -> List[str]:
         hints: List[str] = []
@@ -11398,7 +11492,12 @@ class RollCallTimerWindow(QWidget):
                 manager.shutdown()
             except Exception:
                 pass
-        manager = TTSManager(self.selected_voice_id, parent=self)
+        manager = TTSManager(
+            self.selected_voice_id,
+            self.selected_output_id,
+            preferred_engine=self.selected_engine,
+            parent=self,
+        )
         self.tts_manager = manager
         if manager.available:
             self._speech_issue_reported = False
@@ -11515,17 +11614,40 @@ class RollCallTimerWindow(QWidget):
         for a in self.voice_actions: a.setChecked(a.text() == voice_id)
         self._schedule_save()
 
-    def _toggle_timer_sound(self, enabled: bool) -> None:
-        self.timer_sound_enabled = enabled
+    def _set_output(self, output_id: str) -> None:
+        manager = self._ensure_speech_manager()
+        if not manager or not manager.supports_output_selection:
+            return
+        manager.set_output(output_id)
+        self.selected_output_id = output_id
+        for a in self.output_actions:
+            data = a.data()
+            try:
+                value = str(data) if data is not None else ""
+            except Exception:
+                value = ""
+            a.setChecked(value == output_id)
         self._schedule_save()
 
-    def _set_scoreboard_order(self, order: str) -> None:
-        normalized = str(order).strip().lower()
-        if normalized not in {"rank", "id"}:
+    def _set_engine(self, engine: str) -> None:
+        engine = (engine or "pyttsx3").strip().lower()
+        if engine == self.selected_engine:
             return
-        if self.scoreboard_order == normalized:
-            return
-        self.scoreboard_order = normalized
+        self.selected_engine = engine
+        self._speech_issue_reported = False
+        if self.tts_manager is not None:
+            try:
+                self.tts_manager.shutdown()
+            except Exception:
+                pass
+        self.tts_manager = None
+        if self.speech_enabled:
+            self._ensure_speech_manager()
+        self._update_menu_state()
+        self._schedule_save()
+
+    def _toggle_timer_sound(self, enabled: bool) -> None:
+        self.timer_sound_enabled = enabled
         self._schedule_save()
 
     def _speak_text(self, text: str) -> None:
@@ -11561,43 +11683,54 @@ class RollCallTimerWindow(QWidget):
     def show_student_selector(self) -> None:
         if self.mode != "roll_call":
             return
-        if not (PANDAS_READY and isinstance(self.student_data, pd.DataFrame)):
-            show_quiet_information(self, "暂无学生数据，无法显示名单。")
-            return
-        if getattr(self.student_data, "empty", True):
+        if self.student_data is None or self.student_data.empty:
             show_quiet_information(self, "暂无学生数据，无法显示名单。")
             return
         records: List[tuple[int, str, str, int]] = []
-        try:
-            for idx, row in self.student_data.iterrows():
-                sid_value = row.get("学号", "")
-                sid_display = re.sub(r"\s+", "", _normalize_text(sid_value))
-                name = re.sub(r"\s+", "", _normalize_text(row.get("姓名", "")))
-                try:
-                    sort_key = int(sid_display) if sid_display else sys.maxsize
-                except (TypeError, ValueError):
-                    sort_key = sys.maxsize
-                records.append((sort_key, sid_display, name, idx))
-        except Exception as exc:
-            show_quiet_information(self, f"显示学生名单时出错：{exc}")
-            return
+        for idx, row in self.student_data.iterrows():
+            try:
+                normalized_idx = int(idx)
+            except (TypeError, ValueError):
+                normalized_idx = idx
+            sid_value = row.get("学号", "")
+            sid_display = re.sub(r"\s+", "", _normalize_text(sid_value))
+            name = re.sub(r"\s+", "", _normalize_text(row.get("姓名", "")))
+            try:
+                sort_key = int(sid_display) if sid_display else sys.maxsize
+            except (TypeError, ValueError):
+                sort_key = sys.maxsize
+            records.append((sort_key, sid_display, name, normalized_idx))
         if not records:
             show_quiet_information(self, "当前没有可显示的学生名单。")
             return
         records.sort(key=lambda item: (item[0], item[1]))
+
+        group_name = self.current_group_name or "全部"
+        base_indices = set(self._collect_base_indices(self._group_all_indices.get(group_name, [])))
+        called_set: set[int] = set()
+        if group_name == "全部":
+            called_set = set(self._global_drawn_students)
+            if not base_indices:
+                base_indices = set(self._collect_base_indices(self._group_all_indices.get("全部", [])))
+        else:
+            called_set = set(self._group_drawn_history.get(group_name, set()))
+            if not base_indices:
+                base_indices = set(self._collect_base_indices(self._group_all_indices.get("全部", [])))
+            called_set.update(idx for idx in self._global_drawn_students if idx in base_indices)
+        if base_indices:
+            called_set = {idx for idx in called_set if idx in base_indices}
+
         dialog_data = []
         for _, sid, name, data_idx in records:
             display_sid = sid if sid else "无学号"
             display_name = name or "未命名"
-            dialog_data.append((display_sid, display_name, data_idx))
-        remaining_set: Set[int] = set()
-        group_name = self.current_group_name
-        if group_name not in self._group_remaining_indices and "全部" in self._group_remaining_indices:
-            group_name = "全部"
-        pool = self._group_remaining_indices.get(group_name)
-        if pool:
-            remaining_set = set(pool)
-        dialog = StudentListDialog(self, dialog_data, remaining_set)
+            called = False
+            try:
+                called = int(data_idx) in called_set
+            except (TypeError, ValueError):
+                called = data_idx in called_set
+            dialog_data.append((display_sid, display_name, data_idx, called))
+        dialog = StudentListDialog(self, dialog_data)
         if dialog.exec() == QDialog.DialogCode.Accepted and dialog.selected_index is not None:
             selected = dialog.selected_index
             if selected in self.student_data.index:
@@ -11605,101 +11738,6 @@ class RollCallTimerWindow(QWidget):
                 self._pending_passive_student = None
                 self.display_current_student()
                 self._announce_current_student()
-
-    def increment_current_score(self) -> None:
-        if self.mode != "roll_call":
-            return
-        if self.current_student_index is None:
-            show_quiet_information(self, "请先选择需要加分的学生。")
-            return
-        if self.student_data is None:
-            return
-        if "成绩" not in self.student_data.columns:
-            self.student_data["成绩"] = 0
-        value = self.student_data.at[self.current_student_index, "成绩"]
-        try:
-            base = int(value)
-        except (TypeError, ValueError):
-            base = 0
-        new_score = base + 1
-        self.student_data.at[self.current_student_index, "成绩"] = new_score
-        self._pending_passive_student = None
-        self._update_score_display()
-        self._persist_student_scores()
-        self._speak_text("加分")
-
-    def show_scoreboard(self) -> None:
-        if self.mode != "roll_call":
-            return
-        if self.student_data is None or self.student_data.empty:
-            show_quiet_information(self, "暂无学生数据，无法展示成绩。")
-            return
-        if "成绩" not in self.student_data.columns:
-            self.student_data["成绩"] = 0
-        records: List[tuple[str, str, int]] = []
-        for _, row in self.student_data.iterrows():
-            sid_value = row.get("学号", "")
-            sid_display = re.sub(r"\s+", "", _normalize_text(sid_value))
-            name = re.sub(r"\s+", "", _normalize_text(row.get("姓名", ""))) or "未命名"
-            value = row.get("成绩", 0)
-            try:
-                score = int(value)
-            except (TypeError, ValueError):
-                score = 0
-            records.append((sid_display, name, score))
-        try:
-            dialog = ScoreboardDialog(
-                self,
-                records,
-                order=self.scoreboard_order,
-                order_changed=self._set_scoreboard_order,
-            )
-        except Exception as exc:
-            traceback.print_exc()
-            show_quiet_information(self, f"打开成绩展示窗口时出错：{exc}")
-            return
-        dialog.exec()
-
-    def _persist_student_scores(self) -> None:
-        if not (PANDAS_AVAILABLE and OPENPYXL_AVAILABLE):
-            return
-        if not self._ensure_student_data_ready():
-            return
-        if self.student_workbook is None:
-            if self.student_data is None or not isinstance(self.student_data, pd.DataFrame):
-                return
-            try:
-                snapshot = self.student_data.copy()
-            except Exception:
-                snapshot = pd.DataFrame(self.student_data)
-            class_name = self.current_class_name or "班级1"
-            self.current_class_name = class_name
-            self.student_workbook = StudentWorkbook(
-                OrderedDict({class_name: snapshot}),
-                active_class=class_name,
-            )
-        else:
-            self._snapshot_current_class()
-        if self.student_workbook is None:
-            return
-        try:
-            with self._score_write_lock:
-                data = self.student_workbook.as_dict()
-                _save_student_workbook(
-                    data,
-                    self.STUDENT_FILE,
-                    self._encrypted_file_path,
-                    encrypted=self._student_file_encrypted,
-                    password=self._student_password,
-                    plain_candidates=self.STUDENT_FILE_CANDIDATES,
-                    encrypted_candidates=self.ENCRYPTED_STUDENT_FILE_CANDIDATES,
-                )
-            self._score_persist_failed = False
-            self._update_class_button_label()
-        except Exception as exc:
-            if not self._score_persist_failed:
-                show_quiet_information(self, f"保存成绩失败：{exc}")
-                self._score_persist_failed = True
 
     def toggle_mode(self) -> None:
         self.mode = "timer" if self.mode == "roll_call" else "roll_call"
@@ -11722,8 +11760,6 @@ class RollCallTimerWindow(QWidget):
             self.group_container.setVisible(is_roll)
         if hasattr(self, "group_bar"):
             self.group_bar.setVisible(is_roll)
-        if hasattr(self, "add_score_button"):
-            self.add_score_button.setVisible(is_roll)
         self._update_roll_call_controls()
         self._update_class_button_label()
         if is_roll:
@@ -11744,8 +11780,6 @@ class RollCallTimerWindow(QWidget):
                 self._schedule_save()
             self.schedule_font_update()
             self._hide_student_photo(force=True)
-        if hasattr(self, "encrypt_button"):
-            self.encrypt_button.setVisible(is_roll)
         if hasattr(self, "reset_button"):
             self.reset_button.setVisible(is_roll)
         self.updateGeometry()
@@ -12136,7 +12170,7 @@ class RollCallTimerWindow(QWidget):
             self._ensure_group_pool(self.current_group_name)
             return
 
-        self._apply_roll_state(snapshot)
+        self._apply_roll_state(snapshot, restore_current_student=False)
         sanitized = self._capture_roll_state()
         if sanitized is not None and active_class:
             self._class_roll_states[active_class] = sanitized
@@ -12316,7 +12350,7 @@ class RollCallTimerWindow(QWidget):
         self._global_drawn_students = set(new_global)
         self._group_drawn_history["全部"] = self._global_drawn_students
 
-        for group, (base_list, base_set) in subgroup_base.items():
+        for group, (_base_list, base_set) in subgroup_base.items():
             pool = subgroup_remaining.get(group, [])
             filtered = [idx for idx in pool if idx in base_set and idx not in self._global_drawn_students]
             if filtered != pool:
@@ -12366,18 +12400,9 @@ class RollCallTimerWindow(QWidget):
             if not self.show_name: self.name_label.setText("")
             photo_student_id = sid or None
         self.update_display_layout()
-        self._update_score_display()
         self._update_roll_call_controls()
         self.schedule_font_update()
         self._maybe_show_student_photo(photo_student_id)
-
-    def _clear_current_student_display(self) -> None:
-        """Reset the visible student information to the placeholder."""
-
-        self.current_student_index = None
-        self._pending_passive_student = None
-        self._placeholder_on_show = False
-        self.display_current_student()
 
     def update_display_layout(self) -> None:
         self.id_label.setVisible(self.show_id); self.name_label.setVisible(self.show_name)
@@ -12512,7 +12537,7 @@ class RollCallTimerWindow(QWidget):
         text = str(value or "").strip()
         if not text:
             return ""
-        sanitized = re.sub(r"[^\w\u4e00-\u9fff-]+", "_", text)
+        sanitized = _PHOTO_SEGMENT_SANITIZER.sub("_", text)
         sanitized = sanitized.strip("_")
         return sanitized or "default"
 
@@ -12553,45 +12578,18 @@ class RollCallTimerWindow(QWidget):
             button.setChecked(name == active_group)
             button.blockSignals(block)
 
-    def _update_score_display(self) -> None:
-        if not hasattr(self, "score_label"):
-            return
-        if (
-            self.current_student_index is None
-            or self.student_data is None
-            or self.student_data.empty
-            or "成绩" not in self.student_data.columns
-        ):
-            self.score_label.setText("成绩：--")
-            return
-        value = self.student_data.at[self.current_student_index, "成绩"]
-        try:
-            score = int(value)
-        except (TypeError, ValueError):
-            score = 0
-        self.score_label.setText(f"成绩：{score}")
-
     def _update_roll_call_controls(self) -> None:
-        if not all(hasattr(self, attr) for attr in ("list_button", "add_score_button", "showcase_button")):
+        if not hasattr(self, "list_button"):
             return
         is_roll = self.mode == "roll_call"
         self.list_button.setVisible(is_roll)
-        self.add_score_button.setVisible(is_roll)
-        self.showcase_button.setVisible(is_roll)
-        self.score_label.setVisible(is_roll)
-        has_student = self.current_student_index is not None
         has_data = self.student_data is not None and not getattr(self.student_data, "empty", True)
-        self.add_score_button.setEnabled(is_roll and has_student)
         self.list_button.setEnabled(is_roll and has_data)
-        self.showcase_button.setEnabled(is_roll and has_data)
         if hasattr(self, "class_button"):
             has_workbook = self.student_workbook is not None and not self.student_workbook.is_empty()
             can_select = is_roll and (has_workbook or self._student_data_pending_load)
             self.class_button.setVisible(is_roll)
             self.class_button.setEnabled(can_select)
-        if hasattr(self, "encrypt_button"):
-            self.encrypt_button.setVisible(is_roll)
-            self.encrypt_button.setEnabled(is_roll and has_data)
         if hasattr(self, "reset_button"):
             self.reset_button.setEnabled(is_roll and has_data)
 
@@ -12612,12 +12610,6 @@ class RollCallTimerWindow(QWidget):
             else:
                 lab.setFont(QFont("Microsoft YaHei UI", size, QFont.Weight.Bold))
                 self.last_id_font_size = size
-        if hasattr(self, "score_label") and self.score_label.isVisible():
-            base = name_font_size if name_font_size > 0 else self.last_name_font_size
-            if base <= 0:
-                base = self.MIN_FONT_SIZE * 4
-            score_size = max(1, int(round(base / 4)))
-            self.score_label.setFont(QFont("Microsoft YaHei UI", score_size, QFont.Weight.Bold))
         if self.timer_frame.isVisible():
             text = self.time_display_label.text()
             w = max(60, self.time_display_label.width())
@@ -12684,41 +12676,58 @@ class RollCallTimerWindow(QWidget):
             self._save_timer.stop()
         self._save_timer.start()
 
+    def _threaded_save_settings(self, payload: Dict[str, Dict[str, str]]) -> bool:
+        locker = QMutexLocker(self._settings_write_lock)
+        try:
+            self.settings_manager.save_settings(payload)
+        finally:
+            del locker
+        return True
+
+    def _queue_settings_save(self, settings: Dict[str, Dict[str, str]]) -> None:
+        worker = _IOWorker(self._threaded_save_settings, settings)
+
+        def _log_error(message: str, _exc: object) -> None:
+            logger.error("Failed to persist settings: %s", message)
+
+        worker.signals.error.connect(_log_error)
+        self._io_pool.start(worker)
+
     def save_settings(self) -> None:
         if self._save_timer.isActive():
             self._save_timer.stop()
-        settings = self.settings_manager.load_settings()
-        sec = settings.get("RollCallTimer", {})
-        sec["geometry"] = geometry_to_text(self)
-        sec["show_id"] = bool_to_str(self.show_id)
-        sec["show_name"] = bool_to_str(self.show_name)
-        sec["show_photo"] = bool_to_str(self.show_photo)
-        sec["photo_duration_seconds"] = str(int(self.photo_duration_seconds))
-        sec["speech_enabled"] = bool_to_str(self.speech_enabled)
-        sec["speech_voice_id"] = self.selected_voice_id
-        sec["current_class"] = self.current_class_name
-        sec["current_group"] = self.current_group_name
-        sec["timer_countdown_minutes"] = str(self.timer_countdown_minutes)
-        sec["timer_countdown_seconds"] = str(self.timer_countdown_seconds)
-        sec["timer_sound_enabled"] = bool_to_str(self.timer_sound_enabled)
-        sec["mode"] = self.mode
-        sec["timer_mode"] = self.timer_modes[self.timer_mode_index]
-        sec["timer_seconds_left"] = str(self.timer_seconds_left)
-        sec["timer_stopwatch_seconds"] = str(self.timer_stopwatch_seconds)
-        sec["timer_running"] = bool_to_str(self.timer_running)
-        sec["id_font_size"] = str(self.last_id_font_size)
-        sec["name_font_size"] = str(self.last_name_font_size)
-        sec["timer_font_size"] = str(self.last_timer_font_size)
-        sec["scoreboard_order"] = self.scoreboard_order
-        sec["students_encrypted"] = bool_to_str(self._student_file_encrypted)
+        self.roll_call_config.geometry = geometry_to_text(self)
+        self.roll_call_config.show_id = bool(self.show_id)
+        self.roll_call_config.show_name = bool(self.show_name)
+        self.roll_call_config.show_photo = bool(self.show_photo)
+        self.roll_call_config.photo_duration_seconds = int(self.photo_duration_seconds)
+        self.roll_call_config.speech_enabled = bool(self.speech_enabled)
+        self.roll_call_config.speech_voice_id = self.selected_voice_id
+        self.roll_call_config.speech_output_id = self.selected_output_id
+        self.roll_call_config.speech_engine = self.selected_engine
+        self.roll_call_config.current_class = self.current_class_name
+        self.roll_call_config.current_group = self.current_group_name
+        self.roll_call_config.timer_countdown_minutes = int(self.timer_countdown_minutes)
+        self.roll_call_config.timer_countdown_seconds = int(self.timer_countdown_seconds)
+        self.roll_call_config.timer_sound_enabled = bool(self.timer_sound_enabled)
+        self.roll_call_config.mode = self.mode
+        self.roll_call_config.timer_mode = self.timer_modes[self.timer_mode_index]
+        self.roll_call_config.timer_seconds_left = int(self.timer_seconds_left)
+        self.roll_call_config.timer_stopwatch_seconds = int(self.timer_stopwatch_seconds)
+        self.roll_call_config.timer_running = bool(self.timer_running)
+        self.roll_call_config.id_font_size = int(self.last_id_font_size)
+        self.roll_call_config.name_font_size = int(self.last_name_font_size)
+        self.roll_call_config.timer_font_size = int(self.last_timer_font_size)
         self._prune_orphan_class_states()
         if not self._student_data_pending_load:
             self._store_active_class_state()
-        sec["class_states"] = self._encode_class_states()
+        self.roll_call_config.class_states = self._encode_class_states()
         if self._student_data_pending_load:
             # 在尚未加载真实名单数据时，保留磁盘上已有的未点名状态，避免误把占位空列表写回
             # 此时直接返回，保持上一轮保存的名单信息不被覆盖。
-            settings["RollCallTimer"] = sec
+            payload = self.roll_call_config.to_mapping()
+            settings = self.settings_manager.load_settings()
+            settings["RollCallTimer"] = payload
             self.settings_manager.save_settings(settings)
             return
 
@@ -12744,20 +12753,86 @@ class RollCallTimerWindow(QWidget):
                 except (TypeError, ValueError):
                     last_payload[group] = None
         try:
-            sec["group_remaining"] = json.dumps(remaining_payload, ensure_ascii=False)
+            self.roll_call_config.group_remaining = json.dumps(remaining_payload, ensure_ascii=False)
         except TypeError:
-            sec["group_remaining"] = json.dumps({}, ensure_ascii=False)
+            self.roll_call_config.group_remaining = json.dumps({}, ensure_ascii=False)
         try:
-            sec["group_last"] = json.dumps(last_payload, ensure_ascii=False)
+            self.roll_call_config.group_last = json.dumps(last_payload, ensure_ascii=False)
         except TypeError:
-            sec["group_last"] = json.dumps({}, ensure_ascii=False)
+            self.roll_call_config.group_last = json.dumps({}, ensure_ascii=False)
         try:
             global_drawn_payload = sorted(int(idx) for idx in self._global_drawn_students)
-            sec["global_drawn"] = json.dumps(global_drawn_payload, ensure_ascii=False)
+            self.roll_call_config.global_drawn = json.dumps(global_drawn_payload, ensure_ascii=False)
         except TypeError:
-            sec["global_drawn"] = json.dumps([], ensure_ascii=False)
-        settings["RollCallTimer"] = sec
+            self.roll_call_config.global_drawn = json.dumps([], ensure_ascii=False)
+        settings = self.settings_manager.load_settings()
+        settings["RollCallTimer"] = self.roll_call_config.to_mapping()
+        self._queue_settings_save(settings)
+        self._persist_roll_state_to_workbook()
+
+    def _persist_roll_state_immediately(self) -> None:
+        """立即抓取并写入点名状态，避免切班或退出时状态丢失。"""
+
+        if not PANDAS_READY:
+            return
+        if getattr(self, "_student_data_pending_load", False):
+            # 等待真实数据加载时不写入，避免用占位数据覆盖历史状态
+            return
+        snapshot = self._capture_roll_state()
+        if snapshot is None:
+            return
+        active_class = self._resolve_active_class_name()
+        if active_class:
+            self._class_roll_states[active_class] = snapshot
+        self.roll_call_config.class_states = self._encode_class_states()
+        settings = self.settings_manager.load_settings()
+        settings["RollCallTimer"] = self.roll_call_config.to_mapping()
         self.settings_manager.save_settings(settings)
+        self._persist_roll_state_to_workbook()
+
+    def _persist_roll_state_to_workbook(self) -> None:
+        """将当前点名状态嵌入学生数据文件。"""
+
+        if not PANDAS_READY:
+            return
+        if getattr(self, "_student_data_pending_load", False):
+            # 尚未加载实际数据时跳过写入，避免把占位状态写入磁盘
+            return
+        if not self._ensure_student_data_ready():
+            return
+        roll_state_json = self._encode_class_states()
+        if roll_state_json is None:
+            return
+        if self.student_workbook is None:
+            if self.student_data is None or not isinstance(self.student_data, pd.DataFrame):
+                return
+            try:
+                snapshot = self.student_data.copy()
+            except Exception:
+                snapshot = pd.DataFrame(self.student_data)
+            class_name = self.current_class_name or "班级1"
+            self.current_class_name = class_name
+            self.student_workbook = StudentWorkbook(
+                OrderedDict({class_name: snapshot}),
+                active_class=class_name,
+            )
+        else:
+            self._snapshot_current_class()
+        if self.student_workbook is None:
+            return
+        try:
+            data = self.student_workbook.as_dict()
+        except Exception:
+            return
+        self._refresh_student_file_paths()
+        try:
+            _save_student_workbook(
+                data,
+                self._plain_file_path,
+                roll_state_json=roll_state_json,
+            )
+        except Exception as exc:
+            logger.debug("Failed to persist roll state into workbook: %s", exc, exc_info=True)
 
 
 # ---------- 关于 ----------
@@ -12798,250 +12873,86 @@ class AboutDialog(_EnsureOnScreenMixin, QDialog):
             pass
 
 # ---------- 数据 ----------
-_ENCRYPTED_MAGIC = b"CTS1"
+def _write_student_workbook(
+    file_path: str,
+    data: Mapping[str, PandasDataFrame],
+    roll_state_json: Optional[str] = None,
+) -> None:
+    """Write the provided workbook mapping to *file_path* atomically."""
+
+    payload = _export_student_workbook_bytes(data, roll_state_json=roll_state_json)
+    _atomic_write_bytes(file_path, payload, suffix=".xlsx", description="workbook")
 
 
-def _derive_stream_keys(password: str, salt: bytes) -> tuple[bytes, bytes]:
-    material = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 120000, dklen=64)
-    return material[:32], material[32:]
+def _read_student_workbook(
+    existing_plain: Optional[str],
+    plain_file_path: str,
+) -> Tuple[Optional[StudentWorkbook], bool, Optional[str]]:
+    """Load student data from an existing Excel file or create a template."""
 
+    if not (PANDAS_AVAILABLE and OPENPYXL_AVAILABLE):
+        raise RuntimeError("缺少 pandas 和 openpyxl")
 
-def _generate_keystream(stream_key: bytes, length: int) -> bytes:
-    output = bytearray()
-    counter = 0
-    while len(output) < length:
-        block = hashlib.sha256(stream_key + counter.to_bytes(8, "big")).digest()
-        output.extend(block)
-        counter += 1
-    return bytes(output[:length])
+    def _ensure_readable_student_file(path: Optional[str], label: str) -> str:
+        normalized = os.path.abspath(path or "")
+        if not path or not os.path.isfile(normalized):
+            raise FileNotFoundError(f"{label}不存在或不可访问: {normalized}")
+        return normalized
 
+    created_template = False
+    embedded_roll_state: Optional[str] = None
 
-def _encrypt_student_bytes(password: str, data: bytes) -> bytes:
-    if not password:
-        raise ValueError("缺少加密密码")
-    salt = os.urandom(16)
-    stream_key, mac_key = _derive_stream_keys(password, salt)
-    keystream = _generate_keystream(stream_key, len(data))
-    cipher = bytes(b ^ k for b, k in zip(data, keystream))
-    tag = hmac.new(mac_key, cipher, hashlib.sha256).digest()
-    return _ENCRYPTED_MAGIC + salt + tag + cipher
+    target_path = existing_plain or plain_file_path
+    if not target_path or not os.path.exists(target_path):
+        template = pd.DataFrame(
+            {
+                "学号": [101, 102, 103],
+                "姓名": ["张三", "李四", "王五"],
+                "班级": ["A", "B", "A"],
+                "分组": ["一组", "二组", "一组"],
+            }
+        )
+        workbook = StudentWorkbook(OrderedDict({"班级1": template}), active_class="班级1")
+        _save_student_workbook(
+            workbook.as_dict(),
+            plain_file_path,
+            roll_state_json=None,
+        )
+        created_template = True
+        return workbook, created_template, embedded_roll_state
 
+    read_path = _ensure_readable_student_file(target_path, "学生数据文件")
 
-def _decrypt_student_bytes(password: str, blob: bytes) -> bytes:
-    if not blob.startswith(_ENCRYPTED_MAGIC) or len(blob) <= len(_ENCRYPTED_MAGIC) + 48:
-        raise ValueError("文件格式无效")
-    salt = blob[len(_ENCRYPTED_MAGIC): len(_ENCRYPTED_MAGIC) + 16]
-    tag = blob[len(_ENCRYPTED_MAGIC) + 16: len(_ENCRYPTED_MAGIC) + 48]
-    cipher = blob[len(_ENCRYPTED_MAGIC) + 48:]
-    stream_key, mac_key = _derive_stream_keys(password, salt)
-    expected_tag = hmac.new(mac_key, cipher, hashlib.sha256).digest()
-    if not hmac.compare_digest(expected_tag, tag):
-        raise ValueError("密码错误或文件已损坏")
-    keystream = _generate_keystream(stream_key, len(cipher))
-    return bytes(b ^ k for b, k in zip(cipher, keystream))
-
-
-def _normalize_text(value: object) -> str:
-    if PANDAS_READY:
-        if pd.isna(value):
-            return ""
-    else:
-        if value is None:
-            return ""
-        if isinstance(value, float) and math.isnan(value):
-            return ""
-        if isinstance(value, str) and not value:
-            return ""
-    text = str(value).strip()
-    lowered = text.lower()
-    if lowered in {"nan", "none", "nat"}:
-        return ""
-    return text
-
-
-def _normalize_student_dataframe(
-    df: PandasDataFrame,
-    *,
-    drop_incomplete: bool = True,
-) -> PandasDataFrame:
-    if not PANDAS_READY:
-        return df.copy()
-
-    normalized = df.copy()
-    for column in ("学号", "姓名", "分组", "成绩"):
-        if column not in normalized.columns:
-            normalized[column] = pd.NA
-
-    normalized["姓名"] = normalized["姓名"].apply(lambda v: re.sub(r"\s+", "", _normalize_text(v)))
-    normalized["分组"] = normalized["分组"].apply(lambda v: re.sub(r"\s+", "", _normalize_text(v))).str.upper()
-
-    id_series = normalized["学号"].apply(lambda v: re.sub(r"\s+", "", _normalize_text(v)))
-    id_numeric = pd.to_numeric(id_series.replace("", pd.NA), errors="coerce")
-    if not id_numeric.empty:
-        fractional_mask = id_numeric.notna() & (id_numeric != id_numeric.round())
-        id_numeric = id_numeric.where(~fractional_mask)
-    normalized["学号"] = id_numeric.round().astype("Int64")
-
-    score_series = normalized["成绩"].apply(lambda v: re.sub(r"\s+", "", _normalize_text(v)))
-    score_numeric = pd.to_numeric(score_series.replace("", pd.NA), errors="coerce").fillna(0)
-    score_numeric = score_numeric.round()
-    normalized["成绩"] = score_numeric.astype("Int64")
-
-    for column in normalized.select_dtypes(include=["object"]).columns:
-        if column in {"姓名", "分组"}:
-            continue
-        normalized[column] = normalized[column].apply(_normalize_text)
-
-    ordered_columns = [col for col in ["学号", "姓名", "分组", "成绩"] if col in normalized.columns]
-    extra_columns = [col for col in normalized.columns if col not in ordered_columns]
-    normalized = normalized[ordered_columns + extra_columns]
-
-    if drop_incomplete:
-        normalized = normalized[(normalized["学号"].notna()) & (normalized["姓名"] != "")].copy()
-        normalized.reset_index(drop=True, inplace=True)
-
-    return normalized
-
-
-def _empty_student_dataframe() -> PandasDataFrame:
-    if not PANDAS_READY:
-        raise RuntimeError("Pandas support is required to create student data tables.")
-    template = pd.DataFrame({"学号": [], "姓名": [], "分组": [], "成绩": []})
-    return _normalize_student_dataframe(template, drop_incomplete=False)
-
-
-def _sanitize_sheet_name(name: str, fallback: str) -> str:
-    invalid = set("\\/:?*[]")
-    cleaned = "".join(ch for ch in str(name) if ch not in invalid).strip()
-    if not cleaned:
-        cleaned = fallback
-    if len(cleaned) > 31:
-        cleaned = cleaned[:31]
-    return cleaned
-
-
-@dataclass
-class StudentWorkbook:
-    """封装多班级学生名单，允许按工作表划分班级。"""
-
-    sheets: "OrderedDict[str, PandasDataFrame]"
-    active_class: str = ""
-
-    def __post_init__(self) -> None:
-        ordered: "OrderedDict[str, PandasDataFrame]" = OrderedDict()
-        if self.sheets:
-            for idx, (name, df) in enumerate(self.sheets.items(), start=1):
-                fallback = f"班级{idx}" if idx > 1 else "班级1"
-                safe_name = _sanitize_sheet_name(name, fallback)
-                try:
-                    normalized = _normalize_student_dataframe(df, drop_incomplete=False)
-                except Exception:
-                    normalized = pd.DataFrame(df)
-                ordered[safe_name] = normalized
-        if not ordered:
-            ordered["班级1"] = _empty_student_dataframe().copy()
-        self.sheets = ordered
-        if not self.active_class or self.active_class not in self.sheets:
-            self.active_class = next(iter(self.sheets))
-
-    def class_names(self) -> List[str]:
-        return list(self.sheets.keys())
-
-    def is_empty(self) -> bool:
-        if not self.sheets:
-            return True
-        for df in self.sheets.values():
-            try:
-                if not df.empty:
-                    return False
-            except AttributeError:
-                return False
-        return True
-
-    def get_active_dataframe(self) -> PandasDataFrame:
-        if not self.sheets:
-            return _empty_student_dataframe().copy()
-        if self.active_class not in self.sheets:
-            self.active_class = next(iter(self.sheets))
-        df = self.sheets.get(self.active_class)
-        if df is None:
-            return _empty_student_dataframe().copy()
-        try:
-            return df.copy()
-        except Exception:
-            return pd.DataFrame(df)
-
-    def set_active_class(self, class_name: str) -> None:
-        name = str(class_name).strip()
-        if name in self.sheets:
-            self.active_class = name
-
-    def update_class(self, class_name: str, df: PandasDataFrame) -> None:
-        try:
-            normalized = _normalize_student_dataframe(df, drop_incomplete=False)
-        except Exception:
-            normalized = pd.DataFrame(df)
-        self.sheets[class_name] = normalized
-        self.active_class = class_name
-
-    def add_class(self, class_name: str) -> str:
-        base_name = str(class_name).strip()
-        if not base_name:
-            base_name = f"班级{len(self.sheets) + 1}"
-        safe_name = _sanitize_sheet_name(base_name, base_name)
-        if safe_name in self.sheets:
-            suffix = 2
-            while f"{safe_name}_{suffix}" in self.sheets:
-                suffix += 1
-            safe_name = f"{safe_name}_{suffix}"
-        self.sheets[safe_name] = _empty_student_dataframe().copy()
-        self.active_class = safe_name
-        return safe_name
-
-    def as_dict(self) -> "OrderedDict[str, PandasDataFrame]":
-        ordered: "OrderedDict[str, PandasDataFrame]" = OrderedDict()
-        for name, df in self.sheets.items():
-            try:
-                ordered[name] = df.copy()
-            except Exception:
-                ordered[name] = pd.DataFrame(df)
-        return ordered
-
-
-def _write_student_workbook(file_path: str, data: Mapping[str, PandasDataFrame]) -> None:
-    payload = _export_student_workbook_bytes(data)
-    target_dir = os.path.dirname(os.path.abspath(file_path))
-    if target_dir and not _ensure_directory(target_dir):
-        target_dir = os.getcwd()
-    tmp_dir = target_dir or "."
-    fd, tmp_path = tempfile.mkstemp(suffix=".xlsx", dir=tmp_dir)
     try:
-        with os.fdopen(fd, "wb") as tmp_file:
-            tmp_file.write(payload)
-        os.replace(tmp_path, file_path)
-    finally:
-        with contextlib.suppress(FileNotFoundError):
-            os.remove(tmp_path)
+        raw_data = pd.read_excel(read_path, sheet_name=None)
+    except Exception as exc:
+        raise RuntimeError(f"无法读取学生数据文件 {read_path}: {exc}") from exc
+
+    if isinstance(raw_data, dict) and "_ROLL_STATE" in raw_data:
+        try:
+            state_df = raw_data.pop("_ROLL_STATE")
+            if isinstance(state_df, pd.DataFrame) and not state_df.empty:
+                value = state_df.iloc[0, 0]
+                embedded_roll_state = str(value) if isinstance(value, str) else None
+        except Exception:
+            embedded_roll_state = None
+    _set_embedded_roll_state(embedded_roll_state)
+
+    workbook = StudentWorkbook(OrderedDict(raw_data), active_class="")
+    _save_student_workbook(
+        workbook.as_dict(),
+        plain_file_path,
+        roll_state_json=embedded_roll_state,
+    )
+    return workbook, created_template, embedded_roll_state
 
 
-def _write_encrypted_student_workbook(file_path: str, data: Mapping[str, PandasDataFrame], password: str) -> None:
-    payload = _export_student_workbook_bytes(data)
-    encrypted = _encrypt_student_bytes(password, payload)
-    target_dir = os.path.dirname(os.path.abspath(file_path))
-    if target_dir and not _ensure_directory(target_dir):
-        target_dir = os.getcwd()
-    tmp_dir = target_dir or "."
-    fd, tmp_path = tempfile.mkstemp(suffix=".enc", dir=tmp_dir)
-    try:
-        with os.fdopen(fd, "wb") as tmp_file:
-            tmp_file.write(encrypted)
-        os.replace(tmp_path, file_path)
-    finally:
-        with contextlib.suppress(FileNotFoundError):
-            os.remove(tmp_path)
+def _export_student_workbook_bytes(
+    data: Mapping[str, PandasDataFrame],
+    roll_state_json: Optional[str] = None,
+) -> bytes:
+    """Normalize the workbook mapping and render it to Excel bytes."""
 
-
-def _export_student_workbook_bytes(data: Mapping[str, PandasDataFrame]) -> bytes:
     normalized: "OrderedDict[str, PandasDataFrame]" = OrderedDict()
     for idx, (name, df) in enumerate(data.items(), start=1):
         fallback = f"班级{idx}" if idx > 1 else "班级1"
@@ -13051,48 +12962,41 @@ def _export_student_workbook_bytes(data: Mapping[str, PandasDataFrame]) -> bytes
         except Exception:
             normalized_df = pd.DataFrame(df)
         normalized[sheet_name] = normalized_df
+    if roll_state_json is not None:
+        normalized["_ROLL_STATE"] = pd.DataFrame({"ROLL_STATE_JSON": [roll_state_json]})
     if not normalized:
         normalized["班级1"] = _empty_student_dataframe().copy()
 
-    buffer = io.BytesIO()
-    try:
-        engine = "openpyxl" if OPENPYXL_AVAILABLE else None
+    def _render_bytes(engine: Optional[str]) -> bytes:
+        buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine=engine) as writer:  # type: ignore[call-arg]
             for sheet_name, df in normalized.items():
                 df.to_excel(writer, sheet_name=sheet_name, index=False)
         buffer.seek(0)
         return buffer.getvalue()
-    except Exception:
-        buffer.seek(0)
-        first = next(iter(normalized.values()))
-        first.to_excel(buffer, index=False)
-        return buffer.getvalue()
+
+    engine = "openpyxl" if OPENPYXL_AVAILABLE else None
+    try:
+        return _render_bytes(engine)
+    except Exception as exc:
+        fallback_engine = None if engine else ("openpyxl" if OPENPYXL_AVAILABLE else None)
+        try:
+            return _render_bytes(fallback_engine)
+        except Exception:
+            raise RuntimeError(f"Failed to export student workbook: {exc}") from exc
 
 
 def _save_student_workbook(
     data: Mapping[str, PandasDataFrame],
     file_path: str,
-    encrypted_file_path: str,
     *,
-    encrypted: bool,
-    password: Optional[str],
-    plain_candidates: Optional[Iterable[str]] = None,
-    encrypted_candidates: Optional[Iterable[str]] = None,
+    roll_state_json: Optional[str] = None,
 ) -> None:
-    plain_pool = _candidate_path_pool(file_path, plain_candidates)
-    encrypted_pool = _candidate_path_pool(encrypted_file_path, encrypted_candidates)
-    if encrypted:
-        if not password:
-            raise ValueError("缺少加密密码")
-        _write_encrypted_student_workbook(encrypted_file_path, data, password)
-        _remove_file_candidates(plain_pool)
-        _replicate_file_to_candidates(encrypted_file_path, encrypted_pool)
-    else:
-        _write_student_workbook(file_path, data)
-        _remove_file_candidates(encrypted_pool)
-        _replicate_file_to_candidates(file_path, plain_pool)
+    """Persist the workbook to disk and clean up duplicate candidate files."""
 
-
+    _write_student_workbook(file_path, data, roll_state_json=roll_state_json)
+    keep_plain = file_path if os.path.exists(file_path) else None
+    _cleanup_student_candidates(keep_plain)
 def load_student_data(parent: Optional[QWidget]) -> Optional[StudentWorkbook]:
     """从 students.xlsx 读取点名所需的数据，不存在时自动生成模板。"""
 
@@ -13103,82 +13007,19 @@ def load_student_data(parent: Optional[QWidget]) -> Optional[StudentWorkbook]:
     resources = _STUDENT_RESOURCES
     file_path = resources.plain
     existing_plain = _any_existing_path(resources.plain_candidates)
-    existing_encrypted = _any_existing_path(resources.encrypted_candidates)
-
-    if existing_plain is None and existing_encrypted is not None:
-        attempts = 0
-        encrypted_source = existing_encrypted
-        while attempts < 3:
-            password, ok = PasswordPromptDialog.get_password(
-                parent,
-                "解密学生数据",
-                "检测到已加密的学生名单，请输入密码：",
-                allow_empty=False,
-            )
-            if not ok:
-                QMessageBox.information(parent, "提示", "已取消加载加密的学生名单。")
-                return None
-            password = password.strip()
-            if not password:
-                QMessageBox.warning(parent, "提示", "密码不能为空，请重新输入。")
-                attempts += 1
-                continue
-            try:
-                with open(encrypted_source, "rb") as fh:
-                    payload = fh.read()
-                plain_bytes = _decrypt_student_bytes(password, payload)
-                buffer = io.BytesIO(plain_bytes)
-                raw_data = pd.read_excel(buffer, sheet_name=None)
-                workbook = StudentWorkbook(OrderedDict(raw_data), active_class="")
-                _set_session_student_encryption(True, password)
-                return workbook
-            except Exception as exc:
-                attempts += 1
-                QMessageBox.warning(parent, "提示", f"解密失败：{exc}")
-        QMessageBox.critical(parent, "错误", "多次输入密码失败，无法加载学生名单。")
-        return None
-
-    if existing_plain is None:
-        try:
-            template = pd.DataFrame(
-                {"学号": [101, 102, 103], "姓名": ["张三", "李四", "王五"], "分组": ["A", "B", "A"], "成绩": [0, 0, 0]}
-            )
-            workbook = StudentWorkbook(OrderedDict({"班级1": template}), active_class="班级1")
-            _save_student_workbook(
-                workbook.as_dict(),
-                file_path,
-                resources.encrypted,
-                encrypted=False,
-                password=None,
-                plain_candidates=resources.plain_candidates,
-                encrypted_candidates=resources.encrypted_candidates,
-            )
-            show_quiet_information(parent, f"未找到学生名单，已为您创建模板文件：{file_path}")
-            _set_session_student_encryption(False, None)
-            existing_plain = file_path
-        except Exception as exc:
-            QMessageBox.critical(parent, "错误", f"创建模板文件失败：{exc}")
-            return None
 
     try:
-        read_path = existing_plain if existing_plain and os.path.exists(existing_plain) else file_path
-        raw_data = pd.read_excel(read_path, sheet_name=None)
-        workbook = StudentWorkbook(OrderedDict(raw_data), active_class="")
-        _save_student_workbook(
-            workbook.as_dict(),
+        workbook, created, _embedded = _read_student_workbook(
+            existing_plain,
             file_path,
-            resources.encrypted,
-            encrypted=False,
-            password=None,
-            plain_candidates=resources.plain_candidates,
-            encrypted_candidates=resources.encrypted_candidates,
         )
-        _set_session_student_encryption(False, None)
-        if _any_existing_path(resources.encrypted_candidates):
-            show_quiet_information(parent, "检测到同时存在加密文件，将优先使用明文 students.xlsx。")
+        if workbook is None:
+            return None
+        if created:
+            show_quiet_information(parent, f"未找到学生数据，已为你创建模板文件：{file_path}")
         return workbook
     except Exception as exc:
-        QMessageBox.critical(parent, "错误", f"无法加载学生名单，请检查文件格式。\n错误：{exc}")
+        QMessageBox.critical(parent, "错误", f"无法加载学生数据，文件格式异常\n详情: {exc}")
         return None
 
 
@@ -13313,7 +13154,7 @@ class LauncherWindow(QWidget):
             try:
                 self.student_data = student_workbook.get_active_dataframe()
             except Exception:
-                self.student_data = pd.DataFrame(columns=["学号", "姓名", "分组", "成绩"])
+                self.student_data = _new_student_dataframe() or pd.DataFrame(columns=DEFAULT_STUDENT_COLUMNS)
         self.overlay: Optional[OverlayWindow] = None
         self.roll_call_window: Optional[RollCallTimerWindow] = None
         self._dragging = False
@@ -13323,10 +13164,10 @@ class LauncherWindow(QWidget):
         self._bubble_position = QPoint()
         self._minimized = False
         self._minimized_on_start = False
-        self.auto_exit_seconds = 2400
+        self._auto_exit_seconds = 0
         self._auto_exit_timer = QTimer(self)
         self._auto_exit_timer.setSingleShot(True)
-        self._auto_exit_timer.timeout.connect(self._handle_auto_exit)
+        self._auto_exit_timer.timeout.connect(self.request_exit)
 
     def _configure_window(self) -> None:
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
@@ -13426,7 +13267,7 @@ class LauncherWindow(QWidget):
         bottom_row.addWidget(self.about_button)
 
         self.settings_button = QPushButton("设置")
-        self.settings_button.clicked.connect(self.open_launcher_settings)
+        self.settings_button.clicked.connect(self.show_settings_dialog)
         bottom_row.addWidget(self.settings_button)
 
         self.exit_button = QPushButton("退出")
@@ -13445,15 +13286,15 @@ class LauncherWindow(QWidget):
         auxiliary_width = max(self.minimize_button.sizeHint().width(), 52)
         self.minimize_button.setFixedWidth(auxiliary_width)
 
-        aux_width = max(
+        info_width = max(
             self.about_button.sizeHint().width(),
             self.settings_button.sizeHint().width(),
             self.exit_button.sizeHint().width(),
             52,
         )
-        self.about_button.setFixedWidth(aux_width)
-        self.settings_button.setFixedWidth(aux_width)
-        self.exit_button.setFixedWidth(aux_width)
+        self.about_button.setFixedWidth(info_width)
+        self.settings_button.setFixedWidth(info_width)
+        self.exit_button.setFixedWidth(info_width)
 
         button_heights = [
             self.paint_button.sizeHint().height(),
@@ -13474,25 +13315,6 @@ class LauncherWindow(QWidget):
         ):
             button.setFixedHeight(target_height)
 
-    def open_launcher_settings(self) -> None:
-        """Configure the auto-close timeout in minutes."""
-
-        current_minutes = int(round(self.auto_exit_seconds / 60)) if self.auto_exit_seconds else 0
-        minutes, ok = QInputDialog.getInt(
-            self,
-            "设置自动关闭时间",
-            "请输入程序运行后自动关闭的时间（分钟，0 表示不自动关闭）：",
-            max(0, current_minutes),
-            0,
-            12 * 60,
-            1,
-        )
-        if not ok:
-            return
-        self.auto_exit_seconds = max(0, int(minutes)) * 60
-        self._restart_auto_exit_timer()
-        self.save_position()
-
     def _finalize_drag_regions(self, container: QWidget) -> None:
         for widget in (
             self,
@@ -13500,7 +13322,6 @@ class LauncherWindow(QWidget):
             self.paint_button,
             self.roll_call_button,
             self.minimize_button,
-            self.settings_button,
         ):
             widget.installEventFilter(self)
 
@@ -13512,7 +13333,7 @@ class LauncherWindow(QWidget):
         self._ensure_min_height = self.height()
 
     def _apply_saved_state(self) -> None:
-        launcher_settings, _startup_settings = self.settings_manager.get_launcher_state()
+        launcher_settings = self.settings_manager.get_launcher_state()
 
         position = QPoint(launcher_settings.position)
         self.move(position)
@@ -13525,24 +13346,13 @@ class LauncherWindow(QWidget):
 
         self._minimized = launcher_settings.minimized
         self._minimized_on_start = launcher_settings.minimized
+        self._auto_exit_seconds = max(0, int(launcher_settings.auto_exit_seconds))
+        self._schedule_auto_exit_timer()
 
-        try:
-            self.auto_exit_seconds = max(0, int(launcher_settings.auto_exit_seconds))
-        except Exception:
-            self.auto_exit_seconds = 2400
-        self._restart_auto_exit_timer()
-
-    def _restart_auto_exit_timer(self) -> None:
+    def _schedule_auto_exit_timer(self) -> None:
         self._auto_exit_timer.stop()
-        seconds = max(0, int(self.auto_exit_seconds))
-        if seconds <= 0:
-            return
-        self._auto_exit_timer.start(seconds * 1000)
-
-    def _handle_auto_exit(self) -> None:
-        """Automatically close the application after the configured interval."""
-
-        self.request_exit()
+        if self._auto_exit_seconds > 0:
+            self._auto_exit_timer.start(self._auto_exit_seconds * 1000)
 
     def _enforce_feature_availability(self) -> None:
         if not (PANDAS_AVAILABLE and OPENPYXL_AVAILABLE):
@@ -13591,9 +13401,27 @@ class LauncherWindow(QWidget):
             position=position,
             bubble_position=bubble_position,
             minimized=self._minimized,
-            auto_exit_seconds=self.auto_exit_seconds,
+            auto_exit_seconds=self._auto_exit_seconds,
         )
-        self.settings_manager.update_launcher_settings(launcher_settings, None)
+        self.settings_manager.update_launcher_settings(launcher_settings)
+
+
+    def show_settings_dialog(self) -> None:
+        current_minutes = max(0, int(round(self._auto_exit_seconds / 60)))
+        minutes, ok = QInputDialog.getInt(
+            self,
+            "设置自动关闭",
+            "软件自动关闭时间\n（分钟，0 表示不自动关闭）：",
+            current_minutes or 40,
+            0,
+            1440,
+            1,
+        )
+        if not ok:
+            return
+        self._auto_exit_seconds = max(0, int(minutes)) * 60
+        self._schedule_auto_exit_timer()
+        self.save_position()
 
     def toggle_paint(self) -> None:
         """打开或隐藏屏幕画笔覆盖层。"""
@@ -13609,25 +13437,26 @@ class LauncherWindow(QWidget):
             if not PANDAS_AVAILABLE or not OPENPYXL_AVAILABLE:
                 QMessageBox.warning(self, "提示", "未安装 pandas/openpyxl，点名功能不可用。")
                 return
-            settings = self.settings_manager.load_settings().get("RollCallTimer", {})
-            initial_mode = settings.get("mode", "roll_call")
-            defer_prompt = initial_mode == "timer"
-            if self.student_workbook is None and not defer_prompt:
+            config = self.settings_manager.get_roll_call_settings()
+            if self.student_workbook is None:
                 workbook = load_student_data(self)
                 if workbook is None:
                     QMessageBox.warning(self, "提示", "学生数据加载失败，无法打开点名器。")
                     return
+                # 使用上次保存的班级作为初始 active_class，避免默认落到第一张表
+                saved_class = str(config.current_class).strip()
+                if saved_class and saved_class in workbook.class_names():
+                    workbook.set_active_class(saved_class)
                 self.student_workbook = workbook
                 if PANDAS_READY:
                     try:
                         self.student_data = workbook.get_active_dataframe()
                     except Exception:
-                        self.student_data = pd.DataFrame(columns=["学号", "姓名", "分组", "成绩"])
+                        self.student_data = _new_student_dataframe() or pd.DataFrame(columns=DEFAULT_STUDENT_COLUMNS)
             self.roll_call_window = RollCallTimerWindow(
                 self.settings_manager,
                 self.student_workbook,
                 parent=self,
-                defer_password_prompt=defer_prompt,
             )
             self.roll_call_window.window_closed.connect(self.on_roll_call_window_closed)
             self.roll_call_window.visibility_changed.connect(self.on_roll_call_visibility_changed)
@@ -13761,10 +13590,6 @@ class LauncherWindow(QWidget):
         if self._minimized:
             self.save_position()
 
-    def get_script_path(self) -> str:
-        if getattr(sys, "frozen", False): return sys.executable
-        return os.path.abspath(sys.argv[0])
-
     def show_about(self) -> None:
         AboutDialog(self).exec()
 
@@ -13786,9 +13611,7 @@ class ApplicationContext:
     def create(cls) -> "ApplicationContext":
         settings_manager = SettingsManager()
         workbook: Optional[StudentWorkbook] = None
-        encrypted_path = getattr(RollCallTimerWindow, "ENCRYPTED_STUDENT_FILE", "")
-        encrypted_exists = bool(encrypted_path and os.path.exists(encrypted_path))
-        if PANDAS_AVAILABLE and not encrypted_exists:
+        if PANDAS_AVAILABLE:
             workbook = load_student_data(None)
         return cls(settings_manager=settings_manager, student_workbook=workbook)
 
@@ -13811,63 +13634,8 @@ def main() -> None:
     sys.exit(app.exec())
 
 
-# Nuitka 打包指令（请与 PACKAGING.md 保持一致）：
-# 单文件：
-#   python -m nuitka ClassroomTools.py ^
-#     --onefile ^
-#     --remove-output ^
-#     --assume-yes-for-downloads ^
-#     --jobs=%NUMBER_OF_PROCESSORS% ^
-#     --lto=no ^
-#     --enable-plugin=pyqt6 ^
-#     --include-qt-plugins=sensible ^
-#     --enable-plugin=numpy ^
-#     --include-package=pyttsx3.drivers ^
-#     --include-module=pyttsx3,pyttsx3.drivers.sapi5,pythoncom,win32api,win32con,win32gui,win32clipboard,win32com.client,win32com.server ^
-#     --include-package=comtypes ^
-#     --include-package=comtypes.gen ^
-#     --include-package=win32com ^
-#     --include-package-data=openpyxl ^
-#     --noinclude-data-files=openpyxl/tests/* ^
-#     --nofollow-import-to=numpy.tests ^
-#     --include-data-file=students.xlsx=students.xlsx ^
-#     --include-data-file=settings.ini=settings.ini ^
-#     --include-data-file=icon.ico=icon.ico ^
-#     --windows-console-mode=disable ^
-#     --windows-icon-from-ico=icon.ico ^
-#     --windows-file-version=4.0.0.0 ^
-#     --windows-product-version=4.0.0.0 ^
-#     --windows-company-name="sciman逸居" ^
-#     --windows-product-name="课堂工具" ^
-#     --windows-file-description="课堂教学辅助工具"
-# 独立目录：
-#   python -m nuitka ClassroomTools.py ^
-#     --standalone ^
-#     --output-dir=dist ^
-#     --remove-output ^
-#     --assume-yes-for-downloads ^
-#     --jobs=%NUMBER_OF_PROCESSORS% ^
-#     --lto=no ^
-#     --enable-plugin=pyqt6 ^
-#     --include-qt-plugins=sensible ^
-#     --enable-plugin=numpy ^
-#     --include-package=pyttsx3.drivers ^
-#     --include-module=pyttsx3,pyttsx3.drivers.sapi5,pythoncom,win32api,win32con,win32gui,win32clipboard,win32com.client,win32com.server ^
-#     --include-package=comtypes ^
-#     --include-package=comtypes.gen ^
-#     --include-package=win32com ^
-#     --include-package-data=openpyxl ^
-#     --noinclude-data-files=openpyxl/tests/* ^
-#     --nofollow-import-to=numpy.tests ^
-#     --include-data-file=students.xlsx=students.xlsx ^
-#     --include-data-file=settings.ini=settings.ini ^
-#     --include-data-file=icon.ico=icon.ico ^
-#     --windows-console-mode=disable ^
-#     --windows-icon-from-ico=icon.ico ^
-#     --windows-file-version=4.0.0.0 ^
-#     --windows-product-version=4.0.0.0 ^
-#     --windows-company-name="sciman逸居" ^
-#     --windows-product-name="课堂工具" ^
-#     --windows-file-description="课堂教学辅助工具"
+# Nuitka 打包指令（根据当前依赖整理的推荐参数，保持在单行便于复制）：
+# 单文件：python -m nuitka --onefile --enable-plugin=pyqt6 --include-qt-plugins=sensible --windows-disable-console --windows-icon-from-ico=icon.ico --include-data-file=students.xlsx=students.xlsx --include-data-file=settings.ini=settings.ini ClassroomTools.py
+# 独立目录：python -m nuitka --standalone --enable-plugin=pyqt6 --include-qt-plugins=sensible --windows-disable-console --windows-icon-from-ico=icon.ico --output-dir=dist --include-data-file=students.xlsx=students.xlsx --include-data-file=settings.ini=settings.ini ClassroomTools.py
 if __name__ == "__main__":
     main()
