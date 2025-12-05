@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import base64
@@ -11121,7 +11121,7 @@ class RollCallLogic(QObject):
 
 
 class RemotePresenterHotkey(QObject):
-    """全局监听翻页笔按键，在任何场景触发“翻页笔遥控点名”。"""
+    """全局监听翻页笔按键，使用底层键盘钩子拦截特定按键。"""
 
     hotkey_pressed = pyqtSignal()
 
@@ -11130,9 +11130,9 @@ class RemotePresenterHotkey(QObject):
     _WM_KEYUP = 0x0101
     _WM_SYSKEYDOWN = 0x0104
     _WM_SYSKEYUP = 0x0105
-    _HC_ACTION = getattr(win32con, "HC_ACTION", 0)
+    _HC_ACTION = 0
 
-    class _KBDLLHOOKSTRUCT(ctypes.Structure):  # type: ignore[misc,override]
+    class _KBDLLHOOKSTRUCT(ctypes.Structure):
         _fields_ = [
             ("vkCode", wintypes.DWORD),
             ("scanCode", wintypes.DWORD),
@@ -11141,128 +11141,90 @@ class RemotePresenterHotkey(QObject):
             ("dwExtraInfo", wintypes.ULONG_PTR),
         ]
 
+    _HOOKPROC = ctypes.WINFUNCTYPE(wintypes.LRESULT, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
+
     def __init__(self, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
         self._hook_handle: Optional[int] = None
-        self._hook_handle_pywin32: Optional[Any] = None
-        self._low_level_proc = None
-        self._skip_keyup = False
+        self._c_hook_proc = None
         self._vk_code = self._normalize_vk("tab")
-        self._forwarder_probe = self._build_probe()
+        self._intercept_enabled = False
 
     @property
     def available(self) -> bool:
-        return bool(_USER32 and win32con and win32gui)
-
-    def _build_probe(self) -> Optional[_PresentationForwarder]:
-        if not self.available:
-            return None
-        try:
-            class _OverlayStub:
-                whiteboard_active = False
-                mode = "cursor"
-
-                def _presentation_control_allowed(self, _hwnd: Optional[int], *, log: bool = False) -> bool:
-                    return True
-
-            return _PresentationForwarder(_OverlayStub())
-        except Exception:
-            return None
+        return bool(_USER32 and _KERNEL32)
 
     def set_key(self, key: str) -> None:
         vk = self._normalize_vk(key)
         if vk != self._vk_code:
             self._vk_code = vk
-            if self._hook_handle:
-                self.stop()
-                self.start()
-
-    def is_active(self) -> bool:
-        return bool(self._hook_handle or self._hook_handle_pywin32)
 
     def start(self) -> bool:
         if not self.available:
             return False
-        if self._hook_handle or self._hook_handle_pywin32:
+        if self._hook_handle:
             return True
-        # 方案1：ctypes
+
+        def hook_proc(nCode: int, wParam: int, lParam: int) -> int:
+            if nCode == self._HC_ACTION and self._intercept_enabled:
+                try:
+                    if wParam == self._WM_KEYDOWN or wParam == self._WM_SYSKEYDOWN:
+                        kb_struct = ctypes.cast(lParam, ctypes.POINTER(self._KBDLLHOOKSTRUCT)).contents
+                        if kb_struct.vkCode == self._vk_code:
+                            QTimer.singleShot(0, self.hotkey_pressed.emit)
+                            return 1
+
+                    elif wParam == self._WM_KEYUP or wParam == self._WM_SYSKEYUP:
+                        kb_struct = ctypes.cast(lParam, ctypes.POINTER(self._KBDLLHOOKSTRUCT)).contents
+                        if kb_struct.vkCode == self._vk_code:
+                            return 1
+                except Exception:
+                    pass
+
+            return _USER32.CallNextHookEx(self._hook_handle, nCode, wParam, lParam)
+
+        self._c_hook_proc = self._HOOKPROC(hook_proc)
+
+        h_mod = 0
         try:
-            callback_type = ctypes.WINFUNCTYPE(wintypes.LRESULT, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
-            self._low_level_proc = callback_type(self._keyboard_hook)
-            module_handle = _KERNEL32.GetModuleHandleW(None) if _KERNEL32 is not None else 0
-            handle = _USER32.SetWindowsHookExW(self._WH_KEYBOARD_LL, self._low_level_proc, module_handle, 0)
-            if handle:
-                self._hook_handle = handle
-                return True
+            h_mod = _KERNEL32.GetModuleHandleW("user32.dll") if _KERNEL32 is not None else 0
         except Exception:
+            h_mod = 0
+
+        try:
+            self._hook_handle = _USER32.SetWindowsHookExW(
+                self._WH_KEYBOARD_LL,
+                self._c_hook_proc,
+                h_mod,
+                0,
+            )
+        except Exception as e:
+            logger.error("SetWindowsHookExW failed: %s", e)
             self._hook_handle = None
-        # 方案2：pywin32 兜底
-        if win32api is not None and win32con is not None:
-            try:
-                from win32con import WH_KEYBOARD_LL  # type: ignore
-                self._hook_handle_pywin32 = win32api.SetWindowsHookEx(WH_KEYBOARD_LL, self._keyboard_hook, 0, 0)  # type: ignore[arg-type]
-                if self._hook_handle_pywin32:
-                    return True
-            except Exception:
-                self._hook_handle_pywin32 = None
-        self._low_level_proc = None
+
+        if self._hook_handle:
+            self._intercept_enabled = True
+            return True
         return False
 
     def stop(self) -> None:
-        if self._hook_handle and _USER32 is not None:
+        self._intercept_enabled = False
+        if self._hook_handle:
             try:
                 _USER32.UnhookWindowsHookEx(self._hook_handle)
             except Exception:
                 pass
-        if self._hook_handle_pywin32:
-            try:
-                if win32api is not None:
-                    win32api.UnhookWindowsHookEx(self._hook_handle_pywin32)  # type: ignore[arg-type]
-            except Exception:
-                pass
-        self._hook_handle = None
-        self._hook_handle_pywin32 = None
-        self._low_level_proc = None
-        self._skip_keyup = False
-
-    def _keyboard_hook(self, nCode: int, wParam: int, lParam: int) -> int:
-        if nCode == self._HC_ACTION and self._vk_code:
-            if wParam in (self._WM_KEYDOWN, self._WM_SYSKEYDOWN, self._WM_KEYUP, self._WM_SYSKEYUP):
-                try:
-                    data = ctypes.cast(lParam, ctypes.POINTER(self._KBDLLHOOKSTRUCT)).contents
-                except Exception:
-                    data = None
-                if data and int(data.vkCode) == int(self._vk_code):
-                    if wParam in (self._WM_KEYDOWN, self._WM_SYSKEYDOWN):
-                        if self._should_intercept():
-                            self._skip_keyup = True
-                            self._queue_emit()
-                            return 1
-                    elif self._skip_keyup:
-                        self._skip_keyup = False
-                        return 1
-        if _USER32 is None:
-            return 0
-        try:
-            return int(_USER32.CallNextHookEx(self._hook_handle or 0, nCode, wParam, lParam))
-        except Exception:
-            return 0
-
-    def _queue_emit(self) -> None:
-        QTimer.singleShot(0, self.hotkey_pressed.emit)
-
-    def _should_intercept(self) -> bool:
-        # 遥控点名在任意前台窗口下都可触发，减少依赖前台应用类型。
-        return True
+            self._hook_handle = None
+        self._c_hook_proc = None
 
     @staticmethod
     def _normalize_vk(key: str) -> int:
         normalized = (key or "").strip().lower()
         if normalized in {"tab", "vk_tab"}:
-            return getattr(win32con, "VK_TAB", 0x09)
+            return 0x09
         if normalized in {"b", "key_b"}:
-            return ord("B")
-        return getattr(win32con, "VK_TAB", 0x09)
+            return 0x42
+        return 0x09
 
 
 class RemotePresenterController(QObject):
@@ -11274,129 +11236,44 @@ class RemotePresenterController(QObject):
         self.hotkey = RemotePresenterHotkey(self)
         self.hotkey.hotkey_pressed.connect(self._handle_hotkey)
         self._enabled = False
-        self._fallback_polling = False
-        self._rehook_timer = QTimer(self)
-        self._rehook_timer.setInterval(3000)
-        self._rehook_timer.timeout.connect(self._attempt_rehook)
-        self._poll_timer = QTimer(self)
-        self._poll_timer.setInterval(80)
-        self._poll_timer.timeout.connect(self._poll_check)
-        self._last_pressed = False
-        self._poll_vk = self.hotkey._normalize_vk("tab")
+
+        self._watchdog_timer = QTimer(self)
+        self._watchdog_timer.setInterval(2000)
+        self._watchdog_timer.timeout.connect(self._check_hook_health)
 
     def is_available(self) -> bool:
-        # 低级键盘钩子或轮询两者之一可用即可
-        return bool(self.hotkey.available or _USER32 is not None)
+        return self.hotkey.available
 
     def set_key(self, key: str) -> None:
         self.hotkey.set_key(key)
-        try:
-            self._poll_vk = self.hotkey._normalize_vk(key)
-        except Exception:
-            self._poll_vk = self.hotkey._normalize_vk("tab")
-        if self._fallback_polling:
-            self._last_pressed = False
-        if self._enabled and self.is_available():
-            self.restart()
-
-    def restart(self) -> bool:
-        if not self._enabled:
-            return True
-        self.hotkey.stop()
-        self._stop_poll()
-        started = self.hotkey.start()
-        if started:
-            self._fallback_polling = False
-            self._rehook_timer.stop()
-            return True
-        # 尝试轮询退化方案
-        return self._start_poll()
 
     def set_enabled(self, enabled: bool) -> bool:
-        if enabled == self._enabled and (not enabled or self.is_available()):
+        if enabled == self._enabled:
             return self._enabled
+
         self._enabled = enabled
-        if not enabled:
-            self.hotkey.stop()
-            self._stop_poll()
-            return False
-        if not self.is_available():
+        if enabled:
+            success = self.hotkey.start()
+            if success:
+                self._watchdog_timer.start()
+                return True
             self._enabled = False
             return False
-        self.hotkey.stop()
-        self._stop_poll()
-        started = self.hotkey.start()
-        if not started:
-            started = self._start_poll()
-            if started:
-                self._rehook_timer.start()
-        else:
-            self._rehook_timer.stop()
-        if not started:
-            self._enabled = False
-        return started
+
+        self.stop()
+        return False
 
     def stop(self) -> None:
+        self._watchdog_timer.stop()
         self.hotkey.stop()
-        self._stop_poll()
-        self._rehook_timer.stop()
         self._enabled = False
 
     def _handle_hotkey(self) -> None:
         self.window.trigger_remote_presenter_call()
 
-    # ---- 轮询退化方案 ----
-    def _start_poll(self) -> bool:
-        if _USER32 is None:
-            return False
-        self._fallback_polling = True
-        self._last_pressed = False
-        self._poll_timer.start()
-        self._rehook_timer.start()
-        return True
-
-    def _stop_poll(self) -> None:
-        self._poll_timer.stop()
-        self._fallback_polling = False
-        self._last_pressed = False
-
-    def _poll_check(self) -> None:
-        state = self._read_key_state(self._poll_vk if hasattr(self, "_poll_vk") else self.hotkey._normalize_vk("tab"))
-        pressed = bool(state)
-        if pressed and not self._last_pressed:
-            self._handle_hotkey()
-        self._last_pressed = pressed
-
-    def _attempt_rehook(self) -> None:
-        if not self._enabled:
-            self._rehook_timer.stop()
-            return
-        if self.hotkey.is_active():
-            self._rehook_timer.stop()
-            self._stop_poll()
-            return
-        if not self.hotkey.available:
-            return
-        self.hotkey.stop()
-        if self.hotkey.start():
-            self._fallback_polling = False
-            self._stop_poll()
-            self._rehook_timer.stop()
-
-    @staticmethod
-    def _read_key_state(vk_code: int) -> bool:
-        # 优先 win32api，其次 user32
-        if win32api is not None:
-            try:
-                return bool(win32api.GetAsyncKeyState(vk_code) & 0x8000)
-            except Exception:
-                pass
-        if _USER32 is not None:
-            try:
-                return bool(_USER32.GetAsyncKeyState(vk_code) & 0x8000)
-            except Exception:
-                pass
-        return False
+    def _check_hook_health(self) -> None:
+        if self._enabled and not self.hotkey._hook_handle:
+            self.hotkey.start()
 
 class RollCallTimerWindow(QWidget):
     """集成点名与计时的主功能窗口。"""
