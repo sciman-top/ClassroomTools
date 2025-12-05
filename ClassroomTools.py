@@ -720,6 +720,7 @@ def _user32_focus_window(hwnd: int) -> bool:
 
 from PyQt6.QtCore import (
     QByteArray,
+    QCoreApplication,
     QMutex,
     QMutexLocker,
     QPoint,
@@ -810,6 +811,39 @@ def _prepare_windows_tts_environment() -> None:
         os.environ["COMTYPES_CACHE_DIR"] = cache_dir
     except Exception:
         # 打包环境下若目录创建失败，也不要阻塞主程序。
+        pass
+
+
+def _setup_qt_plugin_paths() -> None:
+    """在打包场景下补充 Qt 平台插件的搜索路径，避免找不到 windows 插件。"""
+
+    try:
+        base_dir = (
+            os.path.dirname(sys.executable)
+            if getattr(sys, "frozen", False)
+            else os.path.dirname(os.path.abspath(__file__))
+        )
+        candidates = [
+            os.path.join(base_dir, "platforms"),
+            os.path.join(base_dir, "PyQt6", "Qt", "plugins", "platforms"),
+            os.path.join(base_dir, "Qt6", "plugins", "platforms"),
+            os.path.join(base_dir, "plugins", "platforms"),
+        ]
+        plugin_dirs: List[str] = []
+        for path in candidates:
+            if os.path.isdir(path) and path not in plugin_dirs:
+                plugin_dirs.append(path)
+        if not plugin_dirs:
+            return
+
+        for path in QCoreApplication.libraryPaths():
+            if path not in plugin_dirs:
+                plugin_dirs.append(path)
+
+        QCoreApplication.setLibraryPaths(plugin_dirs)
+        os.environ.setdefault("QT_QPA_PLATFORM_PLUGIN_PATH", plugin_dirs[0])
+    except Exception:
+        # 插件路径检查失败不应阻塞主程序。
         pass
 
 
@@ -1840,18 +1874,30 @@ class StyleConfig:
     TOOLBAR_HOVER_TEXT = "#202124"
     TOOLBAR_CHECKED_BG = "rgba(138, 180, 248, 255)"
     TOOLBAR_CHECKED_TEXT = "#202124"
-    ERASER_BG = TOOLBAR_BUTTON_BG
-    ERASER_TEXT = TOOLBAR_TEXT
-    ERASER_BORDER = TOOLBAR_BORDER
-    ERASER_ACTIVE_BG = TOOLBAR_HOVER_BG
-    ERASER_ACTIVE_BORDER = TOOLBAR_HOVER_BORDER
-    ERASER_ACTIVE_TEXT = TOOLBAR_HOVER_TEXT
-    CLEAR_BG = TOOLBAR_BUTTON_BG
-    CLEAR_BORDER = TOOLBAR_BORDER
-    CLEAR_TEXT = TOOLBAR_TEXT
-    CLEAR_ACTIVE_BG = TOOLBAR_HOVER_BG
-    CLEAR_ACTIVE_BORDER = TOOLBAR_HOVER_BORDER
-    CLEAR_ACTIVE_TEXT = TOOLBAR_HOVER_TEXT
+    ERASER_BG = "rgba(52, 56, 60, 240)"
+    ERASER_TEXT = "#e8eaed"
+    ERASER_BORDER = "rgba(120, 128, 138, 170)"
+    ERASER_HOVER_BG = "rgba(64, 68, 74, 240)"
+    ERASER_HOVER_BORDER = "rgba(148, 158, 170, 190)"
+    ERASER_ACTIVE_BG = "rgba(126, 168, 208, 255)"
+    ERASER_ACTIVE_BORDER = "rgba(138, 180, 248, 255)"
+    ERASER_ACTIVE_TEXT = "#202124"
+    REGION_DELETE_BG = "rgba(46, 50, 55, 240)"
+    REGION_DELETE_TEXT = "#e8eaed"
+    REGION_DELETE_BORDER = "rgba(112, 122, 132, 170)"
+    REGION_DELETE_HOVER_BG = "rgba(60, 64, 70, 240)"
+    REGION_DELETE_HOVER_BORDER = "rgba(140, 150, 162, 190)"
+    REGION_DELETE_ACTIVE_BG = "rgba(126, 168, 208, 255)"
+    REGION_DELETE_ACTIVE_BORDER = "rgba(138, 180, 248, 255)"
+    REGION_DELETE_ACTIVE_TEXT = "#202124"
+    CLEAR_BG = "rgba(42, 46, 50, 240)"
+    CLEAR_BORDER = "rgba(108, 118, 128, 170)"
+    CLEAR_TEXT = "#e8eaed"
+    CLEAR_HOVER_BG = "rgba(58, 62, 68, 240)"
+    CLEAR_HOVER_BORDER = "rgba(138, 150, 162, 190)"
+    CLEAR_ACTIVE_BG = "rgba(126, 168, 208, 255)"
+    CLEAR_ACTIVE_BORDER = "rgba(138, 180, 248, 255)"
+    CLEAR_ACTIVE_TEXT = "#202124"
     WHITEBOARD_ACTIVE_BG = "rgba(255, 214, 102, 240)"
     WHITEBOARD_ACTIVE_BORDER = "rgba(251, 188, 5, 255)"
     WHITEBOARD_ACTIVE_TEXT = "#202124"
@@ -1890,19 +1936,42 @@ class StyleConfig:
                 color: {eraser_text};
                 border-color: {eraser_border};
             }}
-            QPushButton#eraserButton:hover,
-            QPushButton#eraserButton:checked {{
+            QPushButton#eraserButton:hover {{
+                background: {eraser_hover_bg};
+                border-color: {eraser_hover_border};
+            }}
+            QPushButton#eraserButton:checked,
+            QPushButton#eraserButton:pressed {{
                 background: {eraser_active_bg};
                 border-color: {eraser_active_border};
                 color: {eraser_active_text};
+            }}
+            QPushButton#regionDeleteButton {{
+                background: {region_delete_bg};
+                color: {region_delete_text};
+                border-color: {region_delete_border};
+            }}
+            QPushButton#regionDeleteButton:hover {{
+                background: {region_delete_hover_bg};
+                border-color: {region_delete_hover_border};
+            }}
+            QPushButton#regionDeleteButton:checked,
+            QPushButton#regionDeleteButton:pressed {{
+                background: {region_delete_active_bg};
+                border-color: {region_delete_active_border};
+                color: {region_delete_active_text};
             }}
             QPushButton#clearButton {{
                 background: {clear_bg};
                 color: {clear_text};
                 border-color: {clear_border};
             }}
-            QPushButton#clearButton:hover,
-            QPushButton#clearButton:checked {{
+            QPushButton#clearButton:hover {{
+                background: {clear_hover_bg};
+                border-color: {clear_hover_border};
+            }}
+            QPushButton#clearButton:checked,
+            QPushButton#clearButton:pressed {{
                 background: {clear_active_bg};
                 border-color: {clear_active_border};
                 color: {clear_active_text};
@@ -1926,12 +1995,24 @@ class StyleConfig:
             eraser_bg=StyleConfig.ERASER_BG,
             eraser_text=StyleConfig.ERASER_TEXT,
             eraser_border=StyleConfig.ERASER_BORDER,
+            eraser_hover_bg=StyleConfig.ERASER_HOVER_BG,
+            eraser_hover_border=StyleConfig.ERASER_HOVER_BORDER,
             eraser_active_bg=StyleConfig.ERASER_ACTIVE_BG,
             eraser_active_border=StyleConfig.ERASER_ACTIVE_BORDER,
             eraser_active_text=StyleConfig.ERASER_ACTIVE_TEXT,
+            region_delete_bg=StyleConfig.REGION_DELETE_BG,
+            region_delete_text=StyleConfig.REGION_DELETE_TEXT,
+            region_delete_border=StyleConfig.REGION_DELETE_BORDER,
+            region_delete_hover_bg=StyleConfig.REGION_DELETE_HOVER_BG,
+            region_delete_hover_border=StyleConfig.REGION_DELETE_HOVER_BORDER,
+            region_delete_active_bg=StyleConfig.REGION_DELETE_ACTIVE_BG,
+            region_delete_active_border=StyleConfig.REGION_DELETE_ACTIVE_BORDER,
+            region_delete_active_text=StyleConfig.REGION_DELETE_ACTIVE_TEXT,
             clear_bg=StyleConfig.CLEAR_BG,
             clear_text=StyleConfig.CLEAR_TEXT,
             clear_border=StyleConfig.CLEAR_BORDER,
+            clear_hover_bg=StyleConfig.CLEAR_HOVER_BG,
+            clear_hover_border=StyleConfig.CLEAR_HOVER_BORDER,
             clear_active_bg=StyleConfig.CLEAR_ACTIVE_BG,
             clear_active_border=StyleConfig.CLEAR_ACTIVE_BORDER,
             clear_active_text=StyleConfig.CLEAR_ACTIVE_TEXT,
@@ -2090,16 +2171,20 @@ class SettingsManager:
                 "show_id": "True",
                 "show_name": "True",
                 "show_photo": "False",
-            "photo_duration_seconds": "0",
-            "speech_enabled": "False",
-            "speech_voice_id": "",
-            "speech_output_id": "",
-            "speech_engine": "pyttsx3",
-            "current_group": "全部",
-            "timer_countdown_minutes": "5",
-            "timer_countdown_seconds": "0",
-            "timer_sound_enabled": "True",
-            "mode": "roll_call",
+                "photo_duration_seconds": "0",
+                "speech_enabled": "False",
+                "speech_voice_id": "",
+                "speech_output_id": "",
+                "speech_engine": "pyttsx3",
+                "current_group": "全部",
+                "timer_countdown_minutes": "5",
+                "timer_countdown_seconds": "0",
+                "timer_sound_enabled": "True",
+                "timer_sound_variant": "gentle",
+                "timer_reminder_enabled": "False",
+                "timer_reminder_interval_minutes": "0",
+                "timer_reminder_sound_variant": "soft_beep",
+                "mode": "roll_call",
                 "timer_mode": "countdown",
                 "timer_seconds_left": "300",
                 "timer_stopwatch_seconds": "0",
@@ -2107,6 +2192,8 @@ class SettingsManager:
                 "id_font_size": "48",
                 "name_font_size": "60",
                 "timer_font_size": "56",
+                "remote_roll_enabled": "False",
+                "remote_roll_key": "tab",
             },
             "Paint": {
                 "x": "260",
@@ -2114,6 +2201,10 @@ class SettingsManager:
                 "brush_base_size": "12",
                 "brush_color": "#ff0000",
                 "brush_style": "chalk",
+                "quick_color_1": "#000000",
+                "quick_color_2": "#ff0000",
+                "quick_color_3": "#1e90ff",
+                "eraser_size": "24",
                 "control_ms_ppt": "True",
                 "control_ms_word": "False",
                 "control_wps_ppt": "True",
@@ -2425,6 +2516,10 @@ class PaintConfig:
     brush_base_size: float = 12.0
     brush_color: str = "#ff0000"
     brush_style: PenStyle = _DEFAULT_PEN_STYLE
+    quick_color_1: str = "#000000"
+    quick_color_2: str = "#ff0000"
+    quick_color_3: str = "#1e90ff"
+    eraser_size: float = 24.0
     control_ms_ppt: bool = True
     control_ms_word: bool = False
     control_wps_ppt: bool = True
@@ -2458,6 +2553,10 @@ class PaintConfig:
             brush_base_size=reader.get_float("brush_base_size", 12.0),
             brush_color=reader.get_str("brush_color", "#ff0000"),
             brush_style=style,
+            quick_color_1=reader.get_str("quick_color_1", "#000000"),
+            quick_color_2=reader.get_str("quick_color_2", "#ff0000"),
+            quick_color_3=reader.get_str("quick_color_3", "#1e90ff"),
+            eraser_size=reader.get_float("eraser_size", 24.0),
             control_ms_ppt=reader.get_bool("control_ms_ppt", True),
             control_ms_word=reader.get_bool("control_ms_word", False),
             control_wps_ppt=reader.get_bool("control_wps_ppt", True),
@@ -2473,6 +2572,10 @@ class PaintConfig:
             "brush_base_size": f"{float(self.brush_base_size):.2f}",
             "brush_color": str(self.brush_color),
             "brush_style": self.brush_style.value,
+            "quick_color_1": str(self.quick_color_1),
+            "quick_color_2": str(self.quick_color_2),
+            "quick_color_3": str(self.quick_color_3),
+            "eraser_size": f"{float(self.eraser_size):.2f}",
             "control_ms_ppt": bool_to_str(self.control_ms_ppt),
             "control_ms_word": bool_to_str(self.control_ms_word),
             "control_wps_ppt": bool_to_str(self.control_wps_ppt),
@@ -2499,6 +2602,10 @@ class RollCallTimerConfig:
     timer_countdown_minutes: int = 5
     timer_countdown_seconds: int = 0
     timer_sound_enabled: bool = True
+    timer_sound_variant: str = "gentle"
+    timer_reminder_enabled: bool = False
+    timer_reminder_interval_minutes: int = 0
+    timer_reminder_sound_variant: str = "soft_beep"
     mode: str = "roll_call"
     timer_mode: str = "countdown"
     timer_seconds_left: int = 300
@@ -2512,6 +2619,8 @@ class RollCallTimerConfig:
     group_remaining: str = ""
     group_last: str = ""
     global_drawn: str = ""
+    remote_roll_enabled: bool = False
+    remote_roll_key: str = "tab"
 
     @classmethod
     def from_mapping(cls, mapping: Mapping[str, str], defaults: Mapping[str, str]) -> "RollCallTimerConfig":
@@ -2531,6 +2640,10 @@ class RollCallTimerConfig:
             timer_countdown_minutes=reader.get_int("timer_countdown_minutes", 5),
             timer_countdown_seconds=reader.get_int("timer_countdown_seconds", 0),
             timer_sound_enabled=reader.get_bool("timer_sound_enabled", True),
+            timer_sound_variant=reader.get_str("timer_sound_variant", "gentle"),
+            timer_reminder_enabled=reader.get_bool("timer_reminder_enabled", False),
+            timer_reminder_interval_minutes=reader.get_int("timer_reminder_interval_minutes", 0, min_value=0),
+            timer_reminder_sound_variant=reader.get_str("timer_reminder_sound_variant", "soft_beep"),
             mode=reader.get_str("mode", "roll_call"),
             timer_mode=reader.get_str("timer_mode", "countdown"),
             timer_seconds_left=reader.get_int("timer_seconds_left", 300, min_value=0),
@@ -2544,6 +2657,8 @@ class RollCallTimerConfig:
             group_remaining=reader.get_str("group_remaining", ""),
             group_last=reader.get_str("group_last", ""),
             global_drawn=reader.get_str("global_drawn", ""),
+            remote_roll_enabled=reader.get_bool("remote_roll_enabled", False),
+            remote_roll_key=reader.get_str("remote_roll_key", "tab"),
         )
 
     def to_mapping(self) -> Dict[str, str]:
@@ -2561,6 +2676,10 @@ class RollCallTimerConfig:
             "timer_countdown_minutes": str(int(self.timer_countdown_minutes)),
             "timer_countdown_seconds": str(int(self.timer_countdown_seconds)),
             "timer_sound_enabled": bool_to_str(self.timer_sound_enabled),
+            "timer_sound_variant": self.timer_sound_variant,
+            "timer_reminder_enabled": bool_to_str(self.timer_reminder_enabled),
+            "timer_reminder_interval_minutes": str(int(self.timer_reminder_interval_minutes)),
+            "timer_reminder_sound_variant": self.timer_reminder_sound_variant,
             "mode": self.mode,
             "timer_mode": self.timer_mode,
             "timer_seconds_left": str(int(self.timer_seconds_left)),
@@ -2574,6 +2693,8 @@ class RollCallTimerConfig:
             "group_remaining": self.group_remaining,
             "group_last": self.group_last,
             "global_drawn": self.global_drawn,
+            "remote_roll_enabled": bool_to_str(self.remote_roll_enabled),
+            "remote_roll_key": self.remote_roll_key,
         }
 
 
@@ -2581,8 +2702,8 @@ PEN_STYLE_CONFIGS: Dict[PenStyle, PenStyleConfig] = {
     PenStyle.CHALK: PenStyleConfig(
         key="chalk",
         display_name="粉笔",
-        description="粉笔质感，色彩柔和并带有细腻粉雾与轻微擦痕。",
-        slider_range=(8, 36),
+        description="粉笔颗粒质感，色彩柔和，边缘带轻微粉雾与擦痕。",
+        slider_range=(1, 50),
         default_base=15,
         width_multiplier=1.16,
         smoothing=0.91,
@@ -2632,8 +2753,8 @@ PEN_STYLE_CONFIGS: Dict[PenStyle, PenStyleConfig] = {
     PenStyle.HIGHLIGHTER: PenStyleConfig(
         key="highlighter",
         display_name="荧光笔",
-        description="半透明荧光覆盖，线宽稳定，突出重点且不遮挡底稿。",
-        slider_range=(8, 34),
+        description="半透明荧光覆盖，线宽稳定，不遮挡底稿，适合快速标注。",
+        slider_range=(1, 50),
         default_base=14,
         width_multiplier=2.3,
         smoothing=0.99,
@@ -2685,8 +2806,8 @@ PEN_STYLE_CONFIGS: Dict[PenStyle, PenStyleConfig] = {
     PenStyle.FOUNTAIN: PenStyleConfig(
         key="fountain",
         display_name="钢笔",
-        description="顺滑钢笔笔触，粗细随速度与转折自然呼应，细节清晰。",
-        slider_range=(4, 24),
+        description="顺滑钢笔笔触，粗细随速度与转折自然变化，字迹清晰有力。",
+        slider_range=(1, 50),
         default_base=10,
         width_multiplier=1.01,
         smoothing=0.945,
@@ -2736,8 +2857,8 @@ PEN_STYLE_CONFIGS: Dict[PenStyle, PenStyleConfig] = {
     PenStyle.BRUSH: PenStyleConfig(
         key="brush",
         display_name="毛笔",
-        description="毛笔墨韵饱满，起收笔灵动，线条富有弹性层次。",
-        slider_range=(6, 28),
+        description="毛笔墨韵饱满，起收笔灵动，线条弹性大，适合强调与题注。",
+        slider_range=(1, 50),
         default_base=13,
         width_multiplier=2.2,
         smoothing=0.8,
@@ -3266,13 +3387,17 @@ class _EnsureOnScreenMixin:
 class PenSettingsDialog(_EnsureOnScreenMixin, QDialog):
     """画笔粗细与颜色选择对话框。"""
 
-    COLORS = {
-        "#FFFF00": "黄",
-        "#FFA500": "橙",
-        "#24B47E": "绿",
-        "#800080": "紫",
-        "#FFFFFF": "白",
-    }
+    COLOR_CHOICES: List[Tuple[str, str]] = [
+        ("#000000", "黑"),
+        ("#FF0000", "红"),
+        ("#1E90FF", "蓝"),
+        ("#24B47E", "绿"),
+        ("#FFFF00", "黄"),
+        ("#FFA500", "橙"),
+        ("#800080", "紫"),
+        ("#FFFFFF", "白"),
+    ]
+    SIZE_RANGE = (1, 50)
 
     def __init__(
         self,
@@ -3283,6 +3408,7 @@ class PenSettingsDialog(_EnsureOnScreenMixin, QDialog):
         initial_opacity_overrides: Optional[Mapping[PenStyle, int]] = None,
         initial_base_sizes: Optional[Mapping[PenStyle, float]] = None,
         initial_control_flags: Optional[Mapping[str, Any]] = None,
+        initial_eraser_size: float = 24.0,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("画笔设置")
@@ -3318,6 +3444,8 @@ class PenSettingsDialog(_EnsureOnScreenMixin, QDialog):
                     except (TypeError, ValueError):
                         continue
         self._opacity_overrides: Dict[PenStyle, int] = overrides
+        self._initial_eraser_size = float(clamp(initial_eraser_size, *self.SIZE_RANGE))
+        self._eraser_size = float(self._initial_eraser_size)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
@@ -3402,11 +3530,11 @@ class PenSettingsDialog(_EnsureOnScreenMixin, QDialog):
         self.preview_label.setMinimumSize(self._preview_size)
         layout.addWidget(self.preview_label, 0, Qt.AlignmentFlag.AlignCenter)
 
-        layout.addWidget(QLabel("颜色:"))
+        layout.addWidget(QLabel("画笔的临时颜色:"))
         color_layout = QGridLayout()
         color_layout.setContentsMargins(0, 0, 0, 0)
         color_layout.setSpacing(6)
-        for index, (color_hex, name) in enumerate(self.COLORS.items()):
+        for index, (color_hex, name) in enumerate(self.COLOR_CHOICES):
             button = QPushButton()
             button.setFixedSize(26, 26)
             button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -3417,6 +3545,23 @@ class PenSettingsDialog(_EnsureOnScreenMixin, QDialog):
             button.clicked.connect(lambda _checked=False, c=color_hex: self._select_color(c))
             color_layout.addWidget(button, index // 4, index % 4)
         layout.addLayout(color_layout)
+
+        eraser_layout = QHBoxLayout()
+        eraser_layout.setContentsMargins(0, 0, 0, 0)
+        eraser_layout.setSpacing(6)
+        eraser_icon = QLabel()
+        eraser_pix = IconManager.get_icon("eraser").pixmap(18, 18)
+        eraser_icon.setPixmap(eraser_pix)
+        eraser_icon.setFixedSize(20, 20)
+        eraser_label = QLabel("橡皮擦粗细:")
+        self.eraser_slider = QSlider(Qt.Orientation.Horizontal)
+        self.eraser_slider.setMinimumWidth(140)
+        self.eraser_value = QLabel("")
+        eraser_layout.addWidget(eraser_icon)
+        eraser_layout.addWidget(eraser_label)
+        eraser_layout.addWidget(self.eraser_slider, 1)
+        eraser_layout.addWidget(self.eraser_value)
+        layout.addLayout(eraser_layout)
 
         control_label = QLabel("放映与滚动控制：")
         control_label.setStyleSheet("font-weight: bold;")
@@ -3466,6 +3611,10 @@ class PenSettingsDialog(_EnsureOnScreenMixin, QDialog):
         self.style_combo.currentIndexChanged.connect(self._on_style_changed)
         self.size_slider.valueChanged.connect(self._on_size_changed)
         self.opacity_slider.valueChanged.connect(self._on_opacity_changed)
+        self.eraser_slider.setRange(*self.SIZE_RANGE)
+        self.eraser_slider.setValue(int(round(self._initial_eraser_size)))
+        self.eraser_slider.valueChanged.connect(self._on_eraser_size_changed)
+        self._update_eraser_label()
 
         self._update_style_description()
         self._apply_style_to_slider(base_size=self._initial_base_size, use_default=False)
@@ -3490,7 +3639,7 @@ class PenSettingsDialog(_EnsureOnScreenMixin, QDialog):
         use_default: bool = False,
     ) -> None:
         config = get_pen_style_config(self._current_style)
-        minimum, maximum = config.slider_range
+        minimum, maximum = self.SIZE_RANGE
         prev_block = self.size_slider.blockSignals(True)
         self.size_slider.setRange(minimum, maximum)
         if base_size is not None:
@@ -3513,6 +3662,15 @@ class PenSettingsDialog(_EnsureOnScreenMixin, QDialog):
         base_value = int(self.size_slider.value())
         effective = int(round(base_value * config.width_multiplier))
         self.size_value.setText(f"基础 {base_value}px · 实际≈{effective}px")
+
+    def _update_eraser_label(self) -> None:
+        value = int(clamp(self.eraser_slider.value(), *self.SIZE_RANGE))
+        if self.eraser_slider.value() != value:
+            prev = self.eraser_slider.blockSignals(True)
+            self.eraser_slider.setValue(value)
+            self.eraser_slider.blockSignals(prev)
+        self._eraser_size = float(value)
+        self.eraser_value.setText(f"{value}px")
 
     def _apply_style_to_opacity(self, *, use_default: bool) -> None:
         config = get_pen_style_config(self._current_style)
@@ -3628,6 +3786,9 @@ class PenSettingsDialog(_EnsureOnScreenMixin, QDialog):
         self._update_size_label()
         self._update_preview()
 
+    def _on_eraser_size_changed(self) -> None:
+        self._update_eraser_label()
+
     def _on_opacity_changed(self) -> None:
         config = get_pen_style_config(self._current_style)
         if not config.opacity_range:
@@ -3662,6 +3823,7 @@ class PenSettingsDialog(_EnsureOnScreenMixin, QDialog):
         Dict[PenStyle, int],
         Dict[PenStyle, float],
         Dict[str, bool],
+        float,
     ]:
         bases: Dict[PenStyle, float] = {}
         for style in PEN_STYLE_ORDER:
@@ -3677,6 +3839,7 @@ class PenSettingsDialog(_EnsureOnScreenMixin, QDialog):
             {style: value for style, value in self._opacity_overrides.items()},
             bases,
             self._collect_control_flags(),
+            float(clamp(self._eraser_size, *self.SIZE_RANGE)),
         )
 
 class ShapeSettingsDialog(_EnsureOnScreenMixin, QDialog):
@@ -3843,17 +4006,14 @@ class FloatingToolbar(_EnsureOnScreenMixin, QWidget):
         layout.addWidget(self.title_bar)
 
         self.btn_cursor = QPushButton(IconManager.get_icon("cursor"), "")
-        self.brush_color_buttons: Dict[str, QPushButton] = {}
-        brush_configs = [
-            ("#000000", "黑色画笔"),
-            ("#FF0000", "红色画笔"),
-            ("#1E90FF", "蓝色画笔"),
-        ]  # 预设的高频画笔颜色
-        brush_buttons = []
-        for color_hex, name in brush_configs:
+        self.quick_colors: List[str] = [c.lower() for c in self.overlay.get_quick_colors()]
+        self._palette_colors: List[Tuple[str, str]] = list(PenSettingsDialog.COLOR_CHOICES)
+        self.brush_color_buttons: List[QPushButton] = []
+        brush_buttons: List[QPushButton] = []
+        for idx, color_hex in enumerate(self.quick_colors):
             button = QPushButton(IconManager.get_brush_icon(color_hex), "")
-            button.setToolTip(name)
-            self.brush_color_buttons[color_hex.lower()] = button
+            button.setToolTip(f"常用色{idx + 1}（{color_hex.upper()}）")
+            self.brush_color_buttons.append(button)
             brush_buttons.append(button)
         self.btn_settings = QPushButton(IconManager.get_icon("settings"), "")
         self.btn_shape = QPushButton(IconManager.get_icon("shape"), "")
@@ -3861,6 +4021,7 @@ class FloatingToolbar(_EnsureOnScreenMixin, QWidget):
         self.btn_eraser = QPushButton(IconManager.get_icon("eraser"), "")
         self.btn_eraser.setObjectName("eraserButton")
         self.btn_region_delete = QPushButton(IconManager.get_icon("selection_delete"), "")
+        self.btn_region_delete.setObjectName("regionDeleteButton")
         self.btn_clear_all = QPushButton(IconManager.get_icon("clear_all"), "")
         self.btn_clear_all.setObjectName("clearButton")
         self.btn_whiteboard = QPushButton(IconManager.get_icon("whiteboard"), "")
@@ -3904,10 +4065,10 @@ class FloatingToolbar(_EnsureOnScreenMixin, QWidget):
             self.btn_cursor: "光标",
             self.btn_shape: "图形",
             self.btn_undo: "撤销",
-            self.btn_eraser: "橡皮（再次点击恢复画笔）",
+            self.btn_eraser: "橡皮擦（再次点击恢复画笔）",
             self.btn_region_delete: "框选删除（框选区域后清除笔迹）",
-            self.btn_clear_all: "清除（并恢复画笔）",
-            self.btn_whiteboard: "白板（单击开关 / 双击换色）",
+            self.btn_clear_all: "一键清屏（并恢复画笔）",
+            self.btn_whiteboard: "白板（单击开关 / 长按换色）",
             self.btn_settings: "画笔设置",
         }
         for button in brush_buttons:
@@ -3929,33 +4090,52 @@ class FloatingToolbar(_EnsureOnScreenMixin, QWidget):
         self.tool_buttons.setExclusive(True)
 
         self.btn_cursor.clicked.connect(self.overlay.toggle_cursor_mode)
-        for color_hex, button in zip([c for c, _ in brush_configs], brush_buttons, strict=False):
-            button.clicked.connect(lambda _checked, c=color_hex: self.overlay.use_brush_color(c))
         self.btn_shape.clicked.connect(self._select_shape)
         self.btn_undo.clicked.connect(self.overlay.undo_last_action)
         self.btn_eraser.clicked.connect(self.overlay.toggle_eraser_mode)
         self.btn_region_delete.clicked.connect(self.overlay.toggle_region_erase_mode)
         self.btn_clear_all.clicked.connect(self.overlay.clear_all)
         self.btn_settings.clicked.connect(self.overlay.open_pen_settings)
-        self.btn_whiteboard.clicked.connect(self._handle_whiteboard_click)
+        self.btn_whiteboard.pressed.connect(self._handle_whiteboard_pressed)
+        self.btn_whiteboard.released.connect(self._handle_whiteboard_released)
 
-        self._wb_click_timer = QTimer(self)
-        self._wb_click_timer.setInterval(QApplication.instance().doubleClickInterval())
-        self._wb_click_timer.setSingleShot(True)
-        # 使用单次定时器来区分白板按钮的单击与双击行为
-        self._wb_click_timer.timeout.connect(self.overlay.toggle_whiteboard)
+        self._BRUSH_LONG_PRESS_MS = 500
+        self._brush_hold_timer = QTimer(self)
+        self._brush_hold_timer.setSingleShot(True)
+        self._brush_hold_timer.timeout.connect(self._on_brush_long_press)
+        self._brush_hold_index: Optional[int] = None
+        self._brush_hold_triggered = False
+        for idx, button in enumerate(self.brush_color_buttons):
+            button.pressed.connect(lambda _checked=False, i=idx: self._on_brush_pressed(i))
+            button.released.connect(lambda _checked=False, i=idx: self._on_brush_released(i))
+
+        self._WHITEBOARD_LONG_PRESS_MS = 650
+        self._wb_long_press_timer = QTimer(self)
+        self._wb_long_press_timer.setSingleShot(True)
+        self._wb_long_press_timer.timeout.connect(self._handle_whiteboard_long_press)
+        self._wb_hold_feedback_timer = QTimer(self)
+        self._wb_hold_feedback_timer.setInterval(30)
+        self._wb_hold_feedback_timer.timeout.connect(self._update_whiteboard_hold_feedback)
+        self._wb_press_started_at: Optional[float] = None
+        self._wb_long_press_triggered = False
+        self._whiteboard_hold_active = False
 
         self.btn_undo.setEnabled(False)
 
         for widget in (self, container, self.title_bar):
             widget.installEventFilter(self)
+        self.setCursor(Qt.CursorShape.ArrowCursor)
 
     def update_tool_states(self, mode: str, pen_color: QColor) -> None:
         color_key = pen_color.name().lower()
-        for hex_key, button in self.brush_color_buttons.items():
+        matched_color = False
+        for idx, button in enumerate(self.brush_color_buttons):
+            hex_key = self.quick_colors[idx] if idx < len(self.quick_colors) else ""
             prev = button.blockSignals(True)
-            button.setChecked(mode == "brush" and hex_key == color_key)
+            is_active = mode == "brush" and hex_key.lower() == color_key
+            button.setChecked(is_active)
             button.blockSignals(prev)
+            matched_color = matched_color or is_active
         for tool, button in (
             ("cursor", self.btn_cursor),
             ("shape", self.btn_shape),
@@ -3965,7 +4145,7 @@ class FloatingToolbar(_EnsureOnScreenMixin, QWidget):
             prev = button.blockSignals(True)
             button.setChecked(mode == tool)
             button.blockSignals(prev)
-        if mode == "brush" and color_key not in self.brush_color_buttons:
+        if mode == "brush" and not matched_color:
             for button in (self.btn_cursor, self.btn_shape, self.btn_eraser):
                 prev = button.blockSignals(True)
                 button.setChecked(False)
@@ -4020,6 +4200,69 @@ class FloatingToolbar(_EnsureOnScreenMixin, QWidget):
             self._tip.hide_tip()
         return super().eventFilter(obj, event)
 
+    def _on_brush_pressed(self, index: int) -> None:
+        self._brush_hold_index = index
+        self._brush_hold_triggered = False
+        self._brush_hold_timer.start(self._BRUSH_LONG_PRESS_MS)
+
+    def _on_brush_released(self, index: int) -> None:
+        if self._brush_hold_index != index:
+            return
+        triggered = self._brush_hold_triggered
+        self._brush_hold_timer.stop()
+        self._brush_hold_index = None
+        if triggered:
+            return
+        color = self.quick_colors[index] if index < len(self.quick_colors) else "#000000"
+        self.overlay.use_brush_color(color)
+
+    def _on_brush_long_press(self) -> None:
+        idx = self._brush_hold_index
+        self._brush_hold_triggered = True
+        if idx is None:
+            return
+        self._show_brush_palette(idx)
+        self._brush_hold_index = None
+
+    def _show_brush_palette(self, index: int) -> None:
+        if index < 0 or index >= len(self.brush_color_buttons):
+            return
+        button = self.brush_color_buttons[index]
+        menu = QMenu(self)
+        for color_hex, label in self._palette_colors:
+            act = menu.addAction(label)
+            act.setData(color_hex)
+            act.setIcon(IconManager.get_brush_icon(color_hex))
+        action = menu.exec(button.mapToGlobal(button.rect().bottomLeft()))
+        if action is None:
+            return
+        data = action.data()
+        try:
+            selected = str(data)
+        except Exception:
+            selected = ""
+        normalized = self.overlay.set_quick_color_slot(index, selected)
+        self.update_quick_color_slot(index, normalized)
+        self.overlay.use_brush_color(normalized)
+
+    def update_quick_color_slot(self, index: int, color_hex: str) -> None:
+        if index < 0:
+            return
+        while len(self.quick_colors) <= index:
+            self.quick_colors.append("#000000")
+        color = QColor(color_hex)
+        if not color.isValid():
+            return
+        normalized = color.name().lower()
+        self.quick_colors[index] = normalized
+        try:
+            button = self.brush_color_buttons[index]
+        except IndexError:
+            return
+        button.setIcon(IconManager.get_brush_icon(normalized))
+        button.setToolTip(f"常用色{index + 1}（{normalized.upper()}）")
+        button.update()
+
     def _select_shape(self) -> None:
         dialog = ShapeSettingsDialog(self)
         if dialog.exec():
@@ -4029,12 +4272,79 @@ class FloatingToolbar(_EnsureOnScreenMixin, QWidget):
         else:
             self.overlay.update_toolbar_state()
 
-    def _handle_whiteboard_click(self) -> None:
-        if self._wb_click_timer.isActive():
-            self._wb_click_timer.stop()
-            self.overlay.open_board_color_dialog()
-        else:
-            self._wb_click_timer.start()
+    def _handle_whiteboard_pressed(self) -> None:
+        self._wb_long_press_triggered = False
+        self._wb_press_started_at = time.monotonic()
+        self._whiteboard_hold_active = True
+        self._apply_whiteboard_hold_progress(0.0)
+        self._wb_long_press_timer.start(self._WHITEBOARD_LONG_PRESS_MS)
+        self._wb_hold_feedback_timer.start()
+
+    def _handle_whiteboard_released(self) -> None:
+        self._wb_long_press_timer.stop()
+        triggered = self._wb_long_press_triggered
+        self._stop_whiteboard_hold_feedback()
+        if triggered:
+            return
+        self.overlay.toggle_whiteboard()
+
+    def _handle_whiteboard_long_press(self) -> None:
+        self._wb_long_press_triggered = True
+        self._stop_whiteboard_hold_feedback(reset_style=False)
+        self._apply_whiteboard_hold_progress(1.0)
+        self.overlay.open_board_color_dialog()
+        self._stop_whiteboard_hold_feedback()
+
+    def _update_whiteboard_hold_feedback(self) -> None:
+        if not self._whiteboard_hold_active or self._wb_press_started_at is None:
+            return
+        elapsed_ms = (time.monotonic() - self._wb_press_started_at) * 1000.0
+        progress = min(1.0, elapsed_ms / float(self._WHITEBOARD_LONG_PRESS_MS))
+        self._apply_whiteboard_hold_progress(progress)
+        if progress >= 1.0:
+            self._wb_hold_feedback_timer.stop()
+
+    def _stop_whiteboard_hold_feedback(self, *, reset_style: bool = True) -> None:
+        self._whiteboard_hold_active = False
+        self._wb_hold_feedback_timer.stop()
+        if reset_style:
+            self.btn_whiteboard.setStyleSheet("")
+            self.btn_whiteboard.update()
+
+    @staticmethod
+    def _mix_color(start: QColor, end: QColor, ratio: float) -> QColor:
+        ratio = max(0.0, min(1.0, ratio))
+        return QColor(
+            int(start.red() + (end.red() - start.red()) * ratio),
+            int(start.green() + (end.green() - start.green()) * ratio),
+            int(start.blue() + (end.blue() - start.blue()) * ratio),
+            int(start.alpha() + (end.alpha() - start.alpha()) * ratio),
+        )
+
+    def _apply_whiteboard_hold_progress(self, progress: float) -> None:
+        try:
+            base_bg = QColor(StyleConfig.TOOLBAR_BUTTON_BG)
+            target_bg = QColor(StyleConfig.WHITEBOARD_ACTIVE_BG)
+            base_border = QColor(StyleConfig.TOOLBAR_BORDER)
+            target_border = QColor(StyleConfig.WHITEBOARD_ACTIVE_BORDER)
+            bg_color = self._mix_color(base_bg, target_bg, progress)
+            border_color = self._mix_color(base_border, target_border, progress)
+            self.btn_whiteboard.setStyleSheet(
+                "background: rgba({r},{g},{b},{a}); border-color: rgba({br},{bg},{bb},{ba});".format(
+                    r=bg_color.red(),
+                    g=bg_color.green(),
+                    b=bg_color.blue(),
+                    a=bg_color.alpha(),
+                    br=border_color.red(),
+                    bg=border_color.green(),
+                    bb=border_color.blue(),
+                    ba=border_color.alpha(),
+                )
+            )
+            self.btn_whiteboard.update()
+        except Exception:
+            # 视觉反馈失败时不影响功能。
+            pass
 
     def set_whiteboard_locked(self, locked: bool) -> None:
         self._whiteboard_locked = locked
@@ -4050,6 +4360,11 @@ class FloatingToolbar(_EnsureOnScreenMixin, QWidget):
         self.style().polish(self.btn_whiteboard)
 
     def enterEvent(self, event) -> None:
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        try:
+            self.overlay.setCursor(Qt.CursorShape.ArrowCursor)
+        except Exception:
+            pass
         self.overlay.handle_toolbar_enter()
         self.overlay.raise_toolbar()
         super().enterEvent(event)
@@ -4057,6 +4372,10 @@ class FloatingToolbar(_EnsureOnScreenMixin, QWidget):
     def leaveEvent(self, event) -> None:
         super().leaveEvent(event)
         self.overlay.handle_toolbar_leave()
+        try:
+            self.overlay.update_cursor()
+        except Exception:
+            pass
         QTimer.singleShot(0, self.overlay.on_toolbar_mouse_leave)
 
     def wheelEvent(self, event) -> None:
@@ -6450,6 +6769,39 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
     def _overlay_widget(self) -> Optional[QWidget]:
         return self
 
+    @staticmethod
+    def _normalize_color_hex(color_hex: str, fallback: str) -> str:
+        color = QColor(color_hex)
+        if not color.isValid():
+            color = QColor(fallback)
+        return color.name().lower()
+
+    def _normalize_quick_colors(self, colors: Iterable[str]) -> List[str]:
+        defaults = ["#000000", "#ff0000", "#1e90ff"]
+        normalized: List[str] = []
+        for idx, color in enumerate(colors):
+            fallback = defaults[idx] if idx < len(defaults) else defaults[-1]
+            normalized.append(self._normalize_color_hex(color, fallback))
+        while len(normalized) < 3:
+            normalized.append(defaults[len(normalized)])
+        return normalized[:3]
+
+    def get_quick_colors(self) -> List[str]:
+        return list(self.quick_colors)
+
+    def set_quick_color_slot(self, index: int, color_hex: str) -> str:
+        if index < 0 or index >= len(self.quick_colors):
+            return color_hex
+        normalized = self._normalize_color_hex(color_hex, self.quick_colors[index])
+        self.quick_colors[index] = normalized
+        if getattr(self, "toolbar", None):
+            try:
+                self.toolbar.update_quick_color_slot(index, normalized)
+            except Exception:
+                pass
+        self.save_settings()
+        return normalized
+
     def __init__(self, settings_manager: SettingsManager) -> None:
         super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -6473,6 +6825,14 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         self.pen_color = QColor(color_hex)
         if not self.pen_color.isValid():
             self.pen_color = QColor("#ff0000")
+        self.quick_colors: List[str] = self._normalize_quick_colors(
+            [
+                getattr(paint_config, "quick_color_1", "#000000"),
+                getattr(paint_config, "quick_color_2", "#ff0000"),
+                getattr(paint_config, "quick_color_3", "#1e90ff"),
+            ]
+        )
+        self.eraser_size = float(clamp(getattr(paint_config, "eraser_size", 24.0), 1.0, 50.0))
         self._style_opacity_overrides: Dict[PenStyle, int] = {}
         for style in PEN_STYLE_ORDER:
             config = get_pen_style_config(style)
@@ -6816,6 +7176,7 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             initial_opacity_overrides=self._style_opacity_overrides,
             initial_base_sizes=self._style_base_sizes,
             initial_control_flags=getattr(self, "_presentation_control_flags", None),
+            initial_eraser_size=self.eraser_size,
         )
         if dialog.exec():
             (
@@ -6825,6 +7186,7 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                 overrides,
                 base_sizes,
                 control_flags,
+                eraser_size,
             ) = dialog.get_settings()
             self._ingest_style_base_sizes(base_sizes)
             self.pen_style = style
@@ -6833,6 +7195,7 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                 clamp_base_size_for_style(self.pen_style, self.pen_base_size)
             )
             self.pen_color = QColor(color)
+            self.eraser_size = float(clamp(eraser_size, 1.0, 50.0))
             self._apply_opacity_overrides(overrides)
             self._update_presentation_control_flags(control_flags)
             self._apply_pen_style_change()
@@ -8134,7 +8497,11 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             self.setCursor(Qt.CursorShape.CrossCursor); return
         if self.mode == "shape":
             self.setCursor(Qt.CursorShape.CrossCursor); return
-        d = max(10, int(self.pen_size * (3.2 if self.mode == "eraser" else 2.2)))
+        if self.mode == "eraser":
+            base = float(clamp(self.eraser_size, 1.0, 50.0))
+            d = max(10, int(base * 2.0))
+        else:
+            d = max(10, int(self.pen_size * 2.2))
         self.cursor_pixmap = QPixmap(d, d); self.cursor_pixmap.fill(Qt.GlobalColor.transparent)
         p = QPainter(self.cursor_pixmap); p.setRenderHint(QPainter.RenderHint.Antialiasing)
         if self.mode == "eraser":
@@ -8729,6 +9096,12 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         self.paint_config.brush_base_size = float(self.pen_base_size)
         self.paint_config.brush_color = self.pen_color.name()
         self.paint_config.brush_style = self.pen_style
+        quicks = self._normalize_quick_colors(self.quick_colors)
+        self.quick_colors = quicks
+        self.paint_config.quick_color_1 = quicks[0]
+        self.paint_config.quick_color_2 = quicks[1]
+        self.paint_config.quick_color_3 = quicks[2]
+        self.paint_config.eraser_size = float(clamp(self.eraser_size, 1.0, 50.0))
         self.paint_config.control_ms_ppt = bool(self.control_ms_ppt)
         self.paint_config.control_ms_word = bool(self.control_ms_word)
         self.paint_config.control_wps_ppt = bool(self.control_wps_ppt)
@@ -9365,8 +9738,9 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             start_point = QPointF(current)
             distance = 0.0
 
-        radius = max(8.0, float(self.pen_size) * 1.6)
-        target_width = max(12.0, radius * 2.0)
+        base_eraser = float(clamp(self.eraser_size, 1.0, 50.0))
+        radius = max(4.0, base_eraser)
+        target_width = max(8.0, radius * 2.0)
         if abs(target_width - self._eraser_stroker_width) > 0.5:
             self._eraser_stroker.setWidth(target_width)
             self._eraser_stroker_width = target_width
@@ -10373,6 +10747,657 @@ class StudentPhotoOverlay(QWidget):
         return QRect(rect)
 
 
+class RollCallLogic(QObject):
+    """封装点名核心逻辑，便于在后台或遥控触发时复用。"""
+
+    def __init__(self, window: "RollCallTimerWindow") -> None:
+        super().__init__(window)
+        self.window = window
+
+    # ---- 公开接口 ----
+    def roll_student(self, speak: bool = True, *, ensure_mode: bool = False) -> bool:
+        w = self.window
+        if ensure_mode and w.mode != "roll_call":
+            w.mode = "roll_call"
+            w.update_mode_ui(force_timer_reset=False)
+        if w.mode != "roll_call":
+            return False
+        if not w._ensure_student_data_ready():
+            return False
+        group_name = w.current_group_name
+        pool = w._group_remaining_indices.get(group_name)
+        if pool is None:
+            self._ensure_group_pool(group_name)
+            pool = w._group_remaining_indices.get(group_name, [])
+        if not pool:
+            base_total = w._group_all_indices.get(group_name, [])
+            if not base_total:
+                show_quiet_information(w, f"'{group_name}' 分组当前没有可点名的学生。")
+                w.current_student_index = None
+                w.display_current_student()
+                return False
+            if self._all_groups_completed():
+                show_quiet_information(w, "所有学生都已完成点名，请点击“重置”按钮重新开始。")
+            else:
+                show_quiet_information(w, f"'{group_name}' 的同学已经全部点到，请切换其他分组或点击“重置”按钮。")
+            return False
+        draw_index = w._rng.randrange(len(pool)) if len(pool) > 1 else 0
+        w.current_student_index = pool.pop(draw_index)
+        w._pending_passive_student = w.current_student_index
+        w._group_last_student[group_name] = w.current_student_index
+        self._mark_student_drawn(w.current_student_index)
+        w.display_current_student()
+        if speak:
+            w._announce_current_student()
+        # 即时同步保存配置，防止异常退出导致未点名名单丢失。
+        w.save_settings()
+        return True
+
+    def reset_roll_call_state(self) -> None:
+        self.window.settings_manager.clear_roll_call_history()
+        self.window._pending_passive_student = None
+        self._rebuild_group_indices()
+        self._ensure_group_pool(self.window.current_group_name)
+
+    def reset_single_group(self, group_name: str) -> None:
+        if group_name == "全部":
+            return
+        w = self.window
+        base_indices_raw = w._group_all_indices.get(group_name)
+        if base_indices_raw is None:
+            return
+        base_indices = self._collect_base_indices(base_indices_raw)
+        shuffled = list(base_indices)
+        self._shuffle(shuffled)
+        w._group_remaining_indices[group_name] = shuffled
+        w._group_initial_sequences[group_name] = list(shuffled)
+        w._group_last_student[group_name] = None
+        if w._pending_passive_student in shuffled:
+            w._pending_passive_student = None
+        history = w._group_drawn_history.setdefault(group_name, set())
+        if history:
+            for idx in list(history):
+                self._remove_from_global_history(idx, ignore_group=group_name)
+            history.clear()
+        last_all = w._group_last_student.get("全部")
+        if last_all is not None:
+            try:
+                last_all_key = int(last_all)
+            except (TypeError, ValueError):
+                last_all_key = None
+            if last_all_key is not None and last_all_key not in w._global_drawn_students:
+                w._group_last_student["全部"] = None
+        self._refresh_all_group_pool()
+
+    # ---- 核心内部逻辑 ----
+    def _rebuild_group_indices(self) -> None:
+        w = self.window
+        all_indices: Dict[str, List[int]] = {}
+        remaining: Dict[str, List[int]] = {}
+        last_student: Dict[str, Optional[int]] = {}
+        student_groups: Dict[int, set[str]] = {}
+        initial_sequences: Dict[str, List[int]] = {}
+        if w.student_data.empty:
+            all_indices["全部"] = []
+        else:
+            all_indices["全部"] = list(w.student_data.index)
+            for idx in all_indices["全部"]:
+                student_groups.setdefault(int(idx), set()).add("全部")
+            group_series = w.student_data["分组"].astype(str).str.strip().str.upper()
+            for group_name in w.groups:
+                if group_name == "全部":
+                    continue
+                mask = group_series == group_name
+                all_indices[group_name] = list(w.student_data[mask].index)
+                for idx in all_indices[group_name]:
+                    student_groups.setdefault(int(idx), set()).add(group_name)
+        for group_name, indices in all_indices.items():
+            pool = list(indices)
+            self._shuffle(pool)
+            remaining[group_name] = pool
+            initial_sequences[group_name] = list(pool)
+            last_student[group_name] = None
+        w._group_all_indices = all_indices
+        w._group_remaining_indices = remaining
+        w._group_last_student = last_student
+        w._group_initial_sequences = initial_sequences
+        w._student_groups = student_groups
+        w._group_drawn_history = {group: set() for group in all_indices}
+        # “全部”分组直接引用全局集合，避免重复维护两份数据造成不一致
+        if "全部" in w._group_drawn_history:
+            w._global_drawn_students.clear()
+            w._group_drawn_history["全部"] = w._global_drawn_students
+        else:
+            w._group_drawn_history["全部"] = w._global_drawn_students
+        self._refresh_all_group_pool()
+
+    def _mark_student_drawn(self, student_index: int) -> None:
+        w = self.window
+        student_key = None
+        try:
+            student_key = int(student_index)
+        except (TypeError, ValueError):
+            return
+        groups = w._student_groups.get(student_key)
+        if not groups:
+            return
+        w._global_drawn_students.add(student_key)
+        for group in groups:
+            if group == "全部":
+                history = w._group_drawn_history.setdefault("全部", w._global_drawn_students)
+            else:
+                history = w._group_drawn_history.setdefault(group, set())
+            history.add(student_key)
+            pool = w._group_remaining_indices.get(group)
+            if not pool:
+                continue
+            cleaned: List[int] = []
+            for value in pool:
+                try:
+                    idx = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if idx != student_key:
+                    cleaned.append(idx)
+            w._group_remaining_indices[group] = cleaned
+        self._refresh_all_group_pool()
+
+    def _remove_from_global_history(self, student_index: int, ignore_group: Optional[str] = None) -> None:
+        w = self.window
+        try:
+            student_key = int(student_index)
+        except (TypeError, ValueError):
+            return
+        for group, history in w._group_drawn_history.items():
+            if group == "全部" or group == ignore_group:
+                continue
+            if student_key in history:
+                return
+        w._global_drawn_students.discard(student_key)
+
+    def _refresh_all_group_pool(self) -> None:
+        w = self.window
+        base_all_list = self._collect_base_indices(w._group_all_indices.get("全部", []))
+        base_all_set = set(base_all_list)
+        subgroup_base: Dict[str, Tuple[List[int], Set[int]]] = {}
+        subgroup_remaining: Dict[str, List[int]] = {}
+        subgroup_remaining_union: Set[int] = set()
+        drawn_from_subgroups: Set[int] = set()
+        for group, raw_indices in w._group_all_indices.items():
+            if group == "全部":
+                continue
+            base_list = self._collect_base_indices(raw_indices)
+            base_set = set(base_list)
+            subgroup_base[group] = (base_list, base_set)
+            pool = w._group_remaining_indices.get(group, [])
+            sanitized = self._normalize_indices(pool, allowed=base_set)
+            if sanitized != pool:
+                w._group_remaining_indices[group] = sanitized
+            subgroup_remaining[group] = sanitized
+            subgroup_remaining_union.update(sanitized)
+            drawn_from_subgroups.update(idx for idx in base_set if idx not in sanitized)
+            initial = w._group_initial_sequences.get(group)
+            if initial is None:
+                w._group_initial_sequences[group] = list(base_list)
+            else:
+                cleaned_initial = self._normalize_indices(initial, allowed=base_set)
+                if cleaned_initial != list(initial):
+                    w._group_initial_sequences[group] = cleaned_initial
+                for idx in base_list:
+                    if idx not in w._group_initial_sequences[group]:
+                        w._group_initial_sequences[group].append(idx)
+        valid_global = {
+            idx
+            for idx in w._global_drawn_students
+            if idx in base_all_set and idx not in subgroup_remaining_union
+        }
+        new_global = {idx for idx in drawn_from_subgroups if idx in base_all_set}
+        new_global.update(valid_global)
+        w._global_drawn_students = set(new_global)
+        w._group_drawn_history["全部"] = w._global_drawn_students
+        for group, (_base_list, base_set) in subgroup_base.items():
+            pool = subgroup_remaining.get(group, [])
+            filtered = [idx for idx in pool if idx in base_set and idx not in w._global_drawn_students]
+            if filtered != pool:
+                w._group_remaining_indices[group] = filtered
+                subgroup_remaining[group] = filtered
+            drawn_set = {idx for idx in base_set if idx not in filtered}
+            w._group_drawn_history[group] = drawn_set
+        order_hint = w._group_initial_sequences.get("全部")
+        if order_hint is None:
+            shuffled = list(base_all_list)
+            self._shuffle(shuffled)
+            order_hint = shuffled
+        else:
+            cleaned_all = self._normalize_indices(order_hint, allowed=base_all_set)
+            if cleaned_all != list(order_hint):
+                order_hint = cleaned_all
+            else:
+                order_hint = list(order_hint)
+            for idx in base_all_list:
+                if idx not in order_hint:
+                    order_hint.append(idx)
+        w._group_initial_sequences["全部"] = list(order_hint)
+        normalized_all = [idx for idx in order_hint if idx not in w._global_drawn_students]
+        seen_all: Set[int] = set(normalized_all)
+        for idx in base_all_list:
+            if idx in seen_all or idx in w._global_drawn_students:
+                continue
+            normalized_all.append(idx)
+            seen_all.add(idx)
+        w._group_remaining_indices["全部"] = normalized_all
+
+    def _ensure_group_pool(self, group_name: str, force_reset: bool = False) -> None:
+        w = self.window
+        if group_name not in w._group_all_indices:
+            if w.student_data.empty:
+                base_list: List[int] = []
+            elif group_name == "全部":
+                base_list = list(w.student_data.index)
+            else:
+                group_series = w.student_data["分组"].astype(str).str.strip().str.upper()
+                base_list = list(w.student_data[group_series == group_name].index)
+            w._group_all_indices[group_name] = base_list
+            w._group_remaining_indices[group_name] = []
+            w._group_last_student.setdefault(group_name, None)
+            if group_name == "全部":
+                w._group_drawn_history[group_name] = w._global_drawn_students
+            else:
+                w._group_drawn_history.setdefault(group_name, set())
+            for idx in base_list:
+                entry = w._student_groups.setdefault(int(idx), set())
+                entry.add(group_name)
+                entry.add("全部")
+            # 新增分组时同步生成初始顺序
+            shuffled = list(base_list)
+            self._shuffle(shuffled)
+            w._group_initial_sequences[group_name] = shuffled
+        base_indices = self._collect_base_indices(w._group_all_indices.get(group_name, []))
+        if group_name == "全部":
+            drawn_history = w._group_drawn_history.setdefault("全部", w._global_drawn_students)
+            reference_drawn = w._global_drawn_students
+        else:
+            drawn_history = w._group_drawn_history.setdefault(group_name, set())
+            reference_drawn = drawn_history
+        if group_name == "全部":
+            # “全部”分组直接依据全局集合生成剩余名单，避免与各子分组脱节
+            if group_name not in w._group_initial_sequences:
+                shuffled = list(base_indices)
+                self._shuffle(shuffled)
+                w._group_initial_sequences[group_name] = shuffled
+            self._refresh_all_group_pool()
+            w._group_last_student.setdefault(group_name, None)
+            return
+        if force_reset or group_name not in w._group_remaining_indices:
+            drawn_history.clear()
+            pool = list(base_indices)
+            self._shuffle(pool)
+            w._group_remaining_indices[group_name] = pool
+            w._group_last_student.setdefault(group_name, None)
+            w._group_initial_sequences[group_name] = list(pool)
+            self._refresh_all_group_pool()
+            return
+        raw_pool = w._group_remaining_indices.get(group_name, [])
+        normalized_pool: List[int] = []
+        seen: set[int] = set()
+        for value in raw_pool:
+            try:
+                idx = int(value)
+            except (TypeError, ValueError):
+                continue
+            if idx in base_indices and idx not in seen and idx not in reference_drawn:
+                normalized_pool.append(idx)
+                seen.add(idx)
+        source_order = w._group_initial_sequences.get(group_name)
+        if source_order is None:
+            # 如果未记录初始顺序，则退回数据原有顺序
+            source_order = list(base_indices)
+            w._group_initial_sequences[group_name] = list(source_order)
+        additional: List[int] = []
+        for idx in source_order:
+            if idx in reference_drawn or idx in seen or idx not in base_indices:
+                continue
+            normalized_pool.append(idx)
+            seen.add(idx)
+        for idx in base_indices:
+            if idx in reference_drawn or idx in seen:
+                continue
+            additional.append(idx)
+            seen.add(idx)
+        if additional:
+            self._shuffle(additional)
+            for value in additional:
+                insert_at = w._rng.randrange(len(normalized_pool) + 1) if normalized_pool else 0
+                normalized_pool.insert(insert_at, value)
+        w._group_remaining_indices[group_name] = normalized_pool
+        w._group_initial_sequences[group_name] = list(normalized_pool)
+        w._group_last_student.setdefault(group_name, None)
+        self._refresh_all_group_pool()
+
+    def _all_groups_completed(self) -> bool:
+        w = self.window
+        total_students = len(w._group_all_indices.get("全部", []))
+        if total_students == 0:
+            return True
+        if len(w._global_drawn_students) < total_students:
+            return False
+        for group, base in w._group_all_indices.items():
+            if not base:
+                continue
+            remaining = w._group_remaining_indices.get(group, [])
+            if remaining:
+                return False
+        return True
+
+    # ---- 工具方法 ----
+    def _shuffle(self, values: List[int]) -> None:
+        w = self.window
+        try:
+            w._rng.shuffle(values)
+        except Exception:
+            random.shuffle(values)
+
+    @staticmethod
+    def _normalize_indices(values: Iterable[Any], *, allowed: Optional[Set[int]] = None) -> List[int]:
+        normalized: List[int] = []
+        seen: Set[int] = set()
+        for value in values:
+            try:
+                idx = int(value)
+            except (TypeError, ValueError):
+                continue
+            if allowed is not None and idx not in allowed:
+                continue
+            if idx in seen:
+                continue
+            normalized.append(idx)
+            seen.add(idx)
+        return normalized
+
+    def _collect_base_indices(self, values: Optional[Iterable[Any]]) -> List[int]:
+        if values is None:
+            return []
+        return self._normalize_indices(values)
+
+
+class RemotePresenterHotkey(QObject):
+    """全局监听翻页笔按键，在任何场景触发“翻页笔遥控点名”。"""
+
+    hotkey_pressed = pyqtSignal()
+
+    _WH_KEYBOARD_LL = 13
+    _WM_KEYDOWN = 0x0100
+    _WM_KEYUP = 0x0101
+    _WM_SYSKEYDOWN = 0x0104
+    _WM_SYSKEYUP = 0x0105
+    _HC_ACTION = getattr(win32con, "HC_ACTION", 0)
+
+    class _KBDLLHOOKSTRUCT(ctypes.Structure):  # type: ignore[misc,override]
+        _fields_ = [
+            ("vkCode", wintypes.DWORD),
+            ("scanCode", wintypes.DWORD),
+            ("flags", wintypes.DWORD),
+            ("time", wintypes.DWORD),
+            ("dwExtraInfo", wintypes.ULONG_PTR),
+        ]
+
+    def __init__(self, parent: Optional[QObject] = None) -> None:
+        super().__init__(parent)
+        self._hook_handle: Optional[int] = None
+        self._hook_handle_pywin32: Optional[Any] = None
+        self._low_level_proc = None
+        self._skip_keyup = False
+        self._vk_code = self._normalize_vk("tab")
+        self._forwarder_probe = self._build_probe()
+
+    @property
+    def available(self) -> bool:
+        return bool(_USER32 and win32con and win32gui)
+
+    def _build_probe(self) -> Optional[_PresentationForwarder]:
+        if not self.available:
+            return None
+        try:
+            class _OverlayStub:
+                whiteboard_active = False
+                mode = "cursor"
+
+                def _presentation_control_allowed(self, _hwnd: Optional[int], *, log: bool = False) -> bool:
+                    return True
+
+            return _PresentationForwarder(_OverlayStub())
+        except Exception:
+            return None
+
+    def set_key(self, key: str) -> None:
+        vk = self._normalize_vk(key)
+        if vk != self._vk_code:
+            self._vk_code = vk
+            if self._hook_handle:
+                self.stop()
+                self.start()
+
+    def is_active(self) -> bool:
+        return bool(self._hook_handle or self._hook_handle_pywin32)
+
+    def start(self) -> bool:
+        if not self.available:
+            return False
+        if self._hook_handle or self._hook_handle_pywin32:
+            return True
+        # 方案1：ctypes
+        try:
+            callback_type = ctypes.WINFUNCTYPE(wintypes.LRESULT, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
+            self._low_level_proc = callback_type(self._keyboard_hook)
+            module_handle = _KERNEL32.GetModuleHandleW(None) if _KERNEL32 is not None else 0
+            handle = _USER32.SetWindowsHookExW(self._WH_KEYBOARD_LL, self._low_level_proc, module_handle, 0)
+            if handle:
+                self._hook_handle = handle
+                return True
+        except Exception:
+            self._hook_handle = None
+        # 方案2：pywin32 兜底
+        if win32api is not None and win32con is not None:
+            try:
+                from win32con import WH_KEYBOARD_LL  # type: ignore
+                self._hook_handle_pywin32 = win32api.SetWindowsHookEx(WH_KEYBOARD_LL, self._keyboard_hook, 0, 0)  # type: ignore[arg-type]
+                if self._hook_handle_pywin32:
+                    return True
+            except Exception:
+                self._hook_handle_pywin32 = None
+        self._low_level_proc = None
+        return False
+
+    def stop(self) -> None:
+        if self._hook_handle and _USER32 is not None:
+            try:
+                _USER32.UnhookWindowsHookEx(self._hook_handle)
+            except Exception:
+                pass
+        if self._hook_handle_pywin32:
+            try:
+                if win32api is not None:
+                    win32api.UnhookWindowsHookEx(self._hook_handle_pywin32)  # type: ignore[arg-type]
+            except Exception:
+                pass
+        self._hook_handle = None
+        self._hook_handle_pywin32 = None
+        self._low_level_proc = None
+        self._skip_keyup = False
+
+    def _keyboard_hook(self, nCode: int, wParam: int, lParam: int) -> int:
+        if nCode == self._HC_ACTION and self._vk_code:
+            if wParam in (self._WM_KEYDOWN, self._WM_SYSKEYDOWN, self._WM_KEYUP, self._WM_SYSKEYUP):
+                try:
+                    data = ctypes.cast(lParam, ctypes.POINTER(self._KBDLLHOOKSTRUCT)).contents
+                except Exception:
+                    data = None
+                if data and int(data.vkCode) == int(self._vk_code):
+                    if wParam in (self._WM_KEYDOWN, self._WM_SYSKEYDOWN):
+                        if self._should_intercept():
+                            self._skip_keyup = True
+                            self._queue_emit()
+                            return 1
+                    elif self._skip_keyup:
+                        self._skip_keyup = False
+                        return 1
+        if _USER32 is None:
+            return 0
+        try:
+            return int(_USER32.CallNextHookEx(self._hook_handle or 0, nCode, wParam, lParam))
+        except Exception:
+            return 0
+
+    def _queue_emit(self) -> None:
+        QTimer.singleShot(0, self.hotkey_pressed.emit)
+
+    def _should_intercept(self) -> bool:
+        # 遥控点名在任意前台窗口下都可触发，减少依赖前台应用类型。
+        return True
+
+    @staticmethod
+    def _normalize_vk(key: str) -> int:
+        normalized = (key or "").strip().lower()
+        if normalized in {"tab", "vk_tab"}:
+            return getattr(win32con, "VK_TAB", 0x09)
+        if normalized in {"b", "key_b"}:
+            return ord("B")
+        return getattr(win32con, "VK_TAB", 0x09)
+
+
+class RemotePresenterController(QObject):
+    """管理“翻页笔遥控点名”的全局按键监听与触发。"""
+
+    def __init__(self, window: "RollCallTimerWindow") -> None:
+        super().__init__(window)
+        self.window = window
+        self.hotkey = RemotePresenterHotkey(self)
+        self.hotkey.hotkey_pressed.connect(self._handle_hotkey)
+        self._enabled = False
+        self._fallback_polling = False
+        self._rehook_timer = QTimer(self)
+        self._rehook_timer.setInterval(3000)
+        self._rehook_timer.timeout.connect(self._attempt_rehook)
+        self._poll_timer = QTimer(self)
+        self._poll_timer.setInterval(80)
+        self._poll_timer.timeout.connect(self._poll_check)
+        self._last_pressed = False
+        self._poll_vk = self.hotkey._normalize_vk("tab")
+
+    def is_available(self) -> bool:
+        # 低级键盘钩子或轮询两者之一可用即可
+        return bool(self.hotkey.available or _USER32 is not None)
+
+    def set_key(self, key: str) -> None:
+        self.hotkey.set_key(key)
+        try:
+            self._poll_vk = self.hotkey._normalize_vk(key)
+        except Exception:
+            self._poll_vk = self.hotkey._normalize_vk("tab")
+        if self._fallback_polling:
+            self._last_pressed = False
+        if self._enabled and self.is_available():
+            self.restart()
+
+    def restart(self) -> bool:
+        if not self._enabled:
+            return True
+        self.hotkey.stop()
+        self._stop_poll()
+        started = self.hotkey.start()
+        if started:
+            self._fallback_polling = False
+            self._rehook_timer.stop()
+            return True
+        # 尝试轮询退化方案
+        return self._start_poll()
+
+    def set_enabled(self, enabled: bool) -> bool:
+        if enabled == self._enabled and (not enabled or self.is_available()):
+            return self._enabled
+        self._enabled = enabled
+        if not enabled:
+            self.hotkey.stop()
+            self._stop_poll()
+            return False
+        if not self.is_available():
+            self._enabled = False
+            return False
+        self.hotkey.stop()
+        self._stop_poll()
+        started = self.hotkey.start()
+        if not started:
+            started = self._start_poll()
+            if started:
+                self._rehook_timer.start()
+        else:
+            self._rehook_timer.stop()
+        if not started:
+            self._enabled = False
+        return started
+
+    def stop(self) -> None:
+        self.hotkey.stop()
+        self._stop_poll()
+        self._rehook_timer.stop()
+        self._enabled = False
+
+    def _handle_hotkey(self) -> None:
+        self.window.trigger_remote_presenter_call()
+
+    # ---- 轮询退化方案 ----
+    def _start_poll(self) -> bool:
+        if _USER32 is None:
+            return False
+        self._fallback_polling = True
+        self._last_pressed = False
+        self._poll_timer.start()
+        self._rehook_timer.start()
+        return True
+
+    def _stop_poll(self) -> None:
+        self._poll_timer.stop()
+        self._fallback_polling = False
+        self._last_pressed = False
+
+    def _poll_check(self) -> None:
+        state = self._read_key_state(self._poll_vk if hasattr(self, "_poll_vk") else self.hotkey._normalize_vk("tab"))
+        pressed = bool(state)
+        if pressed and not self._last_pressed:
+            self._handle_hotkey()
+        self._last_pressed = pressed
+
+    def _attempt_rehook(self) -> None:
+        if not self._enabled:
+            self._rehook_timer.stop()
+            return
+        if self.hotkey.is_active():
+            self._rehook_timer.stop()
+            self._stop_poll()
+            return
+        if not self.hotkey.available:
+            return
+        self.hotkey.stop()
+        if self.hotkey.start():
+            self._fallback_polling = False
+            self._stop_poll()
+            self._rehook_timer.stop()
+
+    @staticmethod
+    def _read_key_state(vk_code: int) -> bool:
+        # 优先 win32api，其次 user32
+        if win32api is not None:
+            try:
+                return bool(win32api.GetAsyncKeyState(vk_code) & 0x8000)
+            except Exception:
+                pass
+        if _USER32 is not None:
+            try:
+                return bool(_USER32.GetAsyncKeyState(vk_code) & 0x8000)
+            except Exception:
+                pass
+        return False
+
 class RollCallTimerWindow(QWidget):
     """集成点名与计时的主功能窗口。"""
     window_closed = pyqtSignal()
@@ -10439,6 +11464,10 @@ class RollCallTimerWindow(QWidget):
         self.timer_countdown_minutes = config.timer_countdown_minutes
         self.timer_countdown_seconds = config.timer_countdown_seconds
         self.timer_sound_enabled = config.timer_sound_enabled
+        self.timer_sound_variant = config.timer_sound_variant or "gentle"
+        self.timer_reminder_enabled = bool(config.timer_reminder_enabled)
+        self.timer_reminder_interval_minutes = max(0, int(config.timer_reminder_interval_minutes))
+        self.timer_reminder_sound_variant = config.timer_reminder_sound_variant or "soft_beep"
 
         self.show_id = config.show_id
         self.show_name = config.show_name
@@ -10481,6 +11510,7 @@ class RollCallTimerWindow(QWidget):
 
         self.count_timer = QTimer(self); self.count_timer.setInterval(1000); self.count_timer.timeout.connect(self._on_count_timer)
         self.clock_timer = QTimer(self); self.clock_timer.setInterval(1000); self.clock_timer.timeout.connect(self._update_clock)
+        self._reminder_elapsed_seconds = 0
 
         self.tts_manager: Optional[TTSManager] = None
         self.speech_enabled = bool(config.speech_enabled)
@@ -10504,6 +11534,15 @@ class RollCallTimerWindow(QWidget):
         self._settings_write_lock = QMutex()
         self._student_data_loading = False
         self._io_pool = QThreadPool.globalInstance()
+
+        # 点名逻辑与后台触发控制
+        self.roll_logic = RollCallLogic(self)
+        self.remote_presenter_enabled = bool(config.remote_roll_enabled)
+        self.remote_presenter_key = (config.remote_roll_key or "tab").strip().lower() or "tab"
+        self.remote_presenter_controller = RemotePresenterController(self)
+        self.remote_presenter_controller.set_key(self.remote_presenter_key)
+        if self.remote_presenter_enabled and not self.remote_presenter_controller.set_enabled(True):
+            self.remote_presenter_enabled = False
 
         # QFontDatabase 在 Qt 6 中以静态方法为主，这里直接调用类方法避免实例化失败
         families_list = []
@@ -10621,7 +11660,7 @@ class RollCallTimerWindow(QWidget):
         top.addWidget(control_bar, 0, Qt.AlignmentFlag.AlignLeft)
         top.addStretch(1)
 
-        self.menu_button = QToolButton(); self.menu_button.setText("..."); self.menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.menu_button = QToolButton(); self.menu_button.setText("设置"); self.menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.menu_button.setFixedSize(toolbar_height, toolbar_height)
         self.menu_button.setStyleSheet(StyleConfig.MENU_BUTTON_STYLE)
         self.main_menu = self._build_menu(); self.menu_button.setMenu(self.main_menu)
@@ -11254,7 +12293,7 @@ class RollCallTimerWindow(QWidget):
         self.time_display_label.setFont(timer_font)
 
     def _build_menu(self) -> QMenu:
-        menu = QMenu(self)
+        menu = QMenu("设置", self)
         menu.setStyleSheet(
             """
             QMenu {
@@ -11333,14 +12372,100 @@ class RollCallTimerWindow(QWidget):
             self._disable_output_menu_with_reason()
 
         menu.addSeparator()
-        self.timer_sound_action = menu.addAction("倒计时结束提示音"); self.timer_sound_action.setCheckable(True)
+        timer_menu = menu.addMenu("倒计时提示")
+        self._timer_sound_choices: List[Tuple[str, str]] = [
+            ("gentle", "柔和铃声"),
+            ("bell", "上课铃"),
+            ("digital", "电子滴答"),
+            ("buzz", "蜂鸣器"),
+            ("urgent", "紧张倒计时"),
+        ]
+        end_menu = timer_menu.addMenu("结束提示音")
+        self.timer_sound_action = end_menu.addAction("启用"); self.timer_sound_action.setCheckable(True)
         self.timer_sound_action.setChecked(self.timer_sound_enabled); self.timer_sound_action.toggled.connect(self._toggle_timer_sound)
+        self.timer_sound_menu = end_menu.addMenu("声音样式")
+        self.timer_sound_actions: List[QAction] = []
+        for key, label in self._timer_sound_choices:
+            act = self.timer_sound_menu.addAction(label)
+            act.setCheckable(True)
+            act.setData(key)
+            act.setChecked(key == self.timer_sound_variant)
+            act.triggered.connect(lambda _checked=False, k=key: self._set_timer_sound_variant(k))
+            self.timer_sound_actions.append(act)
+
+        reminder_menu = timer_menu.addMenu("中途提示音")
+        self.timer_reminder_action = reminder_menu.addAction("启用"); self.timer_reminder_action.setCheckable(True)
+        self.timer_reminder_action.setChecked(self.timer_reminder_enabled); self.timer_reminder_action.toggled.connect(self._toggle_timer_reminder)
+        self._reminder_sound_choices: List[Tuple[str, str]] = [
+            ("soft_beep", "轻柔提示"),
+            ("ping", "清脆提示"),
+            ("chime", "简洁钟声"),
+            ("pulse", "节奏哔哔"),
+            ("short_bell", "短铃提示"),
+        ]
+        self.reminder_sound_menu = reminder_menu.addMenu("声音样式")
+        self.reminder_sound_actions: List[QAction] = []
+        for key, label in self._reminder_sound_choices:
+            act = self.reminder_sound_menu.addAction(label)
+            act.setCheckable(True)
+            act.setData(key)
+            act.setChecked(key == self.timer_reminder_sound_variant)
+            act.triggered.connect(lambda _checked=False, k=key: self._set_reminder_sound_variant(k))
+            self.reminder_sound_actions.append(act)
+
+        self.reminder_interval_menu = reminder_menu.addMenu("提醒间隔")
+        self.reminder_interval_actions: List[QAction] = []
+        if self.timer_reminder_interval_minutes <= 0:
+            self.timer_reminder_interval_minutes = 3
+        interval_choices: List[Tuple[int, str]] = [
+            (1, "每 1 分钟"),
+            (3, "每 3 分钟"),
+            (5, "每 5 分钟"),
+            (10, "每 10 分钟"),
+        ]
+        for minutes, label in interval_choices:
+            act = self.reminder_interval_menu.addAction(label)
+            act.setCheckable(True)
+            act.setData(minutes)
+            act.setChecked(minutes == self.timer_reminder_interval_minutes)
+            act.triggered.connect(lambda _checked=False, m=minutes: self._set_reminder_interval(m))
+            self.reminder_interval_actions.append(act)
+        self._sync_timer_sound_actions()
+        self._sync_reminder_menu_state()
+
+        menu.addSeparator()
+        remote_menu = menu.addMenu("翻页笔遥控点名")
+        self.remote_presenter_action = remote_menu.addAction("启用"); self.remote_presenter_action.setCheckable(True)
+        self.remote_presenter_action.setChecked(self.remote_presenter_enabled)
+        self.remote_presenter_action.toggled.connect(self._toggle_remote_presenter_call)
+        self.remote_key_menu = remote_menu.addMenu("翻页笔按键")
+        self.remote_key_actions: List[QAction] = []
+        remote_key_choices: List[Tuple[str, str]] = [
+            ("tab", "Tab键（切换超链接）"),
+            ("b", "B键（长按黑屏）"),
+        ]
+        for key, label in remote_key_choices:
+            act = self.remote_key_menu.addAction(label)
+            act.setCheckable(True)
+            act.setData(key)
+            act.setChecked(key == self.remote_presenter_key)
+            act.triggered.connect(lambda _checked=False, k=key: self._set_remote_presenter_key(k))
+            self.remote_key_actions.append(act)
+        self._sync_remote_presenter_actions()
         return menu
 
     def _update_menu_state(self) -> None:
         if self.show_id_action.isChecked() != self.show_id: self.show_id_action.setChecked(self.show_id)
         if self.show_name_action.isChecked() != self.show_name: self.show_name_action.setChecked(self.show_name)
         self.timer_sound_action.setChecked(self.timer_sound_enabled)
+        if SOUNDDEVICE_AVAILABLE:
+            self.timer_sound_action.setEnabled(True)
+            self.timer_sound_menu.setEnabled(True)
+        else:
+            self.timer_sound_action.setEnabled(False)
+            self.timer_sound_menu.setEnabled(False)
+        self._sync_timer_sound_actions()
+        self._sync_reminder_menu_state()
         for action in getattr(self, "engine_actions", []):
             if not isinstance(action, QAction):
                 continue
@@ -11386,6 +12511,102 @@ class RollCallTimerWindow(QWidget):
             self._disable_output_menu_with_reason()
             if not self._speech_issue_reported:
                 self._diagnose_speech_engine()
+        self._sync_remote_presenter_actions()
+
+    def _sync_timer_sound_actions(self) -> None:
+        for act in getattr(self, "timer_sound_actions", []):
+            data = act.data()
+            key = str(data) if data is not None else ""
+            block = act.blockSignals(True)
+            act.setChecked(key == self.timer_sound_variant)
+            act.blockSignals(block)
+
+    def _sync_reminder_menu_state(self) -> None:
+        enabled = bool(self.timer_reminder_enabled and self.timer_modes[self.timer_mode_index] == "countdown")
+        if hasattr(self, "timer_reminder_action"):
+            block = self.timer_reminder_action.blockSignals(True)
+            self.timer_reminder_action.setChecked(self.timer_reminder_enabled)
+            self.timer_reminder_action.blockSignals(block)
+            self.timer_reminder_action.setEnabled(SOUNDDEVICE_AVAILABLE)
+        for act in getattr(self, "reminder_interval_actions", []):
+            try:
+                minutes = int(act.data())
+            except Exception:
+                minutes = -1
+            block = act.blockSignals(True)
+            act.setChecked(minutes == self.timer_reminder_interval_minutes)
+            act.blockSignals(block)
+        for act in getattr(self, "reminder_sound_actions", []):
+            data = act.data()
+            key = str(data) if data is not None else ""
+            block = act.blockSignals(True)
+            act.setChecked(key == self.timer_reminder_sound_variant)
+            act.blockSignals(block)
+        if hasattr(self, "reminder_interval_menu"):
+            self.reminder_interval_menu.setEnabled(SOUNDDEVICE_AVAILABLE)
+        if hasattr(self, "reminder_sound_menu"):
+            self.reminder_sound_menu.setEnabled(SOUNDDEVICE_AVAILABLE and enabled)
+
+    def _sync_remote_presenter_actions(self) -> None:
+        controller = getattr(self, "remote_presenter_controller", None)
+        available = bool(controller and controller.is_available())
+        if hasattr(self, "remote_presenter_action"):
+            block = self.remote_presenter_action.blockSignals(True)
+            self.remote_presenter_action.setChecked(self.remote_presenter_enabled and available)
+            self.remote_presenter_action.setEnabled(available)
+            tooltip = "" if available else "需要在 Windows 中授予全局键盘监听权限。"
+            self.remote_presenter_action.setToolTip(tooltip)
+            self.remote_presenter_action.blockSignals(block)
+        for act in getattr(self, "remote_key_actions", []):
+            if not isinstance(act, QAction):
+                continue
+            data = act.data()
+            try:
+                key = str(data) if data is not None else ""
+            except Exception:
+                key = ""
+            block = act.blockSignals(True)
+            act.setChecked(key == self.remote_presenter_key)
+            act.setEnabled(available)
+            act.setToolTip("" if available else "当前系统不支持全局监听。")
+            act.blockSignals(block)
+        if hasattr(self, "remote_key_menu"):
+            self.remote_key_menu.setEnabled(available)
+
+    def _toggle_remote_presenter_call(self, enabled: bool) -> None:
+        controller = getattr(self, "remote_presenter_controller", None)
+        if controller is None or not controller.is_available():
+            self.remote_presenter_enabled = False
+            self._sync_remote_presenter_actions()
+            show_quiet_information(self, "当前系统无法拦截翻页笔按键，已自动关闭遥控点名。")
+            return
+        self.remote_presenter_enabled = bool(enabled)
+        if not controller.set_enabled(self.remote_presenter_enabled):
+            self.remote_presenter_enabled = False
+            show_quiet_information(self, "启用遥控点名失败，可能缺少系统权限。")
+        self._sync_remote_presenter_actions()
+        self._schedule_save()
+
+    def _set_remote_presenter_key(self, key: str) -> None:
+        normalized = (key or "tab").strip().lower() or "tab"
+        if normalized == self.remote_presenter_key:
+            self._sync_remote_presenter_actions()
+            return
+        self.remote_presenter_key = normalized
+        controller = getattr(self, "remote_presenter_controller", None)
+        if controller is not None:
+            controller.set_key(normalized)
+            if self.remote_presenter_enabled:
+                controller.restart()
+        self._sync_remote_presenter_actions()
+        self._schedule_save()
+
+    def trigger_remote_presenter_call(self) -> None:
+        if not self.remote_presenter_enabled:
+            return
+        if not self._ensure_student_data_ready():
+            return
+        self.roll_student(speak=True, ensure_mode=True)
 
     def _refresh_voice_menu_actions(self, manager: Optional["TTSManager"]) -> None:
         """在语音引擎延迟初始化后重建发音人菜单，保持 UI 可用。"""
@@ -11648,6 +12869,49 @@ class RollCallTimerWindow(QWidget):
 
     def _toggle_timer_sound(self, enabled: bool) -> None:
         self.timer_sound_enabled = enabled
+        self._sync_timer_sound_actions()
+        self._sync_reminder_menu_state()
+        self._schedule_save()
+
+    def _set_timer_sound_variant(self, variant: str) -> None:
+        variant = (variant or "gentle").strip().lower()
+        if variant == self.timer_sound_variant:
+            self._sync_timer_sound_actions()
+            return
+        self.timer_sound_variant = variant
+        self._sync_timer_sound_actions()
+        self._schedule_save()
+
+    def _toggle_timer_reminder(self, enabled: bool) -> None:
+        self.timer_reminder_enabled = enabled
+        if enabled and self.timer_reminder_interval_minutes <= 0:
+            self.timer_reminder_interval_minutes = 3
+        if not enabled:
+            self._reset_reminder_progress()
+        self._sync_reminder_menu_state()
+        self._schedule_save()
+
+    def _set_reminder_interval(self, minutes: int) -> None:
+        minutes = max(0, int(minutes))
+        if minutes == self.timer_reminder_interval_minutes:
+            self._sync_reminder_menu_state()
+            return
+        self.timer_reminder_interval_minutes = minutes
+        if minutes == 0:
+            self.timer_reminder_enabled = False
+        elif not self.timer_reminder_enabled:
+            self.timer_reminder_enabled = True
+        self._reset_reminder_progress()
+        self._sync_reminder_menu_state()
+        self._schedule_save()
+
+    def _set_reminder_sound_variant(self, variant: str) -> None:
+        variant = (variant or "soft_beep").strip().lower()
+        if variant == self.timer_reminder_sound_variant:
+            self._sync_reminder_menu_state()
+            return
+        self.timer_reminder_sound_variant = variant
+        self._sync_reminder_menu_state()
         self._schedule_save()
 
     def _speak_text(self, text: str) -> None:
@@ -11783,6 +13047,7 @@ class RollCallTimerWindow(QWidget):
         if hasattr(self, "reset_button"):
             self.reset_button.setVisible(is_roll)
         self.updateGeometry()
+        self._sync_reminder_menu_state()
 
     def _handle_timer_mode_transition(self, previous_mode: Optional[str], new_mode: str) -> None:
         if previous_mode == new_mode:
@@ -11794,8 +13059,12 @@ class RollCallTimerWindow(QWidget):
             if new_mode == "countdown":
                 total = max(0, self.timer_countdown_minutes * 60 + self.timer_countdown_seconds)
                 self.timer_seconds_left = total
+                self._reset_reminder_progress()
             else:
                 self.timer_stopwatch_seconds = 0
+                self._reset_reminder_progress()
+        else:
+            self._reset_reminder_progress()
 
     def update_timer_mode_ui(self) -> None:
         mode = self.timer_modes[self.timer_mode_index]
@@ -11822,6 +13091,7 @@ class RollCallTimerWindow(QWidget):
             self.timer_running = False; self.count_timer.stop(); self._update_clock(); self.clock_timer.start()
             self.timer_start_pause_button.setText("开始")
         self.schedule_font_update()
+        self._sync_reminder_menu_state()
 
     def toggle_timer_mode(self) -> None:
         if self.timer_running: return
@@ -11837,11 +13107,13 @@ class RollCallTimerWindow(QWidget):
         else:
             self.timer_start_pause_button.setText("开始")
             self.count_timer.stop()
+        self._sync_reminder_menu_state()
         self._schedule_save()
 
     def reset_timer(self, persist: bool = True) -> bool:
         changed = self.timer_running
         self.timer_running = False; self.count_timer.stop(); self.timer_start_pause_button.setText("开始")
+        self._reset_reminder_progress()
         m = self.timer_modes[self.timer_mode_index]
         if m == "countdown":
             baseline = max(0, self.timer_countdown_minutes * 60 + self.timer_countdown_seconds)
@@ -11868,10 +13140,13 @@ class RollCallTimerWindow(QWidget):
     def _on_count_timer(self) -> None:
         m = self.timer_modes[self.timer_mode_index]
         if m == "countdown":
-            if self.timer_seconds_left > 0: self.timer_seconds_left -= 1
+            if self.timer_seconds_left > 0:
+                self.timer_seconds_left -= 1
+                self._handle_mid_reminder_tick()
             else:
                 self.count_timer.stop(); self.timer_running = False; self.timer_start_pause_button.setText("开始"); self.update_timer_display()
-                if self.timer_sound_enabled: self.play_timer_sound()
+                self._reset_reminder_progress()
+                self.play_timer_sound(kind="end")
                 return
         elif m == "stopwatch":
             self.timer_stopwatch_seconds += 1
@@ -11892,17 +13167,104 @@ class RollCallTimerWindow(QWidget):
         self.time_display_label.setText(time.strftime("%H:%M:%S"))
         self.schedule_font_update()
 
-    def play_timer_sound(self) -> None:
-        if SOUNDDEVICE_AVAILABLE:
-            def _play() -> None:
-                try:
-                    fs = 44100; duration = 0.5; frequency = 880
-                    t = np.linspace(0, duration, int(fs * duration), endpoint=False)
-                    data = 0.4 * np.sin(2 * np.pi * frequency * t)
-                    sd.play(data.astype(np.float32), fs); sd.wait()
-                except Exception:
-                    pass
-            threading.Thread(target=_play, daemon=True).start()
+    def _reminder_interval_seconds(self) -> int:
+        try:
+            return max(0, int(self.timer_reminder_interval_minutes) * 60)
+        except Exception:
+            return 0
+
+    def _reset_reminder_progress(self) -> None:
+        self._reminder_elapsed_seconds = 0
+
+    def _handle_mid_reminder_tick(self) -> None:
+        if not self.timer_reminder_enabled:
+            return
+        if self.timer_modes[self.timer_mode_index] != "countdown":
+            return
+        interval = self._reminder_interval_seconds()
+        if interval <= 0:
+            return
+        self._reminder_elapsed_seconds += 1
+        if self._reminder_elapsed_seconds >= interval:
+            self._reminder_elapsed_seconds = 0
+            self.play_timer_sound(kind="reminder")
+
+    def _build_tone(self, freq: float, duration: float, *, fs: int = 44100, amplitude: float = 0.35) -> "np.ndarray":
+        if not SOUNDDEVICE_AVAILABLE or np is None:
+            raise RuntimeError("sound backend unavailable")
+        t = np.linspace(0, duration, int(fs * duration), endpoint=False)
+        tone = amplitude * np.sin(2 * np.pi * freq * t)
+        # 简单淡入淡出，避免爆音
+        fade_len = max(1, int(0.01 * fs))
+        fade = np.linspace(0, 1, fade_len)
+        tone[:fade_len] *= fade
+        tone[-fade_len:] *= fade[::-1]
+        return tone
+
+    def _build_sound_wave(self, variant: str, kind: str) -> tuple[Optional["np.ndarray"], int]:
+        if not SOUNDDEVICE_AVAILABLE or np is None:
+            return None, 0
+        fs = 44100
+        v = (variant or "").strip().lower()
+        segments: List[np.ndarray] = []
+        silence = lambda d: np.zeros(int(fs * d))
+
+        def add_tone(freq: float, dur: float, amp: float = 0.35) -> None:
+            try:
+                segments.append(self._build_tone(freq, dur, fs=fs, amplitude=amp))
+            except Exception:
+                segments.append(np.zeros(int(fs * dur)))
+
+        if kind == "reminder":
+            if v == "short_bell":
+                add_tone(960, 0.16, 0.4); segments.append(silence(0.04)); add_tone(720, 0.14, 0.32)
+            elif v == "ping":
+                add_tone(1100, 0.08, 0.32); segments.append(silence(0.03)); add_tone(800, 0.1, 0.28)
+            else:  # soft_beep
+                add_tone(540, 0.14, 0.26)
+        else:
+            if v == "bell":
+                add_tone(880, 0.12, 0.38); segments.append(silence(0.05)); add_tone(660, 0.18, 0.34)
+            elif v == "urgent":
+                for _ in range(3):
+                    add_tone(1150, 0.09, 0.4); segments.append(silence(0.05))
+            else:  # gentle
+                add_tone(660, 0.18, 0.32); segments.append(silence(0.04)); add_tone(880, 0.16, 0.28)
+
+        if not segments:
+            return None, 0
+        data = np.concatenate(segments)
+        peak = np.max(np.abs(data)) or 1.0
+        if peak > 0.95:
+            data = data * (0.95 / peak)
+        return data.astype(np.float32), fs
+
+    def _play_sound_async(self, data: "np.ndarray", fs: int) -> None:
+        if not SOUNDDEVICE_AVAILABLE or sd is None or data is None or fs <= 0:
+            return
+
+        def _play() -> None:
+            try:
+                sd.stop()
+                sd.play(data, fs)
+                sd.wait()
+            except Exception:
+                pass
+
+        threading.Thread(target=_play, daemon=True).start()
+
+    def play_timer_sound(self, *, kind: str = "end") -> None:
+        if not SOUNDDEVICE_AVAILABLE or np is None:
+            return
+        if kind == "end" and not self.timer_sound_enabled:
+            return
+        if kind == "reminder" and not self.timer_reminder_enabled:
+            return
+        variant = self.timer_sound_variant if kind == "end" else self.timer_reminder_sound_variant
+        data, fs = self._build_sound_wave(variant, kind)
+        if data is None or fs <= 0:
+            return
+        self._play_sound_async(data, fs)
 
     def on_group_change(self, group_name: Optional[str] = None, initial: bool = False) -> None:
         if not self.groups:
@@ -11927,90 +13289,31 @@ class RollCallTimerWindow(QWidget):
         if not initial and previous_group != group_name:
             self._schedule_save()
 
-    def roll_student(self, speak: bool = True) -> None:
-        if self.mode != "roll_call": return
-        group_name = self.current_group_name
-        pool = self._group_remaining_indices.get(group_name)
-        if pool is None:
-            self._ensure_group_pool(group_name)
-            pool = self._group_remaining_indices.get(group_name, [])
-        if not pool:
-            base_total = self._group_all_indices.get(group_name, [])
-            if not base_total:
-                show_quiet_information(self, f"'{group_name}' 分组当前没有可点名的学生。")
-                self.current_student_index = None
-                self.display_current_student()
-                return
-            if self._all_groups_completed():
-                show_quiet_information(self, "所有学生都已完成点名，请点击“重置”按钮重新开始。")
-            else:
-                show_quiet_information(self, f"'{group_name}' 的同学已经全部点到，请切换其他分组或点击“重置”按钮。")
-            return
-        draw_index = self._rng.randrange(len(pool)) if len(pool) > 1 else 0
-        self.current_student_index = pool.pop(draw_index)
-        self._pending_passive_student = self.current_student_index
-        self._group_last_student[group_name] = self.current_student_index
-        self._mark_student_drawn(self.current_student_index)
-        self.display_current_student()
-        if speak:
-            self._announce_current_student()
-        # 即时同步保存配置，防止异常退出导致未点名名单丢失。
-        self.save_settings()
+    def roll_student(self, speak: bool = True, *, ensure_mode: bool = False) -> None:
+        self.roll_logic.roll_student(speak=speak, ensure_mode=ensure_mode)
 
     def _all_groups_completed(self) -> bool:
         """判断是否所有分组的学生都已点名完毕。"""
 
-        total_students = len(self._group_all_indices.get("全部", []))
-        if total_students == 0:
-            return True
-        if len(self._global_drawn_students) < total_students:
-            return False
-        for group, base in self._group_all_indices.items():
-            if not base:
-                continue
-            remaining = self._group_remaining_indices.get(group, [])
-            if remaining:
-                return False
-        return True
+        return self.roll_logic._all_groups_completed()
 
     def _reset_roll_call_state(self) -> None:
         """清空全部点名历史并重新洗牌。"""
 
-        self.settings_manager.clear_roll_call_history()
-        self._pending_passive_student = None
-        self._rebuild_group_indices()
-        self._ensure_group_pool(self.current_group_name)
+        self.roll_logic.reset_roll_call_state()
 
     def _shuffle(self, values: List[int]) -> None:
-        try:
-            self._rng.shuffle(values)
-        except Exception:
-            random.shuffle(values)
+        self.roll_logic._shuffle(values)
 
     def _normalize_indices(self, values: Iterable[Any], *, allowed: Optional[Set[int]] = None) -> List[int]:
         """Convert an iterable of values to a deduplicated integer list."""
 
-        normalized: List[int] = []
-        seen: Set[int] = set()
-        for value in values:
-            try:
-                idx = int(value)
-            except (TypeError, ValueError):
-                continue
-            if allowed is not None and idx not in allowed:
-                continue
-            if idx in seen:
-                continue
-            normalized.append(idx)
-            seen.add(idx)
-        return normalized
+        return self.roll_logic._normalize_indices(values, allowed=allowed)
 
     def _collect_base_indices(self, values: Optional[Iterable[Any]]) -> List[int]:
         """Normalize the raw index list preserved in each group."""
 
-        if values is None:
-            return []
-        return self._normalize_indices(values)
+        return self.roll_logic._collect_base_indices(values)
 
     def reset_roll_call_pools(self) -> None:
         """根据当前分组执行重置：子分组独立重置，“全部”重置所有。"""
@@ -12039,96 +13342,17 @@ class RollCallTimerWindow(QWidget):
     def _reset_single_group(self, group_name: str) -> None:
         """仅重置指定分组，同时保持其它分组及全局状态不变。"""
 
-        if group_name == "全部":
-            return
-        base_indices_raw = self._group_all_indices.get(group_name)
-        if base_indices_raw is None:
-            return
-        base_indices = self._collect_base_indices(base_indices_raw)
-        shuffled = list(base_indices)
-        self._shuffle(shuffled)
-        self._group_remaining_indices[group_name] = shuffled
-        self._group_initial_sequences[group_name] = list(shuffled)
-        self._group_last_student[group_name] = None
-        if self._pending_passive_student in shuffled:
-            self._pending_passive_student = None
-
-        history = self._group_drawn_history.setdefault(group_name, set())
-        if history:
-            for idx in list(history):
-                self._remove_from_global_history(idx, ignore_group=group_name)
-            history.clear()
-
-        last_all = self._group_last_student.get("全部")
-        if last_all is not None:
-            try:
-                last_all_key = int(last_all)
-            except (TypeError, ValueError):
-                last_all_key = None
-            if last_all_key is not None and last_all_key not in self._global_drawn_students:
-                self._group_last_student["全部"] = None
-
-        self._refresh_all_group_pool()
+        self.roll_logic.reset_single_group(group_name)
 
     def _rebuild_group_indices(self) -> None:
         """重新构建各分组的学生索引池。"""
 
-        all_indices: Dict[str, List[int]] = {}
-        remaining: Dict[str, List[int]] = {}
-        last_student: Dict[str, Optional[int]] = {}
-        student_groups: Dict[int, set[str]] = {}
-        initial_sequences: Dict[str, List[int]] = {}
-
-        if self.student_data.empty:
-            all_indices["全部"] = []
-        else:
-            all_indices["全部"] = list(self.student_data.index)
-            for idx in all_indices["全部"]:
-                student_groups.setdefault(int(idx), set()).add("全部")
-            group_series = self.student_data["分组"].astype(str).str.strip().str.upper()
-            for group_name in self.groups:
-                if group_name == "全部":
-                    continue
-                mask = group_series == group_name
-                all_indices[group_name] = list(self.student_data[mask].index)
-                for idx in all_indices[group_name]:
-                    student_groups.setdefault(int(idx), set()).add(group_name)
-
-        for group_name, indices in all_indices.items():
-            pool = list(indices)
-            self._shuffle(pool)
-            remaining[group_name] = pool
-            initial_sequences[group_name] = list(pool)
-            last_student[group_name] = None
-
-        self._group_all_indices = all_indices
-        self._group_remaining_indices = remaining
-        self._group_last_student = last_student
-        self._group_initial_sequences = initial_sequences
-        self._student_groups = student_groups
-        self._group_drawn_history = {group: set() for group in all_indices}
-        # “全部”分组直接引用全局集合，避免重复维护两份数据造成不一致
-        if "全部" in self._group_drawn_history:
-            self._global_drawn_students.clear()
-            self._group_drawn_history["全部"] = self._global_drawn_students
-        else:
-            self._group_drawn_history["全部"] = self._global_drawn_students
-
-        self._refresh_all_group_pool()
+        self.roll_logic._rebuild_group_indices()
 
     def _remove_from_global_history(self, student_index: int, ignore_group: Optional[str] = None) -> None:
         """若学生未在其它分组被点名，则从全局记录中移除。"""
 
-        try:
-            student_key = int(student_index)
-        except (TypeError, ValueError):
-            return
-        for group, history in self._group_drawn_history.items():
-            if group == "全部" or group == ignore_group:
-                continue
-            if student_key in history:
-                return
-        self._global_drawn_students.discard(student_key)
+        self.roll_logic._remove_from_global_history(student_index, ignore_group=ignore_group)
 
     def _restore_group_state(self, section: Mapping[str, str]) -> None:
         """从配置中恢复各分组剩余学生池，保持未抽学生不重复。"""
@@ -12178,211 +13402,17 @@ class RollCallTimerWindow(QWidget):
     def _ensure_group_pool(self, group_name: str, force_reset: bool = False) -> None:
         """确保指定分组仍有待抽取的学生，必要时重新洗牌。"""
 
-        if group_name not in self._group_all_indices:
-            if self.student_data.empty:
-                base_list: List[int] = []
-            elif group_name == "全部":
-                base_list = list(self.student_data.index)
-            else:
-                group_series = self.student_data["分组"].astype(str).str.strip().str.upper()
-                base_list = list(self.student_data[group_series == group_name].index)
-            self._group_all_indices[group_name] = base_list
-            self._group_remaining_indices[group_name] = []
-            self._group_last_student.setdefault(group_name, None)
-            if group_name == "全部":
-                self._group_drawn_history[group_name] = self._global_drawn_students
-            else:
-                self._group_drawn_history.setdefault(group_name, set())
-            for idx in base_list:
-                entry = self._student_groups.setdefault(int(idx), set())
-                entry.add(group_name)
-                entry.add("全部")
-            # 新增分组时同步生成初始顺序
-            shuffled = list(base_list)
-            self._shuffle(shuffled)
-            self._group_initial_sequences[group_name] = shuffled
-
-        base_indices = self._collect_base_indices(self._group_all_indices.get(group_name, []))
-        if group_name == "全部":
-            drawn_history = self._group_drawn_history.setdefault("全部", self._global_drawn_students)
-            reference_drawn = self._global_drawn_students
-        else:
-            drawn_history = self._group_drawn_history.setdefault(group_name, set())
-            reference_drawn = drawn_history
-
-        if group_name == "全部":
-            # “全部”分组直接依据全局集合生成剩余名单，避免与各子分组脱节
-            if group_name not in self._group_initial_sequences:
-                shuffled = list(base_indices)
-                self._shuffle(shuffled)
-                self._group_initial_sequences[group_name] = shuffled
-            self._refresh_all_group_pool()
-            self._group_last_student.setdefault(group_name, None)
-            return
-
-        if force_reset or group_name not in self._group_remaining_indices:
-            drawn_history.clear()
-            pool = list(base_indices)
-            self._shuffle(pool)
-            self._group_remaining_indices[group_name] = pool
-            self._group_last_student.setdefault(group_name, None)
-            self._group_initial_sequences[group_name] = list(pool)
-            self._refresh_all_group_pool()
-            return
-
-        raw_pool = self._group_remaining_indices.get(group_name, [])
-        normalized_pool: List[int] = []
-        seen: set[int] = set()
-        for value in raw_pool:
-            try:
-                idx = int(value)
-            except (TypeError, ValueError):
-                continue
-            if idx in base_indices and idx not in seen and idx not in reference_drawn:
-                normalized_pool.append(idx)
-                seen.add(idx)
-
-        source_order = self._group_initial_sequences.get(group_name)
-        if source_order is None:
-            # 如果未记录初始顺序，则退回数据原有顺序
-            source_order = list(base_indices)
-            self._group_initial_sequences[group_name] = list(source_order)
-
-        additional: List[int] = []
-        for idx in source_order:
-            if idx in reference_drawn or idx in seen or idx not in base_indices:
-                continue
-            normalized_pool.append(idx)
-            seen.add(idx)
-        for idx in base_indices:
-            if idx in reference_drawn or idx in seen:
-                continue
-            additional.append(idx)
-            seen.add(idx)
-        if additional:
-            self._shuffle(additional)
-            for value in additional:
-                insert_at = self._rng.randrange(len(normalized_pool) + 1) if normalized_pool else 0
-                normalized_pool.insert(insert_at, value)
-
-        self._group_remaining_indices[group_name] = normalized_pool
-        self._group_initial_sequences[group_name] = list(normalized_pool)
-        self._group_last_student.setdefault(group_name, None)
-        self._refresh_all_group_pool()
+        self.roll_logic._ensure_group_pool(group_name, force_reset=force_reset)
 
     def _mark_student_drawn(self, student_index: int) -> None:
         """抽中学生后，从所有关联分组的候选列表中移除该学生。"""
 
-        student_key = None
-        try:
-            student_key = int(student_index)
-        except (TypeError, ValueError):
-            return
-
-        groups = self._student_groups.get(student_key)
-        if not groups:
-            return
-        self._global_drawn_students.add(student_key)
-        for group in groups:
-            if group == "全部":
-                history = self._group_drawn_history.setdefault("全部", self._global_drawn_students)
-            else:
-                history = self._group_drawn_history.setdefault(group, set())
-            history.add(student_key)
-            pool = self._group_remaining_indices.get(group)
-            if not pool:
-                continue
-            cleaned: List[int] = []
-            for value in pool:
-                try:
-                    idx = int(value)
-                except (TypeError, ValueError):
-                    continue
-                if idx != student_key:
-                    cleaned.append(idx)
-            self._group_remaining_indices[group] = cleaned
-
-        self._refresh_all_group_pool()
+        self.roll_logic._mark_student_drawn(student_index)
 
     def _refresh_all_group_pool(self) -> None:
         """同步“全部”分组的剩余名单，使其与各子分组保持一致。"""
 
-        base_all_list = self._collect_base_indices(self._group_all_indices.get("全部", []))
-        base_all_set = set(base_all_list)
-
-        subgroup_base: Dict[str, Tuple[List[int], Set[int]]] = {}
-        subgroup_remaining: Dict[str, List[int]] = {}
-        subgroup_remaining_union: Set[int] = set()
-        drawn_from_subgroups: Set[int] = set()
-
-        for group, raw_indices in self._group_all_indices.items():
-            if group == "全部":
-                continue
-            base_list = self._collect_base_indices(raw_indices)
-            base_set = set(base_list)
-            subgroup_base[group] = (base_list, base_set)
-            pool = self._group_remaining_indices.get(group, [])
-            sanitized = self._normalize_indices(pool, allowed=base_set)
-            if sanitized != pool:
-                self._group_remaining_indices[group] = sanitized
-            subgroup_remaining[group] = sanitized
-            subgroup_remaining_union.update(sanitized)
-            drawn_from_subgroups.update(idx for idx in base_set if idx not in sanitized)
-            initial = self._group_initial_sequences.get(group)
-            if initial is None:
-                self._group_initial_sequences[group] = list(base_list)
-            else:
-                cleaned_initial = self._normalize_indices(initial, allowed=base_set)
-                if cleaned_initial != list(initial):
-                    self._group_initial_sequences[group] = cleaned_initial
-                for idx in base_list:
-                    if idx not in self._group_initial_sequences[group]:
-                        self._group_initial_sequences[group].append(idx)
-
-        valid_global = {
-            idx
-            for idx in self._global_drawn_students
-            if idx in base_all_set and idx not in subgroup_remaining_union
-        }
-        new_global = {idx for idx in drawn_from_subgroups if idx in base_all_set}
-        new_global.update(valid_global)
-
-        self._global_drawn_students = set(new_global)
-        self._group_drawn_history["全部"] = self._global_drawn_students
-
-        for group, (_base_list, base_set) in subgroup_base.items():
-            pool = subgroup_remaining.get(group, [])
-            filtered = [idx for idx in pool if idx in base_set and idx not in self._global_drawn_students]
-            if filtered != pool:
-                self._group_remaining_indices[group] = filtered
-                subgroup_remaining[group] = filtered
-            drawn_set = {idx for idx in base_set if idx not in filtered}
-            self._group_drawn_history[group] = drawn_set
-
-        order_hint = self._group_initial_sequences.get("全部")
-        if order_hint is None:
-            shuffled = list(base_all_list)
-            self._shuffle(shuffled)
-            order_hint = shuffled
-        else:
-            cleaned_all = self._normalize_indices(order_hint, allowed=base_all_set)
-            if cleaned_all != list(order_hint):
-                order_hint = cleaned_all
-            else:
-                order_hint = list(order_hint)
-            for idx in base_all_list:
-                if idx not in order_hint:
-                    order_hint.append(idx)
-        self._group_initial_sequences["全部"] = list(order_hint)
-
-        normalized_all = [idx for idx in order_hint if idx not in self._global_drawn_students]
-        seen_all: Set[int] = set(normalized_all)
-        for idx in base_all_list:
-            if idx in seen_all or idx in self._global_drawn_students:
-                continue
-            normalized_all.append(idx)
-            seen_all.add(idx)
-        self._group_remaining_indices["全部"] = normalized_all
+        self.roll_logic._refresh_all_group_pool()
 
     def display_current_student(self) -> None:
         photo_student_id: Optional[str] = None
@@ -12665,6 +13695,8 @@ class RollCallTimerWindow(QWidget):
         self.save_settings()
         self.count_timer.stop()
         self.clock_timer.stop()
+        if hasattr(self, "remote_presenter_controller"):
+            self.remote_presenter_controller.stop()
         if self.tts_manager: self.tts_manager.shutdown()
         self.window_closed.emit()
         super().closeEvent(e)
@@ -12710,6 +13742,10 @@ class RollCallTimerWindow(QWidget):
         self.roll_call_config.timer_countdown_minutes = int(self.timer_countdown_minutes)
         self.roll_call_config.timer_countdown_seconds = int(self.timer_countdown_seconds)
         self.roll_call_config.timer_sound_enabled = bool(self.timer_sound_enabled)
+        self.roll_call_config.timer_sound_variant = self.timer_sound_variant
+        self.roll_call_config.timer_reminder_enabled = bool(self.timer_reminder_enabled)
+        self.roll_call_config.timer_reminder_interval_minutes = int(self.timer_reminder_interval_minutes)
+        self.roll_call_config.timer_reminder_sound_variant = self.timer_reminder_sound_variant
         self.roll_call_config.mode = self.mode
         self.roll_call_config.timer_mode = self.timer_modes[self.timer_mode_index]
         self.roll_call_config.timer_seconds_left = int(self.timer_seconds_left)
@@ -12718,6 +13754,8 @@ class RollCallTimerWindow(QWidget):
         self.roll_call_config.id_font_size = int(self.last_id_font_size)
         self.roll_call_config.name_font_size = int(self.last_name_font_size)
         self.roll_call_config.timer_font_size = int(self.last_timer_font_size)
+        self.roll_call_config.remote_roll_enabled = bool(self.remote_presenter_enabled)
+        self.roll_call_config.remote_roll_key = self.remote_presenter_key
         self._prune_orphan_class_states()
         if not self._student_data_pending_load:
             self._store_active_class_state()
@@ -13423,13 +14461,19 @@ class LauncherWindow(QWidget):
         self._schedule_auto_exit_timer()
         self.save_position()
 
+    def _ensure_overlay_ready(self) -> "OverlayWindow":
+        if self.overlay is None:
+            self.overlay = OverlayWindow(self.settings_manager)
+        return self.overlay
+
     def toggle_paint(self) -> None:
         """打开或隐藏屏幕画笔覆盖层。"""
-        if self.overlay is None: self.overlay = OverlayWindow(self.settings_manager)
-        if self.overlay.isVisible():
-            self.overlay.hide_overlay(); self.paint_button.setText("画笔")
+        overlay = self._ensure_overlay_ready()
+        if overlay.isVisible():
+            overlay.hide_overlay(); self.paint_button.setText("画笔")
         else:
-            self.overlay.show_overlay(); self.paint_button.setText("隐藏画笔")
+            overlay.show_overlay(); overlay.raise_(); overlay.activateWindow()
+            self.paint_button.setText("隐藏画笔")
 
     def toggle_roll_call(self) -> None:
         """切换点名/计时窗口的显示状态，必要时先创建窗口。"""
@@ -13623,6 +14667,7 @@ class ApplicationContext:
 def main() -> None:
     """应用程序入口：初始化 DPI、加载设置并启动启动器窗口。"""
     ensure_high_dpi_awareness()
+    _setup_qt_plugin_paths()
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     QToolTip.setFont(QFont("Microsoft YaHei UI", 9))
