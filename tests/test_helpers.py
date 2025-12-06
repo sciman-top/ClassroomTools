@@ -223,6 +223,17 @@ def test_choose_writable_target_sanitizes_blank_fallback(monkeypatch: pytest.Mon
     assert Path(result).name == "ClassroomTools"
 
 
+def test_choose_writable_target_strips_path_components(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(helpers, "_preferred_app_directory", lambda: str(tmp_path))
+    result = helpers._choose_writable_target(  # type: ignore[attr-defined]
+        tuple(),
+        is_dir=False,
+        fallback_name="../unsafe\\students.xlsx",
+    )
+    assert Path(result).parent == tmp_path
+    assert Path(result).name == "unsafe_students.xlsx"
+
+
 _WPS_WRITER_CLASSES = {
     "kwpsframeclass",
     "kwpsmainframe",

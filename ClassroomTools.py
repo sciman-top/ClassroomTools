@@ -485,7 +485,14 @@ def _choose_writable_target(
         if _ensure_writable_directory(directory or os.getcwd()):
             return target
 
-    sanitized_fallback = fallback_name.strip() or "ClassroomTools"
+    sanitized_fallback = os.path.basename(fallback_name.strip()) if fallback_name else ""
+    if os.sep in sanitized_fallback:
+        sanitized_fallback = sanitized_fallback.replace(os.sep, "_")
+    if os.altsep and os.altsep in sanitized_fallback:
+        sanitized_fallback = sanitized_fallback.replace(os.altsep, "_")
+    if "\\" in sanitized_fallback and os.sep != "\\":
+        sanitized_fallback = sanitized_fallback.replace("\\", "_")
+    sanitized_fallback = sanitized_fallback or "ClassroomTools"
     app_dir = _preferred_app_directory()
     base_dir = app_dir if _ensure_writable_directory(app_dir) else os.getcwd()
     fallback = os.path.join(base_dir, sanitized_fallback)
