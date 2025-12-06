@@ -230,6 +230,17 @@ def _coerce_bool_from_bytes(value: bytes) -> object:
     return _coerce_bool(decoded)
 
 
+@_coerce_bool.register(bytearray)
+@_coerce_bool.register(memoryview)
+def _coerce_bool_from_byteslike(value: Union[bytearray, memoryview]) -> object:
+    """Handle common bytes-like inputs when converting to booleans."""
+
+    try:
+        return _coerce_bool(bytes(value))
+    except Exception:
+        return _BooleanParseResult.UNRESOLVED
+
+
 @_coerce_bool.register(str)
 def _coerce_bool_from_str(value: str) -> object:
     normalized = value.strip()
@@ -291,12 +302,8 @@ def _casefold_cached(value: str) -> str:
 def _normalize_text_token(value: Any, *, empty_on_falsy: bool) -> str:
     """Normalize arbitrary *value* inputs into case-folded strings."""
 
-    if empty_on_falsy and not value:
-        return ""
     text = _coerce_to_text(value)
-    if empty_on_falsy and not text:
-        return ""
-    if not text:
+    if (empty_on_falsy and not value) or not text:
         return ""
     return _casefold_cached(text)
 
