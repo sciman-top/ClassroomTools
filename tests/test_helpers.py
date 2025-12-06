@@ -12,6 +12,7 @@ import os
 import sys
 import tempfile
 import types
+import pytest
 from functools import singledispatch
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, Tuple, cast
@@ -198,6 +199,28 @@ def test_choose_writable_target_falls_back_when_parent_is_file(tmp_path: Path) -
     )
     assert Path(result).name == "students.xlsx"
     assert Path(result).parent != blocker
+
+
+def test_choose_writable_target_skips_empty_candidates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(helpers, "_preferred_app_directory", lambda: str(tmp_path))
+    result = helpers._choose_writable_target(  # type: ignore[attr-defined]
+        ("",),
+        is_dir=False,
+        fallback_name="students.xlsx",
+    )
+    assert Path(result).parent == tmp_path
+    assert Path(result).name == "students.xlsx"
+
+
+def test_choose_writable_target_sanitizes_blank_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(helpers, "_preferred_app_directory", lambda: str(tmp_path))
+    result = helpers._choose_writable_target(  # type: ignore[attr-defined]
+        tuple(),
+        is_dir=False,
+        fallback_name="   ",
+    )
+    assert Path(result).parent == tmp_path
+    assert Path(result).name == "ClassroomTools"
 
 
 _WPS_WRITER_CLASSES = {

@@ -472,16 +472,26 @@ def _choose_writable_target(
     is_dir: bool,
     fallback_name: str,
 ) -> str:
-    for target in candidates:
+    checked_dirs: Set[str] = set()
+    for raw_target in candidates:
+        if not raw_target:
+            continue
+        target = os.path.normpath(raw_target)
         directory = target if is_dir else os.path.dirname(target)
+        normalized_dir = os.path.normcase(os.path.abspath(directory or os.getcwd()))
+        if normalized_dir in checked_dirs:
+            continue
+        checked_dirs.add(normalized_dir)
         if _ensure_writable_directory(directory or os.getcwd()):
             return target
+
+    sanitized_fallback = fallback_name.strip() or "ClassroomTools"
     app_dir = _preferred_app_directory()
     base_dir = app_dir if _ensure_writable_directory(app_dir) else os.getcwd()
-    fallback = os.path.join(base_dir, fallback_name)
+    fallback = os.path.join(base_dir, sanitized_fallback)
     directory = fallback if is_dir else os.path.dirname(fallback)
     if directory and not _ensure_writable_directory(directory):
-        fallback = os.path.abspath(fallback_name)
+        fallback = os.path.abspath(sanitized_fallback)
         directory = fallback if is_dir else os.path.dirname(fallback)
         _ensure_writable_directory(directory or os.getcwd())
     return fallback
