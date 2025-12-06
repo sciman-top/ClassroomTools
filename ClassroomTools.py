@@ -2017,22 +2017,25 @@ class StyleConfig:
     MENU_BUTTON_STYLE = "font-size: 18px; padding-bottom: 6px;"
 
     @staticmethod
-    def floating_toolbar_style() -> str:
+    def floating_toolbar_style(scale: float = 1.0) -> str:
+        def _scaled(value: float) -> int:
+            return max(1, int(round(value * scale)))
+
         return (
             """
             #container {{
                 background-color: {bg};
-                border-radius: 10px;
+                border-radius: {radius}px;
                 border: 1px solid {border};
             }}
             QPushButton {{
                 color: {text};
                 background: {button_bg};
                 border: 1px solid {border};
-                border-radius: 6px;
-                padding: 3px;
-                min-width: 28px;
-                min-height: 28px;
+                border-radius: {button_radius}px;
+                padding: {padding}px;
+                min-width: {button_size}px;
+                min-height: {button_size}px;
             }}
             QPushButton:hover {{
                 background: {hover_bg};
@@ -2099,6 +2102,10 @@ class StyleConfig:
             border=StyleConfig.TOOLBAR_BORDER,
             text=StyleConfig.TOOLBAR_TEXT,
             button_bg=StyleConfig.TOOLBAR_BUTTON_BG,
+            radius=_scaled(10),
+            button_radius=_scaled(6),
+            padding=_scaled(3),
+            button_size=_scaled(28),
             hover_bg=StyleConfig.TOOLBAR_HOVER_BG,
             hover_border=StyleConfig.TOOLBAR_HOVER_BORDER,
             hover_text=StyleConfig.TOOLBAR_HOVER_TEXT,
@@ -2317,6 +2324,7 @@ class SettingsManager:
                 "quick_color_2": "#ff0000",
                 "quick_color_3": "#1e90ff",
                 "eraser_size": "24",
+                "ui_scale": "1.0",
                 "control_ms_ppt": "True",
                 "control_ms_word": "False",
                 "control_wps_ppt": "True",
@@ -2632,6 +2640,7 @@ class PaintConfig:
     quick_color_2: str = "#ff0000"
     quick_color_3: str = "#1e90ff"
     eraser_size: float = 24.0
+    ui_scale: float = 1.0
     control_ms_ppt: bool = True
     control_ms_word: bool = False
     control_wps_ppt: bool = True
@@ -2669,6 +2678,7 @@ class PaintConfig:
             quick_color_2=reader.get_str("quick_color_2", "#ff0000"),
             quick_color_3=reader.get_str("quick_color_3", "#1e90ff"),
             eraser_size=reader.get_float("eraser_size", 24.0),
+            ui_scale=reader.get_float("ui_scale", 1.0),
             control_ms_ppt=reader.get_bool("control_ms_ppt", True),
             control_ms_word=reader.get_bool("control_ms_word", False),
             control_wps_ppt=reader.get_bool("control_wps_ppt", True),
@@ -2688,6 +2698,7 @@ class PaintConfig:
             "quick_color_2": str(self.quick_color_2),
             "quick_color_3": str(self.quick_color_3),
             "eraser_size": f"{float(self.eraser_size):.2f}",
+            "ui_scale": f"{float(self.ui_scale):.2f}",
             "control_ms_ppt": bool_to_str(self.control_ms_ppt),
             "control_ms_word": bool_to_str(self.control_ms_word),
             "control_wps_ppt": bool_to_str(self.control_wps_ppt),
@@ -3521,6 +3532,7 @@ class PenSettingsDialog(_EnsureOnScreenMixin, QDialog):
         initial_base_sizes: Optional[Mapping[PenStyle, float]] = None,
         initial_control_flags: Optional[Mapping[str, Any]] = None,
         initial_eraser_size: float = 24.0,
+        initial_ui_scale: float = 1.0,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("画笔设置")
@@ -3558,6 +3570,7 @@ class PenSettingsDialog(_EnsureOnScreenMixin, QDialog):
         self._opacity_overrides: Dict[PenStyle, int] = overrides
         self._initial_eraser_size = float(clamp(initial_eraser_size, *self.SIZE_RANGE))
         self._eraser_size = float(self._initial_eraser_size)
+        self._ui_scale = float(clamp(initial_ui_scale, 0.8, 2.0))
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
@@ -3636,6 +3649,23 @@ class PenSettingsDialog(_EnsureOnScreenMixin, QDialog):
         opacity_layout.addWidget(self.opacity_slider, 1)
         opacity_layout.addWidget(self.opacity_value)
         layout.addWidget(self.opacity_container)
+
+        scale_layout = QHBoxLayout()
+        scale_layout.setContentsMargins(0, 0, 0, 0)
+        scale_layout.setSpacing(6)
+        scale_label = QLabel("界面缩放比例:")
+        self.scale_combo = QComboBox(self)
+        self.scale_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self._scale_choices = [0.8, 1.0, 1.25, 1.5, 1.75, 2.0]
+        for value in self._scale_choices:
+            self.scale_combo.addItem(f"{value:.2f}", value)
+        nearest = min(self._scale_choices, key=lambda v: abs(v - self._ui_scale))
+        self._ui_scale = nearest
+        self.scale_combo.setCurrentIndex(self._scale_choices.index(nearest))
+        self.scale_combo.currentIndexChanged.connect(self._on_scale_changed)
+        scale_layout.addWidget(scale_label)
+        scale_layout.addWidget(self.scale_combo, 1)
+        layout.addLayout(scale_layout)
 
         self.preview_label = QLabel(self)
         self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -3912,6 +3942,14 @@ class PenSettingsDialog(_EnsureOnScreenMixin, QDialog):
         self._refresh_style_icons()
         self._update_preview()
 
+    def _on_scale_changed(self) -> None:
+        idx = self.scale_combo.currentIndex()
+        try:
+            value = float(self.scale_combo.itemData(idx))
+        except Exception:
+            return
+        self._ui_scale = float(clamp(value, 0.8, 2.0))
+
     def _select_color(self, color_hex: str) -> None:
         color = QColor(color_hex)
         if not color.isValid():
@@ -3936,6 +3974,7 @@ class PenSettingsDialog(_EnsureOnScreenMixin, QDialog):
         Dict[PenStyle, float],
         Dict[str, bool],
         float,
+        float,
     ]:
         bases: Dict[PenStyle, float] = {}
         for style in PEN_STYLE_ORDER:
@@ -3952,6 +3991,7 @@ class PenSettingsDialog(_EnsureOnScreenMixin, QDialog):
             bases,
             self._collect_control_flags(),
             float(clamp(self._eraser_size, *self.SIZE_RANGE)),
+            float(self._ui_scale),
         )
 
 class ShapeSettingsDialog(_EnsureOnScreenMixin, QDialog):
@@ -4025,28 +4065,36 @@ class BoardColorDialog(_EnsureOnScreenMixin, QDialog):
 class TitleBar(QWidget):
     """浮动工具条的标题栏，负责拖拽移动。"""
 
-    def __init__(self, toolbar: "FloatingToolbar") -> None:
+    def __init__(self, toolbar: "FloatingToolbar", *, scale: float = 1.0) -> None:
         super().__init__(toolbar)
         self.toolbar = toolbar
         self._dragging = False
         self._drag_offset = QPoint()
+        self._scale = float(clamp(scale, 0.8, 2.0))
         self.setCursor(Qt.CursorShape.OpenHandCursor)
 
         self.setAutoFillBackground(True)
         palette = self.palette()
         palette.setColor(self.backgroundRole(), QColor(36, 37, 41, 235))
         self.setPalette(palette)
-        self.setFixedHeight(22)
 
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(6, 0, 6, 0)
-        title = QLabel("屏幕画笔")
-        font = title.font()
+        self._layout = QHBoxLayout(self)
+        self._title = QLabel("屏幕画笔")
+        self._layout.addWidget(self._title)
+        self._layout.addStretch()
+        self.apply_scale(self._scale)
+
+    def apply_scale(self, scale: float) -> None:
+        self._scale = float(clamp(scale, 0.8, 2.0))
+        height = max(14, int(round(22 * self._scale)))
+        self.setFixedHeight(height)
+        margin = max(2, int(round(6 * self._scale)))
+        self._layout.setContentsMargins(margin, 0, margin, 0)
+        font = self._title.font()
         font.setBold(True)
-        title.setFont(font)
-        title.setStyleSheet("color: #f1f3f4; font-size: 10.5px;")
-        layout.addWidget(title)
-        layout.addStretch()
+        font.setPointSizeF(max(8.0, 10.5 * self._scale))
+        self._title.setFont(font)
+        self._title.setStyleSheet("color: #f1f3f4;")
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
@@ -4079,13 +4127,20 @@ class TitleBar(QWidget):
 class FloatingToolbar(_EnsureOnScreenMixin, QWidget):
     """悬浮工具条：提供画笔、图形、白板等常用按钮。"""
 
-    def __init__(self, overlay: "OverlayWindow", settings_manager: SettingsManager) -> None:
+    def __init__(
+        self,
+        overlay: "OverlayWindow",
+        settings_manager: SettingsManager,
+        *,
+        ui_scale: float = 1.0,
+    ) -> None:
         super().__init__(
             None,
             Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint,
         )
         self.overlay = overlay
         self.settings_manager = settings_manager
+        self.ui_scale = float(clamp(ui_scale, 0.8, 2.0))
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_AlwaysShowToolTips, True)
         self.setWindowFlag(Qt.WindowType.WindowDoesNotAcceptFocus, True)
@@ -4102,8 +4157,44 @@ class FloatingToolbar(_EnsureOnScreenMixin, QWidget):
         self._ensure_min_width = self.width()
         self._ensure_min_height = self.height()
 
+    def _scaled(self, value: float) -> int:
+        return max(1, int(round(value * self.ui_scale)))
+
+    def apply_ui_scale(self, scale: float) -> None:
+        self.ui_scale = float(clamp(scale, 0.8, 2.0))
+        self.setStyleSheet(StyleConfig.floating_toolbar_style(self.ui_scale))
+        spacing_small = self._scaled(3)
+        spacing_large = self._scaled(4)
+        margin_h = self._scaled(6)
+        margin_v_top = self._scaled(4)
+        margin_v_bottom = self._scaled(5)
+        if isinstance(self.layout(), QVBoxLayout):
+            self.layout().setContentsMargins(0, 0, 0, 0)
+        container = self.findChild(QWidget, "container")
+        if container is not None and isinstance(container.layout(), QVBoxLayout):
+            layout = container.layout()
+            layout.setContentsMargins(margin_h, margin_v_top, margin_h, margin_v_bottom)
+            layout.setSpacing(spacing_large)
+        if hasattr(self, "title_bar") and isinstance(self.title_bar, TitleBar):
+            self.title_bar.apply_scale(self.ui_scale)
+        for row in (getattr(self, "_row_top", None), getattr(self, "_row_bottom", None)):
+            if isinstance(row, QHBoxLayout):
+                row.setSpacing(spacing_small)
+                row.setContentsMargins(0, 0, 0, 0)
+        icon_size = self._scaled(16)
+        min_size = self._scaled(28)
+        for btn in getattr(self, "_all_buttons", []):
+            btn.setIconSize(QSize(icon_size, icon_size))
+            btn.setMinimumSize(min_size, min_size)
+        self.adjustSize()
+        self.setFixedSize(self.sizeHint())
+        self._base_minimum_width = self.width()
+        self._base_minimum_height = self.height()
+        self._ensure_min_width = self.width()
+        self._ensure_min_height = self.height()
+
     def _build_ui(self) -> None:
-        self.setStyleSheet(StyleConfig.floating_toolbar_style())
+        self.setStyleSheet(StyleConfig.floating_toolbar_style(self.ui_scale))
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -4112,9 +4203,9 @@ class FloatingToolbar(_EnsureOnScreenMixin, QWidget):
         root.addWidget(container)
 
         layout = QVBoxLayout(container)
-        layout.setContentsMargins(6, 4, 6, 5)
-        layout.setSpacing(4)
-        self.title_bar = TitleBar(self)
+        layout.setContentsMargins(self._scaled(6), self._scaled(4), self._scaled(6), self._scaled(5))
+        layout.setSpacing(self._scaled(4))
+        self.title_bar = TitleBar(self, scale=self.ui_scale)
         layout.addWidget(self.title_bar)
 
         self.btn_cursor = QPushButton(IconManager.get_icon("cursor"), "")
@@ -4140,10 +4231,12 @@ class FloatingToolbar(_EnsureOnScreenMixin, QWidget):
 
         row_top = QHBoxLayout()
         row_top.setContentsMargins(0, 0, 0, 0)
-        row_top.setSpacing(3)
+        row_top.setSpacing(self._scaled(3))
         row_bottom = QHBoxLayout()
         row_bottom.setContentsMargins(0, 0, 0, 0)
-        row_bottom.setSpacing(3)
+        row_bottom.setSpacing(self._scaled(3))
+        self._row_top = row_top
+        self._row_bottom = row_bottom
 
         top_buttons = [
             self.btn_cursor,
@@ -4160,12 +4253,15 @@ class FloatingToolbar(_EnsureOnScreenMixin, QWidget):
         ]
 
         def _configure_toolbar_button(btn: QPushButton) -> None:
-            btn.setIconSize(QSize(16, 16))
+            btn.setIconSize(QSize(self._scaled(16), self._scaled(16)))
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            btn.setMinimumSize(self._scaled(28), self._scaled(28))
 
+        self._all_buttons: List[QPushButton] = []
         for btn in top_buttons + bottom_buttons:
             _configure_toolbar_button(btn)
+            self._all_buttons.append(btn)
         for btn in top_buttons:
             row_top.addWidget(btn)
         for btn in bottom_buttons:
@@ -4470,6 +4566,24 @@ class FloatingToolbar(_EnsureOnScreenMixin, QWidget):
     def update_whiteboard_button_state(self, active: bool) -> None:
         self.btn_whiteboard.setObjectName("whiteboardButtonActive" if active else "")
         self.style().polish(self.btn_whiteboard)
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        try:
+            cursor_pos = QCursor.pos()
+            local = self.mapFromGlobal(cursor_pos)
+            if self.rect().contains(local):
+                self.setCursor(Qt.CursorShape.ArrowCursor)
+                try:
+                    self.overlay.setCursor(Qt.CursorShape.ArrowCursor)
+                except Exception:
+                    pass
+                try:
+                    self.overlay.handle_toolbar_enter()
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def enterEvent(self, event) -> None:
         self.setCursor(Qt.CursorShape.ArrowCursor)
@@ -6933,6 +7047,8 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         paint_config = self.settings_manager.get_paint_settings()
         self.paint_config = paint_config
         paint_mapping = paint_config.to_mapping()
+        self.ui_scale = float(clamp(getattr(paint_config, "ui_scale", 1.0), 0.8, 2.0))
+        self.paint_config.ui_scale = float(self.ui_scale)
         self._presentation_control_flags: Dict[str, bool] = {}
         self._update_presentation_control_flags(
             {
@@ -7103,7 +7219,7 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         self._build_scene()
         self.history: List[QPixmap] = []
         self._history_limit = 30
-        self.toolbar = FloatingToolbar(self, self.settings_manager)
+        self.toolbar = FloatingToolbar(self, self.settings_manager, ui_scale=self.ui_scale)
         self._update_pen_tooltip()
         self.set_mode("brush", initial=True)
         self.toolbar.update_undo_state(False)
@@ -7301,6 +7417,7 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             initial_base_sizes=self._style_base_sizes,
             initial_control_flags=getattr(self, "_presentation_control_flags", None),
             initial_eraser_size=self.eraser_size,
+            initial_ui_scale=self.ui_scale,
         )
         if dialog.exec():
             (
@@ -7311,6 +7428,7 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                 base_sizes,
                 control_flags,
                 eraser_size,
+                ui_scale,
             ) = dialog.get_settings()
             self._ingest_style_base_sizes(base_sizes)
             self.pen_style = style
@@ -7320,9 +7438,14 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             )
             self.pen_color = QColor(color)
             self.eraser_size = float(clamp(eraser_size, 1.0, 50.0))
+            self.ui_scale = float(clamp(ui_scale, 0.8, 2.0))
             self._apply_opacity_overrides(overrides)
             self._update_presentation_control_flags(control_flags)
             self._apply_pen_style_change()
+            try:
+                self.toolbar.apply_ui_scale(self.ui_scale)
+            except Exception:
+                pass
             self.save_settings()
         self.set_mode(pm, ps)
         self.raise_toolbar()
@@ -9220,6 +9343,7 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         self.paint_config.brush_base_size = float(self.pen_base_size)
         self.paint_config.brush_color = self.pen_color.name()
         self.paint_config.brush_style = self.pen_style
+        self.paint_config.ui_scale = float(self.ui_scale)
         quicks = self._normalize_quick_colors(self.quick_colors)
         self.quick_colors = quicks
         self.paint_config.quick_color_1 = quicks[0]
@@ -11669,7 +11793,7 @@ class RollCallTimerWindow(QWidget):
         top.addWidget(control_bar, 0, Qt.AlignmentFlag.AlignLeft)
         top.addStretch(1)
 
-        self.menu_button = QToolButton(); self.menu_button.setText("设置"); self.menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.menu_button = QToolButton(); self.menu_button.setText("选项"); self.menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.menu_button.setFixedSize(toolbar_height, toolbar_height)
         self.menu_button.setStyleSheet(StyleConfig.MENU_BUTTON_STYLE)
         self.main_menu = self._build_menu(); self.menu_button.setMenu(self.main_menu)
@@ -12302,7 +12426,7 @@ class RollCallTimerWindow(QWidget):
         self.time_display_label.setFont(timer_font)
 
     def _build_menu(self) -> QMenu:
-        menu = QMenu("设置", self)
+        menu = QMenu("选项", self)
         menu.setStyleSheet(
             """
             QMenu {
@@ -14478,10 +14602,11 @@ class LauncherWindow(QWidget):
     def toggle_paint(self) -> None:
         """打开或隐藏屏幕画笔覆盖层。"""
         overlay = self._ensure_overlay_ready()
-        if overlay.isVisible():
+        toolbar_visible = bool(getattr(overlay, "toolbar", None) and overlay.toolbar.isVisible())
+        if overlay.isVisible() and toolbar_visible:
             overlay.hide_overlay(); self.paint_button.setText("画笔")
         else:
-            overlay.show_overlay(); overlay.raise_(); overlay.activateWindow()
+            overlay.show_overlay(); overlay.raise_toolbar(); overlay.raise_(); overlay.activateWindow()
             self.paint_button.setText("隐藏画笔")
 
     def toggle_roll_call(self) -> None:
