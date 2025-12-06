@@ -155,6 +155,11 @@ def test_str_to_bool_handles_bytes_and_enums() -> None:
     assert helpers.str_to_bool(_SampleEnum.DISABLED) is False
 
 
+def test_str_to_bool_handles_common_byteslikes() -> None:
+    assert helpers.str_to_bool(bytearray(b"YES")) is True
+    assert helpers.str_to_bool(memoryview(b"0")) is False
+
+
 def test_str_to_bool_interprets_numeric_strings() -> None:
     assert helpers.str_to_bool(" 2 ") is True
     assert helpers.str_to_bool("-1") is True
