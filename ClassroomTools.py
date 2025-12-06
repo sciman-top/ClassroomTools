@@ -11386,6 +11386,15 @@ class RemotePresenterController(QObject):
         self.stop()
         return False
 
+    def restart(self) -> bool:
+        """重新启用监听以应用最新的按键配置。"""
+
+        was_enabled = self._enabled
+        self.stop()
+        if was_enabled:
+            return self.set_enabled(True)
+        return False
+
     def stop(self) -> None:
         self._watchdog_timer.stop()
         self.hotkey.stop()
