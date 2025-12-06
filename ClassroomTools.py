@@ -3650,23 +3650,6 @@ class PenSettingsDialog(_EnsureOnScreenMixin, QDialog):
         opacity_layout.addWidget(self.opacity_value)
         layout.addWidget(self.opacity_container)
 
-        scale_layout = QHBoxLayout()
-        scale_layout.setContentsMargins(0, 0, 0, 0)
-        scale_layout.setSpacing(6)
-        scale_label = QLabel("界面缩放比例:")
-        self.scale_combo = QComboBox(self)
-        self.scale_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
-        self._scale_choices = [0.8, 1.0, 1.25, 1.5, 1.75, 2.0]
-        for value in self._scale_choices:
-            self.scale_combo.addItem(f"{value:.2f}", value)
-        nearest = min(self._scale_choices, key=lambda v: abs(v - self._ui_scale))
-        self._ui_scale = nearest
-        self.scale_combo.setCurrentIndex(self._scale_choices.index(nearest))
-        self.scale_combo.currentIndexChanged.connect(self._on_scale_changed)
-        scale_layout.addWidget(scale_label)
-        scale_layout.addWidget(self.scale_combo, 1)
-        layout.addLayout(scale_layout)
-
         self.preview_label = QLabel(self)
         self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview_label.setMinimumSize(self._preview_size)
@@ -3704,6 +3687,23 @@ class PenSettingsDialog(_EnsureOnScreenMixin, QDialog):
         eraser_layout.addWidget(self.eraser_slider, 1)
         eraser_layout.addWidget(self.eraser_value)
         layout.addLayout(eraser_layout)
+
+        scale_layout = QHBoxLayout()
+        scale_layout.setContentsMargins(0, 0, 0, 0)
+        scale_layout.setSpacing(6)
+        scale_label = QLabel("界面缩放比例:")
+        self.scale_combo = QComboBox(self)
+        self.scale_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self._scale_choices = [0.8, 1.0, 1.25, 1.5, 1.75, 2.0]
+        for value in self._scale_choices:
+            self.scale_combo.addItem(f"{value:.2f}", value)
+        nearest = min(self._scale_choices, key=lambda v: abs(v - self._ui_scale))
+        self._ui_scale = nearest
+        self.scale_combo.setCurrentIndex(self._scale_choices.index(nearest))
+        self.scale_combo.currentIndexChanged.connect(self._on_scale_changed)
+        scale_layout.addWidget(scale_label)
+        scale_layout.addWidget(self.scale_combo, 1)
+        layout.addLayout(scale_layout)
 
         control_label = QLabel("放映与滚动控制：")
         control_label.setStyleSheet("font-weight: bold;")
@@ -7398,7 +7398,13 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         self.update_cursor()
 
     def show_overlay(self) -> None:
-        self.show(); self.toolbar.show(); self.raise_toolbar()
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.toolbar.show()
+        self.raise_toolbar()
+        if self.toolbar.underMouse():
+            self.handle_toolbar_enter()
         self.set_mode(self.mode, self.current_shape)
 
     def hide_overlay(self) -> None:
@@ -11793,8 +11799,11 @@ class RollCallTimerWindow(QWidget):
         top.addWidget(control_bar, 0, Qt.AlignmentFlag.AlignLeft)
         top.addStretch(1)
 
-        self.menu_button = QToolButton(); self.menu_button.setText("选项"); self.menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self.menu_button.setFixedSize(toolbar_height, toolbar_height)
+        self.menu_button = QToolButton(); self.menu_button.setText("设置"); self.menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.menu_button.setFont(compact_font)
+        self.menu_button.setToolButtonStyle(Qt.ToolButtonStyle.TextOnly)
+        menu_width = max(toolbar_height, self.menu_button.fontMetrics().horizontalAdvance(self.menu_button.text()) + 16)
+        self.menu_button.setFixedSize(menu_width, toolbar_height)
         self.menu_button.setStyleSheet(StyleConfig.MENU_BUTTON_STYLE)
         self.main_menu = self._build_menu(); self.menu_button.setMenu(self.main_menu)
         top.addWidget(self.menu_button, 0, Qt.AlignmentFlag.AlignRight)
@@ -12426,7 +12435,7 @@ class RollCallTimerWindow(QWidget):
         self.time_display_label.setFont(timer_font)
 
     def _build_menu(self) -> QMenu:
-        menu = QMenu("选项", self)
+        menu = QMenu("设置", self)
         menu.setStyleSheet(
             """
             QMenu {
