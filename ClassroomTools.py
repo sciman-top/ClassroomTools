@@ -11800,7 +11800,10 @@ class RollCallTimerWindow(QWidget):
         top.addStretch(1)
 
         self.menu_button = QToolButton(); self.menu_button.setText("设置"); self.menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self.menu_button.setFixedSize(toolbar_height, toolbar_height)
+        self.menu_button.setFont(compact_font)
+        self.menu_button.setToolButtonStyle(Qt.ToolButtonStyle.TextOnly)
+        menu_width = max(toolbar_height, self.menu_button.fontMetrics().horizontalAdvance(self.menu_button.text()) + 16)
+        self.menu_button.setFixedSize(menu_width, toolbar_height)
         self.menu_button.setStyleSheet(StyleConfig.MENU_BUTTON_STYLE)
         self.main_menu = self._build_menu(); self.menu_button.setMenu(self.main_menu)
         top.addWidget(self.menu_button, 0, Qt.AlignmentFlag.AlignRight)
