@@ -79,6 +79,115 @@ else:
     _KERNEL32 = None  # type: ignore[assignment]
     _PSAPI = None  # type: ignore[assignment]
 
+# 为常用 Win32 API 显式声明 argtypes/restype，避免 64 位环境下句柄被截断。
+if _KERNEL32 is not None:
+    try:
+        _KERNEL32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+        _KERNEL32.GetModuleHandleW.restype = wintypes.HMODULE
+    except Exception:
+        pass
+    try:
+        _KERNEL32.GetCurrentThreadId.restype = wintypes.DWORD
+    except Exception:
+        pass
+
+if _USER32 is not None:
+    try:
+        _USER32.MapVirtualKeyW.argtypes = [wintypes.UINT, wintypes.UINT]
+        _USER32.MapVirtualKeyW.restype = wintypes.UINT
+    except Exception:
+        pass
+    try:
+        _USER32.UnhookWindowsHookEx.argtypes = [wintypes.HANDLE]
+        _USER32.UnhookWindowsHookEx.restype = wintypes.BOOL
+    except Exception:
+        pass
+    try:
+        _USER32.CallNextHookEx.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            wintypes.WPARAM,
+            wintypes.LPARAM,
+        ]
+        _USER32.CallNextHookEx.restype = wintypes.LRESULT
+    except Exception:
+        pass
+    try:
+        _USER32.SetWindowsHookExW.argtypes = [
+            ctypes.c_int,
+            ctypes.c_void_p,
+            wintypes.HINSTANCE,
+            wintypes.DWORD,
+        ]
+        _USER32.SetWindowsHookExW.restype = wintypes.HANDLE
+    except Exception:
+        pass
+
+# 统一的 WinAPI 句柄别名，便于后续在 ctypes 中声明函数签名
+HHOOK = HINSTANCE = HMODULE = wintypes.HANDLE
+
+# 兼容早期 Python/ctypes 未暴露 LRESULT 的场景
+if not hasattr(wintypes, "LRESULT"):
+    wintypes.LRESULT = ctypes.c_long  # type: ignore[attr-defined]
+if not hasattr(wintypes, "HHOOK"):
+    wintypes.HHOOK = wintypes.HANDLE  # type: ignore[attr-defined]
+if not hasattr(wintypes, "HMODULE"):
+    wintypes.HMODULE = wintypes.HANDLE  # type: ignore[attr-defined]
+_HOOKPROC_TYPE = ctypes.WINFUNCTYPE(wintypes.LRESULT, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
+
+if _KERNEL32 is not None:
+    try:
+        _KERNEL32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+        _KERNEL32.GetModuleHandleW.restype = wintypes.HMODULE
+    except Exception:
+        pass
+    try:
+        _KERNEL32.GetCurrentThreadId.restype = wintypes.DWORD
+    except Exception:
+        pass
+
+if _USER32 is not None:
+    try:
+        _USER32.SetWindowsHookExW.argtypes = [
+            ctypes.c_int,
+            _HOOKPROC_TYPE,
+            wintypes.HINSTANCE,
+            wintypes.DWORD,
+        ]
+        _USER32.SetWindowsHookExW.restype = wintypes.HHOOK
+    except Exception:
+        pass
+    try:
+        _USER32.CallNextHookEx.argtypes = [
+            wintypes.HHOOK,
+            ctypes.c_int,
+            wintypes.WPARAM,
+            wintypes.LPARAM,
+        ]
+        _USER32.CallNextHookEx.restype = wintypes.LRESULT
+    except Exception:
+        pass
+    try:
+        _USER32.UnhookWindowsHookEx.argtypes = [wintypes.HHOOK]
+        _USER32.UnhookWindowsHookEx.restype = wintypes.BOOL
+    except Exception:
+        pass
+    try:
+        _USER32.MapVirtualKeyW.argtypes = [wintypes.UINT, wintypes.UINT]
+        _USER32.MapVirtualKeyW.restype = wintypes.UINT
+    except Exception:
+        pass
+if not hasattr(wintypes, "HHOOK"):
+    wintypes.HHOOK = wintypes.HANDLE  # type: ignore[attr-defined]
+if not hasattr(wintypes, "HMODULE"):
+    wintypes.HMODULE = wintypes.HANDLE  # type: ignore[attr-defined]
+# 兼容部分 Python 发行版未定义 HHOOK 的情况
+if not hasattr(wintypes, "HHOOK"):
+    wintypes.HHOOK = wintypes.HANDLE  # type: ignore[attr-defined]
+# 兼容早期 Python/ctypes 未暴露 HHOOK 的场景
+if not hasattr(wintypes, "HHOOK"):
+    wintypes.HHOOK = wintypes.HANDLE  # type: ignore[attr-defined]
+
 VK_UP = getattr(win32con, "VK_UP", 0x26)
 VK_DOWN = getattr(win32con, "VK_DOWN", 0x28)
 VK_LEFT = getattr(win32con, "VK_LEFT", 0x25)
@@ -99,6 +208,9 @@ if _USER32 is not None:
     _WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 else:  # pragma: no cover - 非 Windows 平台不会调用
     _WNDENUMPROC = None  # type: ignore[assignment]
+
+# 便于在 ctypes 原型中使用的句柄别名
+HHOOK = HINSTANCE = HMODULE = wintypes.HANDLE
 
 
 def clamp(value: float, minimum: float, maximum: float) -> float:
@@ -5444,10 +5556,22 @@ class _PresentationForwarder(_PresentationWindowMixin):
                     ]
                 },
             )
+            try:
+                _USER32.SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(_Input), ctypes.c_int]
+                _USER32.SendInput.restype = wintypes.UINT
+            except Exception:
+                pass
         except Exception:
             _KeyboardInput = None  # type: ignore[assignment]
             _InputUnion = None  # type: ignore[assignment]
             _Input = None  # type: ignore[assignment]
+
+        if _USER32 is not None and _Input is not None:
+            try:
+                _USER32.SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(_Input), ctypes.c_int]
+                _USER32.SendInput.restype = wintypes.UINT
+            except Exception:
+                pass
 
     else:
 
@@ -11141,7 +11265,7 @@ class RemotePresenterHotkey(QObject):
             ("dwExtraInfo", wintypes.ULONG_PTR),
         ]
 
-    _HOOKPROC = ctypes.WINFUNCTYPE(wintypes.LRESULT, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
+    _HOOKPROC = _HOOKPROC_TYPE
 
     def __init__(self, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
@@ -11183,11 +11307,12 @@ class RemotePresenterHotkey(QObject):
 
             return _USER32.CallNextHookEx(self._hook_handle, nCode, wParam, lParam)
 
-        self._c_hook_proc = self._HOOKPROC(hook_proc)
+        self._c_hook_proc = _HOOKPROC_TYPE(hook_proc)
 
         h_mod = 0
         try:
-            h_mod = _KERNEL32.GetModuleHandleW("user32.dll") if _KERNEL32 is not None else 0
+            # 将回调所在模块句柄传入，而不是 user32.dll，避免某些环境下钩子注册失败。
+            h_mod = _KERNEL32.GetModuleHandleW(None) if _KERNEL32 is not None else 0
         except Exception:
             h_mod = 0
 
@@ -11200,8 +11325,6 @@ class RemotePresenterHotkey(QObject):
             )
         except Exception as e:
             logger.error("SetWindowsHookExW failed: %s", e)
-            self._hook_handle = None
-
         if self._hook_handle:
             self._intercept_enabled = True
             return True
