@@ -79,114 +79,80 @@ else:
     _KERNEL32 = None  # type: ignore[assignment]
     _PSAPI = None  # type: ignore[assignment]
 
-# 为常用 Win32 API 显式声明 argtypes/restype，避免 64 位环境下句柄被截断。
-if _KERNEL32 is not None:
+
+def _safe_set_prototype(func: Any, *, argtypes: Optional[list] = None, restype: Any = None) -> None:
+    """在可用时为 ctypes 函数设置签名，失败时静默跳过。"""
+
+    if func is None:
+        return
     try:
-        _KERNEL32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
-        _KERNEL32.GetModuleHandleW.restype = wintypes.HMODULE
-    except Exception:
-        pass
-    try:
-        _KERNEL32.GetCurrentThreadId.restype = wintypes.DWORD
+        if argtypes is not None:
+            func.argtypes = argtypes
+        if restype is not None:
+            func.restype = restype
     except Exception:
         pass
 
-if _USER32 is not None:
-    try:
-        _USER32.MapVirtualKeyW.argtypes = [wintypes.UINT, wintypes.UINT]
-        _USER32.MapVirtualKeyW.restype = wintypes.UINT
-    except Exception:
-        pass
-    try:
-        _USER32.UnhookWindowsHookEx.argtypes = [wintypes.HANDLE]
-        _USER32.UnhookWindowsHookEx.restype = wintypes.BOOL
-    except Exception:
-        pass
-    try:
-        _USER32.CallNextHookEx.argtypes = [
-            wintypes.HANDLE,
-            ctypes.c_int,
-            wintypes.WPARAM,
-            wintypes.LPARAM,
-        ]
-        _USER32.CallNextHookEx.restype = wintypes.LRESULT
-    except Exception:
-        pass
-    try:
-        _USER32.SetWindowsHookExW.argtypes = [
-            ctypes.c_int,
-            ctypes.c_void_p,
-            wintypes.HINSTANCE,
-            wintypes.DWORD,
-        ]
-        _USER32.SetWindowsHookExW.restype = wintypes.HANDLE
-    except Exception:
-        pass
 
-# 统一的 WinAPI 句柄别名，便于后续在 ctypes 中声明函数签名
+def _ensure_winapi_types() -> None:
+    """为缺失的 WinAPI 类型提供兼容定义。"""
+
+    if not hasattr(wintypes, "LRESULT"):
+        wintypes.LRESULT = ctypes.c_long  # type: ignore[attr-defined]
+    if not hasattr(wintypes, "HHOOK"):
+        wintypes.HHOOK = wintypes.HANDLE  # type: ignore[attr-defined]
+    if not hasattr(wintypes, "HMODULE"):
+        wintypes.HMODULE = wintypes.HANDLE  # type: ignore[attr-defined]
+
+
+_ensure_winapi_types()
 HHOOK = HINSTANCE = HMODULE = wintypes.HANDLE
-
-# 兼容早期 Python/ctypes 未暴露 LRESULT 的场景
-if not hasattr(wintypes, "LRESULT"):
-    wintypes.LRESULT = ctypes.c_long  # type: ignore[attr-defined]
-if not hasattr(wintypes, "HHOOK"):
-    wintypes.HHOOK = wintypes.HANDLE  # type: ignore[attr-defined]
-if not hasattr(wintypes, "HMODULE"):
-    wintypes.HMODULE = wintypes.HANDLE  # type: ignore[attr-defined]
 _HOOKPROC_TYPE = ctypes.WINFUNCTYPE(wintypes.LRESULT, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
 
-if _KERNEL32 is not None:
-    try:
-        _KERNEL32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
-        _KERNEL32.GetModuleHandleW.restype = wintypes.HMODULE
-    except Exception:
-        pass
-    try:
-        _KERNEL32.GetCurrentThreadId.restype = wintypes.DWORD
-    except Exception:
-        pass
 
-if _USER32 is not None:
-    try:
-        _USER32.SetWindowsHookExW.argtypes = [
-            ctypes.c_int,
-            _HOOKPROC_TYPE,
-            wintypes.HINSTANCE,
-            wintypes.DWORD,
-        ]
-        _USER32.SetWindowsHookExW.restype = wintypes.HHOOK
-    except Exception:
-        pass
-    try:
-        _USER32.CallNextHookEx.argtypes = [
-            wintypes.HHOOK,
-            ctypes.c_int,
-            wintypes.WPARAM,
-            wintypes.LPARAM,
-        ]
-        _USER32.CallNextHookEx.restype = wintypes.LRESULT
-    except Exception:
-        pass
-    try:
-        _USER32.UnhookWindowsHookEx.argtypes = [wintypes.HHOOK]
-        _USER32.UnhookWindowsHookEx.restype = wintypes.BOOL
-    except Exception:
-        pass
-    try:
-        _USER32.MapVirtualKeyW.argtypes = [wintypes.UINT, wintypes.UINT]
-        _USER32.MapVirtualKeyW.restype = wintypes.UINT
-    except Exception:
-        pass
-if not hasattr(wintypes, "HHOOK"):
-    wintypes.HHOOK = wintypes.HANDLE  # type: ignore[attr-defined]
-if not hasattr(wintypes, "HMODULE"):
-    wintypes.HMODULE = wintypes.HANDLE  # type: ignore[attr-defined]
-# 兼容部分 Python 发行版未定义 HHOOK 的情况
-if not hasattr(wintypes, "HHOOK"):
-    wintypes.HHOOK = wintypes.HANDLE  # type: ignore[attr-defined]
-# 兼容早期 Python/ctypes 未暴露 HHOOK 的场景
-if not hasattr(wintypes, "HHOOK"):
-    wintypes.HHOOK = wintypes.HANDLE  # type: ignore[attr-defined]
+def _configure_winapi_prototypes() -> None:
+    """集中设置 Win32 API 函数签名，避免重复代码与句柄截断。"""
+
+    _ensure_winapi_types()
+    _safe_set_prototype(
+        getattr(_KERNEL32, "GetModuleHandleW", None),
+        argtypes=[wintypes.LPCWSTR],
+        restype=wintypes.HMODULE,
+    )
+    _safe_set_prototype(
+        getattr(_KERNEL32, "GetCurrentThreadId", None),
+        restype=wintypes.DWORD,
+    )
+
+    _safe_set_prototype(
+        getattr(_USER32, "MapVirtualKeyW", None),
+        argtypes=[wintypes.UINT, wintypes.UINT],
+        restype=wintypes.UINT,
+    )
+    _safe_set_prototype(
+        getattr(_USER32, "UnhookWindowsHookEx", None),
+        argtypes=[wintypes.HHOOK],
+        restype=wintypes.BOOL,
+    )
+    _safe_set_prototype(
+        getattr(_USER32, "CallNextHookEx", None),
+        argtypes=[wintypes.HHOOK, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM],
+        restype=wintypes.LRESULT,
+    )
+    _safe_set_prototype(
+        getattr(_USER32, "SetWindowsHookExW", None),
+        argtypes=[ctypes.c_int, _HOOKPROC_TYPE, wintypes.HINSTANCE, wintypes.DWORD],
+        restype=wintypes.HHOOK,
+    )
+
+    globals()["_WNDENUMPROC"] = (
+        ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        if _USER32 is not None
+        else None
+    )
+
+
+_configure_winapi_prototypes()
 
 VK_UP = getattr(win32con, "VK_UP", 0x26)
 VK_DOWN = getattr(win32con, "VK_DOWN", 0x28)
@@ -203,15 +169,6 @@ _PROCESS_VM_READ = getattr(win32con, "PROCESS_VM_READ", 0x0010)
 _PROCESS_QUERY_LIMITED_INFORMATION = getattr(
     win32con, "PROCESS_QUERY_LIMITED_INFORMATION", 0x1000
 )
-
-if _USER32 is not None:
-    _WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-else:  # pragma: no cover - 非 Windows 平台不会调用
-    _WNDENUMPROC = None  # type: ignore[assignment]
-
-# 便于在 ctypes 原型中使用的句柄别名
-HHOOK = HINSTANCE = HMODULE = wintypes.HANDLE
-
 
 def clamp(value: float, minimum: float, maximum: float) -> float:
     """Clamp *value* into the inclusive range [minimum, maximum]."""
@@ -874,6 +831,7 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import (
     QApplication,
     QButtonGroup,
+    QGraphicsDropShadowEffect,
     QComboBox,
     QCheckBox,
     QDialog,
@@ -1582,47 +1540,26 @@ def _compute_presentation_category(
 ) -> str:
     """Classify a presentation window based on class and process hints."""
 
-    def _decode_bytes(raw: Union[bytes, bytearray, memoryview]) -> str:
-        try:
-            return bytes(raw).decode("utf-8", "ignore")
-        except Exception:
-            return ""
-
-    def _to_text(value: Any) -> str:
-        if value is None:
-            return ""
-        if isinstance(value, str):
-            return value
-        if isinstance(value, (bytes, bytearray, memoryview)):
-            return _decode_bytes(value)
-        if isinstance(value, os.PathLike):
-            try:
-                return os.fspath(value)
-            except Exception:
-                return ""
-        try:
-            return str(value)
-        except Exception:
-            return ""
-
     def _normalize(value: Any) -> str:
-        text = _to_text(value)
-        if not text:
-            return ""
-        stripped = text.strip()
-        return stripped.casefold()
+        return _normalize_class_token(value)
 
     def _normalize_process(value: Any) -> Tuple[str, str]:
-        text = _to_text(value)
+        text = _coerce_to_text(value).strip()
         if not text:
             return "", ""
-        stripped = text.strip()
-        lowered = stripped.casefold()
-        return stripped, lowered
+        return text, _casefold_cached(text)
 
-    primary = _normalize(class_name)
-    secondary = _normalize(top_class)
-    classes = tuple(dict.fromkeys(filter(None, (primary, secondary))))
+    classes = tuple(
+        dict.fromkeys(
+            filter(
+                None,
+                (
+                    _normalize(class_name),
+                    _normalize(top_class),
+                ),
+            )
+        )
+    )
 
     process, process_lower = _normalize_process(process_name)
 
@@ -2014,7 +1951,8 @@ class StyleConfig:
     WHITEBOARD_ACTIVE_BORDER = "rgba(251, 188, 5, 255)"
     WHITEBOARD_ACTIVE_TEXT = "#202124"
     DESCRIPTION_LABEL_STYLE = f"color: {DESCRIPTION_COLOR}; font-size: 12px;"
-    MENU_BUTTON_STYLE = "font-size: 18px; padding-bottom: 6px;"
+    # 保持与工具栏按钮一致的字体大小，仅保留轻微下边距微调。
+    MENU_BUTTON_STYLE = "padding-bottom: 6px;"
 
     @staticmethod
     def floating_toolbar_style(scale: float = 1.0) -> str:
@@ -2323,6 +2261,7 @@ class SettingsManager:
                 "quick_color_1": "#000000",
                 "quick_color_2": "#ff0000",
                 "quick_color_3": "#1e90ff",
+                "board_color": "#ffffff",
                 "eraser_size": "24",
                 "ui_scale": "1.0",
                 "control_ms_ppt": "True",
@@ -2639,6 +2578,7 @@ class PaintConfig:
     quick_color_1: str = "#000000"
     quick_color_2: str = "#ff0000"
     quick_color_3: str = "#1e90ff"
+    board_color: str = "#ffffff"
     eraser_size: float = 24.0
     ui_scale: float = 1.0
     control_ms_ppt: bool = True
@@ -2677,6 +2617,7 @@ class PaintConfig:
             quick_color_1=reader.get_str("quick_color_1", "#000000"),
             quick_color_2=reader.get_str("quick_color_2", "#ff0000"),
             quick_color_3=reader.get_str("quick_color_3", "#1e90ff"),
+            board_color=reader.get_str("board_color", "#ffffff"),
             eraser_size=reader.get_float("eraser_size", 24.0),
             ui_scale=reader.get_float("ui_scale", 1.0),
             control_ms_ppt=reader.get_bool("control_ms_ppt", True),
@@ -2697,6 +2638,7 @@ class PaintConfig:
             "quick_color_1": str(self.quick_color_1),
             "quick_color_2": str(self.quick_color_2),
             "quick_color_3": str(self.quick_color_3),
+            "board_color": str(self.board_color),
             "eraser_size": f"{float(self.eraser_size):.2f}",
             "ui_scale": f"{float(self.ui_scale):.2f}",
             "control_ms_ppt": bool_to_str(self.control_ms_ppt),
@@ -3655,7 +3597,7 @@ class PenSettingsDialog(_EnsureOnScreenMixin, QDialog):
         self.preview_label.setMinimumSize(self._preview_size)
         layout.addWidget(self.preview_label, 0, Qt.AlignmentFlag.AlignCenter)
 
-        layout.addWidget(QLabel("画笔的临时颜色:"))
+        layout.addWidget(QLabel("临时更换画笔的颜色:"))
         color_layout = QGridLayout()
         color_layout.setContentsMargins(0, 0, 0, 0)
         color_layout.setSpacing(6)
@@ -3691,12 +3633,13 @@ class PenSettingsDialog(_EnsureOnScreenMixin, QDialog):
         scale_layout = QHBoxLayout()
         scale_layout.setContentsMargins(0, 0, 0, 0)
         scale_layout.setSpacing(6)
-        scale_label = QLabel("界面缩放比例:")
+        scale_label = QLabel("画笔工具条的界面大小（缩放比例）:")
         self.scale_combo = QComboBox(self)
         self.scale_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         self._scale_choices = [0.8, 1.0, 1.25, 1.5, 1.75, 2.0]
         for value in self._scale_choices:
-            self.scale_combo.addItem(f"{value:.2f}", value)
+            percent = int(round(value * 100))
+            self.scale_combo.addItem(f"{percent}%", value)
         nearest = min(self._scale_choices, key=lambda v: abs(v - self._ui_scale))
         self._ui_scale = nearest
         self.scale_combo.setCurrentIndex(self._scale_choices.index(nearest))
@@ -3851,7 +3794,7 @@ class PenSettingsDialog(_EnsureOnScreenMixin, QDialog):
         config = get_pen_style_config(self._current_style)
         minimum, maximum = config.slider_range
         self.style_description.setText(
-            f"{config.description}（基础粗细范围 {minimum} - {maximum} 像素）"
+            f"{config.description}"
         )
 
     def _resolve_opacity_for_style(self, style: PenStyle) -> int:
@@ -4160,9 +4103,14 @@ class FloatingToolbar(_EnsureOnScreenMixin, QWidget):
     def _scaled(self, value: float) -> int:
         return max(1, int(round(value * self.ui_scale)))
 
+    def _apply_toolbar_stylesheet(self) -> None:
+        """Apply floating toolbar stylesheet only to the toolbar container,避免波及设置对话框。"""
+        target = getattr(self, "_style_container", None) or self
+        target.setStyleSheet(StyleConfig.floating_toolbar_style(self.ui_scale))
+
     def apply_ui_scale(self, scale: float) -> None:
         self.ui_scale = float(clamp(scale, 0.8, 2.0))
-        self.setStyleSheet(StyleConfig.floating_toolbar_style(self.ui_scale))
+        self._apply_toolbar_stylesheet()
         spacing_small = self._scaled(3)
         spacing_large = self._scaled(4)
         margin_h = self._scaled(6)
@@ -4194,12 +4142,12 @@ class FloatingToolbar(_EnsureOnScreenMixin, QWidget):
         self._ensure_min_height = self.height()
 
     def _build_ui(self) -> None:
-        self.setStyleSheet(StyleConfig.floating_toolbar_style(self.ui_scale))
-
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         container = QWidget(self)
         container.setObjectName("container")
+        self._style_container = container
+        self._apply_toolbar_stylesheet()
         root.addWidget(container)
 
         layout = QVBoxLayout(container)
@@ -4215,7 +4163,8 @@ class FloatingToolbar(_EnsureOnScreenMixin, QWidget):
         brush_buttons: List[QPushButton] = []
         for idx, color_hex in enumerate(self.quick_colors):
             button = QPushButton(IconManager.get_brush_icon(color_hex), "")
-            button.setToolTip(f"常用色{idx + 1}（{color_hex.upper()}）")
+            # 常用画笔统一提示：长按可换色
+            button.setToolTip("长按更换颜色")
             self.brush_color_buttons.append(button)
             brush_buttons.append(button)
         self.btn_settings = QPushButton(IconManager.get_icon("settings"), "")
@@ -4273,9 +4222,9 @@ class FloatingToolbar(_EnsureOnScreenMixin, QWidget):
             self.btn_cursor: "光标",
             self.btn_shape: "图形",
             self.btn_undo: "撤销",
-            self.btn_eraser: "橡皮擦（再次点击恢复画笔）",
-            self.btn_region_delete: "框选删除（框选区域后清除笔迹）",
-            self.btn_clear_all: "一键清屏（并恢复画笔）",
+            self.btn_eraser: "橡皮擦",
+            self.btn_region_delete: "框选删除",
+            self.btn_clear_all: "一键清屏",
             self.btn_whiteboard: "白板（单击开关 / 长按换色）",
             self.btn_settings: "画笔设置",
         }
@@ -4365,12 +4314,6 @@ class FloatingToolbar(_EnsureOnScreenMixin, QWidget):
                 self.overlay.pen_size,
                 opacity_percent=self.overlay._get_active_opacity_percent(),
             )
-        if self._whiteboard_locked:
-            for button in (self.btn_cursor,):
-                button.setEnabled(False)
-                prev = button.blockSignals(True)
-                button.setChecked(False)
-                button.blockSignals(prev)
 
     def update_undo_state(self, enabled: bool) -> None:
         self.btn_undo.setEnabled(enabled)
@@ -4468,7 +4411,7 @@ class FloatingToolbar(_EnsureOnScreenMixin, QWidget):
         except IndexError:
             return
         button.setIcon(IconManager.get_brush_icon(normalized))
-        button.setToolTip(f"常用色{index + 1}（{normalized.upper()}）")
+        button.setToolTip("长按更换颜色")
         button.update()
 
     def _select_shape(self) -> None:
@@ -4556,12 +4499,6 @@ class FloatingToolbar(_EnsureOnScreenMixin, QWidget):
 
     def set_whiteboard_locked(self, locked: bool) -> None:
         self._whiteboard_locked = locked
-        for button in (self.btn_cursor,):
-            button.setEnabled(not locked)
-            if locked:
-                prev = button.blockSignals(True)
-                button.setChecked(False)
-                button.blockSignals(prev)
 
     def update_whiteboard_button_state(self, active: bool) -> None:
         self.btn_whiteboard.setObjectName("whiteboardButtonActive" if active else "")
@@ -7072,6 +7009,9 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                 getattr(paint_config, "quick_color_3", "#1e90ff"),
             ]
         )
+        stored_board_color = getattr(paint_config, "board_color", "#ffffff")
+        board_color = QColor(stored_board_color)
+        self.last_board_color = board_color if board_color.isValid() else QColor("#ffffff")
         self.eraser_size = float(clamp(getattr(paint_config, "eraser_size", 24.0), 1.0, 50.0))
         self._style_opacity_overrides: Dict[PenStyle, int] = {}
         for style in PEN_STYLE_ORDER:
@@ -7199,7 +7139,9 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         self._last_preview_bounds: Optional[QRect] = None
         self.whiteboard_active = False
         self._mode_before_whiteboard: Optional[str] = None
-        self.whiteboard_color = QColor(0, 0, 0, 0); self.last_board_color = QColor("#ffffff")
+        self.whiteboard_color = QColor(0, 0, 0, 0)
+        if not isinstance(self.last_board_color, QColor) or not self.last_board_color.isValid():
+            self.last_board_color = QColor("#ffffff")
         self.cursor_pixmap = QPixmap()
         self._eraser_stroker = QPainterPathStroker()
         self._eraser_stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
@@ -7215,6 +7157,7 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         self._region_select_start: Optional[QPoint] = None
         self._region_preview_bounds: Optional[QRect] = None
         self._region_previewing = False
+        self._toolbar_hovering = False
 
         self._build_scene()
         self.history: List[QPixmap] = []
@@ -7384,12 +7327,11 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             if self._mode_before_whiteboard is None:
                 self._mode_before_whiteboard = getattr(self, "mode", "brush")
             self._cancel_region_selection()
-            if getattr(self, "mode", "brush") == "cursor":
-                self.set_mode("brush")
             self._navigation_reasons.clear()
             self._active_navigation_keys.clear()
             self.navigation_active = False
             self.update_cursor()
+            self._raise_roll_call_window()
             return
         restore_mode = self._mode_before_whiteboard
         self._mode_before_whiteboard = None
@@ -7397,19 +7339,51 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             self.set_mode(restore_mode)
         self.update_cursor()
 
+    def _raise_roll_call_window(self, *, activate: bool = True) -> None:
+        """Keep the roll-call/timer window visible when the whiteboard is active."""
+
+        try:
+            window_cls = globals().get("RollCallTimerWindow")
+        except Exception:
+            window_cls = None
+        if window_cls is None:
+            return
+        try:
+            for widget in QApplication.topLevelWidgets():
+                if isinstance(widget, window_cls) and widget.isVisible():
+                    try:
+                        if widget.windowState() & Qt.WindowState.WindowMinimized:
+                            widget.showNormal()
+                    except Exception:
+                        pass
+                    try:
+                        widget.raise_()
+                        if activate:
+                            widget.activateWindow()
+                    except Exception:
+                        try:
+                            widget.show()
+                            widget.raise_()
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
     def show_overlay(self) -> None:
         self.show()
         self.raise_()
         self.activateWindow()
         self.toolbar.show()
         self.raise_toolbar()
-        if self.toolbar.underMouse():
+        self._toolbar_hovering = bool(self.toolbar.underMouse())
+        if self._toolbar_hovering:
             self.handle_toolbar_enter()
         self.set_mode(self.mode, self.current_shape)
 
     def hide_overlay(self) -> None:
         self._release_keyboard_capture()
         self.hide(); self.toolbar.hide()
+        self._toolbar_hovering = False
         self.save_settings(); self.save_window_position()
 
     def open_pen_settings(self) -> None:
@@ -7471,8 +7445,11 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                 self._update_visibility_for_mode(initial=False)
                 self.raise_toolbar()
                 self.update()
+                self._raise_roll_call_window()
+                self.save_settings()
 
     def toggle_whiteboard(self) -> None:
+        was_active = self.whiteboard_active
         self.whiteboard_active = not self.whiteboard_active
         self.whiteboard_color = self.last_board_color if self.whiteboard_active else QColor(0, 0, 0, 0)
         self._apply_whiteboard_lock()
@@ -7482,10 +7459,10 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         self.raise_toolbar()
         self.toolbar.update_whiteboard_button_state(self.whiteboard_active)
         self.update()
+        if self.whiteboard_active and not was_active:
+            self._raise_roll_call_window()
 
     def set_mode(self, mode: str, shape_type: Optional[str] = None, *, initial: bool = False) -> None:
-        if self.whiteboard_active and mode == "cursor":
-            return
         prev_mode = getattr(self, "mode", None)
         if prev_mode != mode:
             self._release_canvas_painters()
@@ -8820,6 +8797,11 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
             self.activateWindow()
         except Exception:
             pass
+        if self.whiteboard_active:
+            try:
+                self._raise_roll_call_window(activate=False)
+            except Exception:
+                pass
         self.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
 
     def _release_keyboard_capture(self) -> None:
@@ -9138,6 +9120,8 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
                 self._release_keyboard_capture()
         else:
             self._ensure_keyboard_capture()
+        if self.whiteboard_active:
+            self._raise_roll_call_window(activate=False)
         if initial:
             return
 
@@ -9355,6 +9339,8 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         self.paint_config.quick_color_1 = quicks[0]
         self.paint_config.quick_color_2 = quicks[1]
         self.paint_config.quick_color_3 = quicks[2]
+        if isinstance(self.last_board_color, QColor) and self.last_board_color.isValid():
+            self.paint_config.board_color = self.last_board_color.name()
         self.paint_config.eraser_size = float(clamp(self.eraser_size, 1.0, 50.0))
         self.paint_config.control_ms_ppt = bool(self.control_ms_ppt)
         self.paint_config.control_ms_word = bool(self.control_ms_word)
@@ -9521,6 +9507,14 @@ class OverlayWindow(QWidget, _PresentationWindowMixin):
         super().mousePressEvent(e)
 
     def mouseMoveEvent(self, e) -> None:
+        global_pos = e.globalPosition().toPoint()
+        hovering_toolbar = self._toolbar_contains_global(global_pos)
+        if hovering_toolbar and not self._toolbar_hovering:
+            self._toolbar_hovering = True
+            self.handle_toolbar_enter()
+        elif (not hovering_toolbar) and self._toolbar_hovering:
+            self._toolbar_hovering = False
+            self.handle_toolbar_leave()
         if (
             self._nav_pointer_button == Qt.MouseButton.LeftButton
             and not self._nav_pointer_started_draw
@@ -10793,6 +10787,22 @@ class StudentPhotoOverlay(QWidget):
         )
         self._photo_label.installEventFilter(self)
 
+        self._name_label = QLabel(self)
+        self._name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._name_label.setWordWrap(True)
+        self._name_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._name_label.setStyleSheet(
+            "color: #f8f9fa; background: transparent; border: none; "
+            "padding: 14px 24px; font-weight: 700; font-size: 56px;"
+        )
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(18)
+        shadow.setColor(QColor(0, 0, 0, 180))
+        shadow.setOffset(0, 2)
+        self._name_label.setGraphicsEffect(shadow)
+        self._name_label.hide()
+        self._current_student_name: str = ""
+
         self._left_close = self._make_close_button()
         self._right_close = self._make_close_button()
         self._left_close.clicked.connect(lambda: self._handle_close_request(manual=True))
@@ -10847,11 +10857,18 @@ class StudentPhotoOverlay(QWidget):
         if self._auto_close_duration_ms > 0 and self.isVisible():
             self._auto_close_timer.start(self._auto_close_duration_ms)
 
-    def display_photo(self, pixmap: QPixmap, screen_rect: QRect, duration_ms: int) -> None:
+    def display_photo(
+        self,
+        pixmap: QPixmap,
+        screen_rect: QRect,
+        duration_ms: int,
+        student_name: Optional[str] = None,
+    ) -> None:
         if pixmap.isNull():
             self.hide()
             return
 
+        self._current_student_name = (student_name or "").strip()
         self._auto_close_duration_ms = max(0, int(duration_ms))
         self._auto_close_timer.stop()
         available_size = screen_rect.size()
@@ -10872,6 +10889,7 @@ class StudentPhotoOverlay(QWidget):
         self.resize(target_size)
         self._photo_label.resize(target_size)
         self._photo_label.move(0, 0)
+        self._update_name_label(target_size)
         x = screen_rect.x() + max(0, (screen_rect.width() - target_size.width()) // 2)
         y = screen_rect.y() + max(0, (screen_rect.height() - target_size.height()) // 2)
         self.move(int(x), int(y))
@@ -10952,9 +10970,27 @@ class StudentPhotoOverlay(QWidget):
         self._left_close.raise_()
         self._right_close.raise_()
 
+    def _update_name_label(self, target_size: QSize) -> None:
+        name = self._current_student_name.strip()
+        if not name or target_size.isEmpty():
+            self._name_label.hide()
+            return
+        self._name_label.setText(name)
+        max_width = max(80, min(target_size.width() - 12, int(target_size.width() * 0.9)))
+        self._name_label.setFixedWidth(max_width)
+        self._name_label.adjustSize()
+        label_width = min(self._name_label.sizeHint().width(), max_width)
+        self._name_label.setFixedWidth(label_width)
+        x = max(6, (target_size.width() - label_width) // 2)
+        y = max(2, int(target_size.height() * 0.01))
+        self._name_label.move(int(x), int(y))
+        self._name_label.show()
+        self._name_label.raise_()
+
     def resizeEvent(self, event) -> None:
         self._photo_label.resize(self.size())
         self._photo_label.move(0, 0)
+        self._update_name_label(self.size())
         self._update_close_button_positions()
         super().resizeEvent(event)
 
@@ -11677,11 +11713,11 @@ class RollCallTimerWindow(QWidget):
         # 点名逻辑与后台触发控制
         self.roll_logic = RollCallLogic(self)
         self.remote_presenter_enabled = bool(config.remote_roll_enabled)
+        self._remote_presenter_paused = False
         self.remote_presenter_key = (config.remote_roll_key or "tab").strip().lower() or "tab"
         self.remote_presenter_controller = RemotePresenterController(self)
         self.remote_presenter_controller.set_key(self.remote_presenter_key)
-        if self.remote_presenter_enabled and not self.remote_presenter_controller.set_enabled(True):
-            self.remote_presenter_enabled = False
+        self._apply_remote_presenter_runtime_state()
 
         # QFontDatabase 在 Qt 6 中以静态方法为主，这里直接调用类方法避免实例化失败
         families_list = []
@@ -11801,7 +11837,9 @@ class RollCallTimerWindow(QWidget):
 
         self.menu_button = QToolButton(); self.menu_button.setText("设置"); self.menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.menu_button.setFont(compact_font)
-        self.menu_button.setToolButtonStyle(Qt.ToolButtonStyle.TextOnly)
+        # PyQt6 exposes specific ToolButtonStyle members (e.g., ToolButtonTextOnly)
+        # instead of the legacy Qt5-style TextOnly attribute.
+        self.menu_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         menu_width = max(toolbar_height, self.menu_button.fontMetrics().horizontalAdvance(self.menu_button.text()) + 16)
         self.menu_button.setFixedSize(menu_width, toolbar_height)
         self.menu_button.setStyleSheet(StyleConfig.MENU_BUTTON_STYLE)
@@ -12483,6 +12521,26 @@ class RollCallTimerWindow(QWidget):
         self._sync_photo_duration_actions()
 
         menu.addSeparator()
+        remote_menu = menu.addMenu("翻页笔遥控点名")
+        self.remote_presenter_action = remote_menu.addAction("启用"); self.remote_presenter_action.setCheckable(True)
+        self.remote_presenter_action.setChecked(self.remote_presenter_enabled)
+        self.remote_presenter_action.toggled.connect(self._toggle_remote_presenter_call)
+        self.remote_key_menu = remote_menu.addMenu("翻页笔按键")
+        self.remote_key_actions: List[QAction] = []
+        remote_key_choices: List[Tuple[str, str]] = [
+            ("tab", "Tab键（切换超链接）"),
+            ("b", "B键（长按黑屏）"),
+        ]
+        for key, label in remote_key_choices:
+            act = self.remote_key_menu.addAction(label)
+            act.setCheckable(True)
+            act.setData(key)
+            act.setChecked(key == self.remote_presenter_key)
+            act.triggered.connect(lambda _checked=False, k=key: self._set_remote_presenter_key(k))
+            self.remote_key_actions.append(act)
+        self._sync_remote_presenter_actions()
+
+        menu.addSeparator()
         speech = menu.addMenu("语音播报")
         manager = self.tts_manager
         checked = bool(self.speech_enabled and manager and manager.available)
@@ -12532,7 +12590,7 @@ class RollCallTimerWindow(QWidget):
             act.setCheckable(True)
             act.setData(key)
             act.setChecked(key == self.timer_sound_variant)
-            act.triggered.connect(lambda _checked=False, k=key: self._set_timer_sound_variant(k))
+            act.triggered.connect(lambda _checked=False, k=key: self._set_timer_sound_variant(k, preview=True))
             self.timer_sound_actions.append(act)
 
         reminder_menu = timer_menu.addMenu("中途提示音")
@@ -12552,7 +12610,7 @@ class RollCallTimerWindow(QWidget):
             act.setCheckable(True)
             act.setData(key)
             act.setChecked(key == self.timer_reminder_sound_variant)
-            act.triggered.connect(lambda _checked=False, k=key: self._set_reminder_sound_variant(k))
+            act.triggered.connect(lambda _checked=False, k=key: self._set_reminder_sound_variant(k, preview=True))
             self.reminder_sound_actions.append(act)
 
         self.reminder_interval_menu = reminder_menu.addMenu("提醒间隔")
@@ -12575,25 +12633,6 @@ class RollCallTimerWindow(QWidget):
         self._sync_timer_sound_actions()
         self._sync_reminder_menu_state()
 
-        menu.addSeparator()
-        remote_menu = menu.addMenu("翻页笔遥控点名")
-        self.remote_presenter_action = remote_menu.addAction("启用"); self.remote_presenter_action.setCheckable(True)
-        self.remote_presenter_action.setChecked(self.remote_presenter_enabled)
-        self.remote_presenter_action.toggled.connect(self._toggle_remote_presenter_call)
-        self.remote_key_menu = remote_menu.addMenu("翻页笔按键")
-        self.remote_key_actions: List[QAction] = []
-        remote_key_choices: List[Tuple[str, str]] = [
-            ("tab", "Tab键（切换超链接）"),
-            ("b", "B键（长按黑屏）"),
-        ]
-        for key, label in remote_key_choices:
-            act = self.remote_key_menu.addAction(label)
-            act.setCheckable(True)
-            act.setData(key)
-            act.setChecked(key == self.remote_presenter_key)
-            act.triggered.connect(lambda _checked=False, k=key: self._set_remote_presenter_key(k))
-            self.remote_key_actions.append(act)
-        self._sync_remote_presenter_actions()
         return menu
 
     def _update_menu_state(self) -> None:
@@ -12669,7 +12708,7 @@ class RollCallTimerWindow(QWidget):
             block = self.timer_reminder_action.blockSignals(True)
             self.timer_reminder_action.setChecked(self.timer_reminder_enabled)
             self.timer_reminder_action.blockSignals(block)
-            self.timer_reminder_action.setEnabled(SOUNDDEVICE_AVAILABLE)
+            self.timer_reminder_action.setEnabled(True)
         for act in getattr(self, "reminder_interval_actions", []):
             try:
                 minutes = int(act.data())
@@ -12678,25 +12717,68 @@ class RollCallTimerWindow(QWidget):
             block = act.blockSignals(True)
             act.setChecked(minutes == self.timer_reminder_interval_minutes)
             act.blockSignals(block)
+            act.setEnabled(True)
         for act in getattr(self, "reminder_sound_actions", []):
             data = act.data()
             key = str(data) if data is not None else ""
             block = act.blockSignals(True)
             act.setChecked(key == self.timer_reminder_sound_variant)
             act.blockSignals(block)
+            act.setEnabled(True)
         if hasattr(self, "reminder_interval_menu"):
-            self.reminder_interval_menu.setEnabled(SOUNDDEVICE_AVAILABLE)
+            self.reminder_interval_menu.setEnabled(True)
         if hasattr(self, "reminder_sound_menu"):
-            self.reminder_sound_menu.setEnabled(SOUNDDEVICE_AVAILABLE and enabled)
+            self.reminder_sound_menu.setEnabled(True)
+            tooltip = "" if SOUNDDEVICE_AVAILABLE else "当前环境未检测到音频播放库，选择会保存，安装音频依赖后生效。"
+            self.reminder_sound_menu.setToolTip(tooltip)
+
+    def _apply_remote_presenter_runtime_state(self, *, show_feedback: bool = False) -> None:
+        controller = getattr(self, "remote_presenter_controller", None)
+        available = bool(controller and controller.is_available())
+        self._remote_presenter_paused = False
+        if not available:
+            if controller is not None:
+                controller.stop()
+            if self.remote_presenter_enabled:
+                self.remote_presenter_enabled = False
+                if show_feedback:
+                    show_quiet_information(self, "当前系统无法拦截翻页笔按键，已自动关闭遥控点名。")
+            self._sync_remote_presenter_actions()
+            return
+        if not self.remote_presenter_enabled:
+            controller.stop()
+            self._sync_remote_presenter_actions()
+            return
+        if self.mode != "roll_call":
+            controller.stop()
+            self._remote_presenter_paused = True
+            self._sync_remote_presenter_actions()
+            if show_feedback:
+                show_quiet_information(self, "计时/秒表模式下已暂时停用遥控点名，切回点名窗口后自动恢复。")
+            return
+        if not controller.set_enabled(True):
+            self.remote_presenter_enabled = False
+            self._remote_presenter_paused = False
+            self._sync_remote_presenter_actions()
+            if show_feedback:
+                show_quiet_information(self, "启用遥控点名失败，可能缺少系统权限。")
+            return
+        self._sync_remote_presenter_actions()
 
     def _sync_remote_presenter_actions(self) -> None:
         controller = getattr(self, "remote_presenter_controller", None)
         available = bool(controller and controller.is_available())
+        paused = bool(getattr(self, "_remote_presenter_paused", False))
+        status_checked = self.remote_presenter_enabled and available
         if hasattr(self, "remote_presenter_action"):
             block = self.remote_presenter_action.blockSignals(True)
-            self.remote_presenter_action.setChecked(self.remote_presenter_enabled and available)
+            self.remote_presenter_action.setChecked(status_checked)
             self.remote_presenter_action.setEnabled(available)
-            tooltip = "" if available else "需要在 Windows 中授予全局键盘监听权限。"
+            tooltip = ""
+            if not available:
+                tooltip = "需要在 Windows 中授予全局键盘监听权限。"
+            elif paused:
+                tooltip = "计时/秒表模式下暂时停用，返回点名窗口后自动恢复。"
             self.remote_presenter_action.setToolTip(tooltip)
             self.remote_presenter_action.blockSignals(block)
         for act in getattr(self, "remote_key_actions", []):
@@ -12710,23 +12792,22 @@ class RollCallTimerWindow(QWidget):
             block = act.blockSignals(True)
             act.setChecked(key == self.remote_presenter_key)
             act.setEnabled(available)
-            act.setToolTip("" if available else "当前系统不支持全局监听。")
+            if paused:
+                act.setToolTip("计时/秒表模式下遥控点名已暂停。")
+            else:
+                act.setToolTip("" if available else "当前系统不支持全局监听。")
             act.blockSignals(block)
         if hasattr(self, "remote_key_menu"):
             self.remote_key_menu.setEnabled(available)
+            if paused:
+                self.remote_key_menu.setToolTip("计时/秒表模式下遥控点名已暂停。")
+            else:
+                self.remote_key_menu.setToolTip("" if available else "当前系统不支持全局监听。")
 
     def _toggle_remote_presenter_call(self, enabled: bool) -> None:
         controller = getattr(self, "remote_presenter_controller", None)
-        if controller is None or not controller.is_available():
-            self.remote_presenter_enabled = False
-            self._sync_remote_presenter_actions()
-            show_quiet_information(self, "当前系统无法拦截翻页笔按键，已自动关闭遥控点名。")
-            return
         self.remote_presenter_enabled = bool(enabled)
-        if not controller.set_enabled(self.remote_presenter_enabled):
-            self.remote_presenter_enabled = False
-            show_quiet_information(self, "启用遥控点名失败，可能缺少系统权限。")
-        self._sync_remote_presenter_actions()
+        self._apply_remote_presenter_runtime_state(show_feedback=True)
         self._schedule_save()
 
     def _set_remote_presenter_key(self, key: str) -> None:
@@ -12744,7 +12825,7 @@ class RollCallTimerWindow(QWidget):
         self._schedule_save()
 
     def trigger_remote_presenter_call(self) -> None:
-        if not self.remote_presenter_enabled:
+        if not self.remote_presenter_enabled or getattr(self, "_remote_presenter_paused", False):
             return
         if not self._ensure_student_data_ready():
             return
@@ -13015,13 +13096,15 @@ class RollCallTimerWindow(QWidget):
         self._sync_reminder_menu_state()
         self._schedule_save()
 
-    def _set_timer_sound_variant(self, variant: str) -> None:
+    def _set_timer_sound_variant(self, variant: str, *, preview: bool = False) -> None:
         variant = (variant or "gentle").strip().lower()
         if variant == self.timer_sound_variant:
             self._sync_timer_sound_actions()
             return
         self.timer_sound_variant = variant
         self._sync_timer_sound_actions()
+        if preview:
+            self.play_timer_sound(kind="end", preview=True, variant_override=variant)
         self._schedule_save()
 
     def _toggle_timer_reminder(self, enabled: bool) -> None:
@@ -13047,13 +13130,15 @@ class RollCallTimerWindow(QWidget):
         self._sync_reminder_menu_state()
         self._schedule_save()
 
-    def _set_reminder_sound_variant(self, variant: str) -> None:
+    def _set_reminder_sound_variant(self, variant: str, *, preview: bool = False) -> None:
         variant = (variant or "soft_beep").strip().lower()
         if variant == self.timer_reminder_sound_variant:
             self._sync_reminder_menu_state()
             return
         self.timer_reminder_sound_variant = variant
         self._sync_reminder_menu_state()
+        if preview:
+            self.play_timer_sound(kind="reminder", preview=True, variant_override=variant)
         self._schedule_save()
 
     def _speak_text(self, text: str) -> None:
@@ -13149,7 +13234,7 @@ class RollCallTimerWindow(QWidget):
         self.mode = "timer" if self.mode == "roll_call" else "roll_call"
         if self.mode == "roll_call":
             self._placeholder_on_show = True
-        self.update_mode_ui(force_timer_reset=self.mode == "timer")
+        self.update_mode_ui(force_timer_reset=False)
         self._schedule_save()
 
     def update_mode_ui(self, force_timer_reset: bool = False) -> None:
@@ -13172,7 +13257,13 @@ class RollCallTimerWindow(QWidget):
             if self._placeholder_on_show:
                 self.current_student_index = None
             self.stack.setCurrentWidget(self.roll_call_frame)
-            self.count_timer.stop(); self.clock_timer.stop(); self.timer_running = False; self.timer_start_pause_button.setText("开始")
+            # 保持计时/秒表在后台运行，不强制重置/暂停
+            if self.timer_modes[self.timer_mode_index] in {"countdown", "stopwatch"}:
+                if self.timer_running and not self.count_timer.isActive():
+                    self.count_timer.start()
+            elif self.timer_modes[self.timer_mode_index] == "clock":
+                if not self.clock_timer.isActive():
+                    self.clock_timer.start()
             self.update_display_layout(); self.display_current_student()
             self.schedule_font_update()
             self._placeholder_on_show = False
@@ -13188,6 +13279,7 @@ class RollCallTimerWindow(QWidget):
             self._hide_student_photo(force=True)
         if hasattr(self, "reset_button"):
             self.reset_button.setVisible(is_roll)
+        self._apply_remote_presenter_runtime_state()
         self.updateGeometry()
         self._sync_reminder_menu_state()
 
@@ -13242,7 +13334,11 @@ class RollCallTimerWindow(QWidget):
 
     def start_pause_timer(self) -> None:
         if self.timer_modes[self.timer_mode_index] == "clock": return
-        self.timer_running = not self.timer_running
+        starting = not self.timer_running
+        if starting and self.timer_modes[self.timer_mode_index] == "countdown":
+            if self.timer_seconds_left <= 0:
+                self.reset_timer(persist=False)
+        self.timer_running = starting
         if self.timer_running:
             self.timer_start_pause_button.setText("暂停")
             if not self.count_timer.isActive(): self.count_timer.start()
@@ -13348,6 +13444,14 @@ class RollCallTimerWindow(QWidget):
             return None, 0
         fs = 44100
         v = (variant or "").strip().lower()
+        if kind == "reminder":
+            allowed = {"soft_beep", "ping", "chime", "pulse", "short_bell"}
+            if v not in allowed:
+                v = "soft_beep"
+        else:
+            allowed = {"gentle", "bell", "digital", "buzz", "urgent"}
+            if v not in allowed:
+                v = "gentle"
         segments: List[np.ndarray] = []
         silence = lambda d: np.zeros(int(fs * d))
 
@@ -13359,14 +13463,24 @@ class RollCallTimerWindow(QWidget):
 
         if kind == "reminder":
             if v == "short_bell":
-                add_tone(960, 0.16, 0.4); segments.append(silence(0.04)); add_tone(720, 0.14, 0.32)
+                add_tone(980, 0.14, 0.42); segments.append(silence(0.05)); add_tone(760, 0.12, 0.36)
             elif v == "ping":
-                add_tone(1100, 0.08, 0.32); segments.append(silence(0.03)); add_tone(800, 0.1, 0.28)
+                add_tone(1150, 0.08, 0.36); segments.append(silence(0.03)); add_tone(820, 0.1, 0.3)
+            elif v == "chime":
+                add_tone(640, 0.12, 0.34); segments.append(silence(0.04)); add_tone(960, 0.16, 0.3)
+            elif v == "pulse":
+                for _ in range(3):
+                    add_tone(700, 0.07, 0.32); segments.append(silence(0.06))
             else:  # soft_beep
-                add_tone(540, 0.14, 0.26)
+                add_tone(560, 0.22, 0.4); segments.append(silence(0.04)); add_tone(620, 0.12, 0.34)
         else:
             if v == "bell":
-                add_tone(880, 0.12, 0.38); segments.append(silence(0.05)); add_tone(660, 0.18, 0.34)
+                add_tone(880, 0.12, 0.4); segments.append(silence(0.05)); add_tone(660, 0.18, 0.36)
+            elif v == "digital":
+                for freq in (900, 1200, 1500):
+                    add_tone(freq, 0.05, 0.32); segments.append(silence(0.04))
+            elif v == "buzz":
+                add_tone(220, 0.22, 0.42); add_tone(180, 0.14, 0.36)
             elif v == "urgent":
                 for _ in range(3):
                     add_tone(1150, 0.09, 0.4); segments.append(silence(0.05))
@@ -13395,14 +13509,21 @@ class RollCallTimerWindow(QWidget):
 
         threading.Thread(target=_play, daemon=True).start()
 
-    def play_timer_sound(self, *, kind: str = "end") -> None:
+    def play_timer_sound(
+        self,
+        *,
+        kind: str = "end",
+        preview: bool = False,
+        variant_override: Optional[str] = None,
+    ) -> None:
         if not SOUNDDEVICE_AVAILABLE or np is None:
             return
-        if kind == "end" and not self.timer_sound_enabled:
-            return
-        if kind == "reminder" and not self.timer_reminder_enabled:
-            return
-        variant = self.timer_sound_variant if kind == "end" else self.timer_reminder_sound_variant
+        if not preview:
+            if kind == "end" and not self.timer_sound_enabled:
+                return
+            if kind == "reminder" and not self.timer_reminder_enabled:
+                return
+        variant = variant_override or (self.timer_sound_variant if kind == "end" else self.timer_reminder_sound_variant)
         data, fs = self._build_sound_wave(variant, kind)
         if data is None or fs <= 0:
             return
@@ -13558,6 +13679,7 @@ class RollCallTimerWindow(QWidget):
 
     def display_current_student(self) -> None:
         photo_student_id: Optional[str] = None
+        photo_student_name: Optional[str] = None
         if self.current_student_index is None:
             self.id_label.setText("学号" if self.show_id else "")
             self.name_label.setText("学生" if self.show_name else "")
@@ -13571,10 +13693,11 @@ class RollCallTimerWindow(QWidget):
             if not self.show_id: self.id_label.setText("")
             if not self.show_name: self.name_label.setText("")
             photo_student_id = sid or None
+            photo_student_name = name or None
         self.update_display_layout()
         self._update_roll_call_controls()
         self.schedule_font_update()
-        self._maybe_show_student_photo(photo_student_id)
+        self._maybe_show_student_photo(photo_student_id, photo_student_name)
 
     def update_display_layout(self) -> None:
         self.id_label.setVisible(self.show_id); self.name_label.setVisible(self.show_name)
@@ -13590,7 +13713,7 @@ class RollCallTimerWindow(QWidget):
         except Exception:
             logger.debug("Failed to create photo root directory at %s", self.photo_root_path, exc_info=True)
 
-    def _maybe_show_student_photo(self, student_id: Optional[str]) -> None:
+    def _maybe_show_student_photo(self, student_id: Optional[str], student_name: Optional[str] = None) -> None:
         if not self.show_photo or self.mode != "roll_call":
             self._hide_student_photo(force=True)
             return
@@ -13624,7 +13747,12 @@ class RollCallTimerWindow(QWidget):
             self._last_photo_student_id = normalized_id
             return
         screen_rect = screen.geometry()
-        overlay.display_photo(pixmap, screen_rect, int(max(0, self.photo_duration_seconds) * 1000))
+        overlay.display_photo(
+            pixmap,
+            screen_rect,
+            int(max(0, self.photo_duration_seconds) * 1000),
+            student_name=student_name,
+        )
         self._last_photo_student_id = normalized_id
         self._photo_manual_hidden = False
 
@@ -13634,6 +13762,8 @@ class RollCallTimerWindow(QWidget):
             overlay.cancel_auto_close()
             if overlay.isVisible():
                 overlay.hide()
+            overlay._current_student_name = ""
+            overlay._name_label.hide()
         if force:
             self._photo_manual_hidden = False
             self._last_photo_student_id = None
@@ -13812,9 +13942,8 @@ class RollCallTimerWindow(QWidget):
         elif self.mode == "timer":
             active_mode = self.timer_modes[self.timer_mode_index]
             if active_mode in {"countdown", "stopwatch"}:
-                if self.reset_timer(persist=False):
-                    self._schedule_save()
                 self.update_timer_mode_ui()
+                self.update_timer_display()
         self.visibility_changed.emit(True)
         self.schedule_font_update()
         ensure_widget_within_screen(self)
@@ -13833,15 +13962,9 @@ class RollCallTimerWindow(QWidget):
         self.visibility_changed.emit(False)
 
     def closeEvent(self, e) -> None:
-        self._hide_student_photo(force=True)
-        self.save_settings()
-        self.count_timer.stop()
-        self.clock_timer.stop()
-        if hasattr(self, "remote_presenter_controller"):
-            self.remote_presenter_controller.stop()
-        if self.tts_manager: self.tts_manager.shutdown()
-        self.window_closed.emit()
-        super().closeEvent(e)
+        # 改为隐藏窗口而非销毁，保持计时/点名状态继续运行
+        e.ignore()
+        self.hide()
 
     def _schedule_save(self) -> None:
         """延迟写入设置，避免频繁保存导致的磁盘抖动。"""
@@ -14338,6 +14461,7 @@ class LauncherWindow(QWidget):
         self.overlay: Optional[OverlayWindow] = None
         self.roll_call_window: Optional[RollCallTimerWindow] = None
         self._dragging = False
+        self._drag_origin: Optional[QPoint] = None
         self._drag_offset = QPoint()
         self.bubble: Optional[LauncherBubble] = None
         self._last_position = QPoint()
@@ -14559,14 +14683,24 @@ class LauncherWindow(QWidget):
             QTimer.singleShot(0, self._restore_minimized_state)
 
     def eventFilter(self, obj, e) -> bool:
-        if e.type() == QEvent.Type.MouseButtonPress and e.button() == Qt.MouseButton.LeftButton:
-            self._dragging = True; self._drag_offset = e.globalPosition().toPoint() - self.pos()
-        elif e.type() == QEvent.Type.MouseMove and self._dragging and e.buttons() & Qt.MouseButton.LeftButton:
-            self.move(e.globalPosition().toPoint() - self._drag_offset)
-        elif e.type() == QEvent.Type.MouseButtonRelease and e.button() == Qt.MouseButton.LeftButton:
-            self._dragging = False
-            self._last_position = self.pos()
-            self.save_position()
+        drag_blockers = {self.paint_button, self.roll_call_button, self.minimize_button}
+        if obj not in drag_blockers:
+            if e.type() == QEvent.Type.MouseButtonPress and e.button() == Qt.MouseButton.LeftButton:
+                self._drag_origin = e.globalPosition().toPoint()
+                self._drag_offset = self._drag_origin - self.pos()
+                self._dragging = False
+            elif e.type() == QEvent.Type.MouseMove and self._drag_origin and e.buttons() & Qt.MouseButton.LeftButton:
+                delta = e.globalPosition().toPoint() - self._drag_origin
+                if (not self._dragging) and (abs(delta.x()) >= 3 or abs(delta.y()) >= 3):
+                    self._dragging = True
+                if self._dragging:
+                    self.move(e.globalPosition().toPoint() - self._drag_offset)
+            elif e.type() == QEvent.Type.MouseButtonRelease and e.button() == Qt.MouseButton.LeftButton:
+                if self._dragging:
+                    self._last_position = self.pos()
+                    self.save_position()
+                self._dragging = False
+                self._drag_origin = None
         return super().eventFilter(obj, e)
 
     def save_position(self) -> None:
@@ -14820,10 +14954,5 @@ def main() -> None:
     app.aboutToQuit.connect(window.handle_about_to_quit)
     window.show()
     sys.exit(app.exec())
-
-
-# Nuitka 打包指令（根据当前依赖整理的推荐参数，保持在单行便于复制）：
-# 单文件：python -m nuitka --onefile --enable-plugin=pyqt6 --include-qt-plugins=sensible --windows-disable-console --windows-icon-from-ico=icon.ico --include-data-file=students.xlsx=students.xlsx --include-data-file=settings.ini=settings.ini ClassroomTools.py
-# 独立目录：python -m nuitka --standalone --enable-plugin=pyqt6 --include-qt-plugins=sensible --windows-disable-console --windows-icon-from-ico=icon.ico --output-dir=dist --include-data-file=students.xlsx=students.xlsx --include-data-file=settings.ini=settings.ini ClassroomTools.py
 if __name__ == "__main__":
     main()
