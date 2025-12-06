@@ -230,6 +230,17 @@ def _coerce_bool_from_bytes(value: bytes) -> object:
     return _coerce_bool(decoded)
 
 
+@_coerce_bool.register(bytearray)
+@_coerce_bool.register(memoryview)
+def _coerce_bool_from_byteslike(value: Union[bytearray, memoryview]) -> object:
+    """Handle common bytes-like inputs when converting to booleans."""
+
+    try:
+        return _coerce_bool(bytes(value))
+    except Exception:
+        return _BooleanParseResult.UNRESOLVED
+
+
 @_coerce_bool.register(str)
 def _coerce_bool_from_str(value: str) -> object:
     normalized = value.strip()
@@ -291,12 +302,8 @@ def _casefold_cached(value: str) -> str:
 def _normalize_text_token(value: Any, *, empty_on_falsy: bool) -> str:
     """Normalize arbitrary *value* inputs into case-folded strings."""
 
-    if empty_on_falsy and not value:
-        return ""
     text = _coerce_to_text(value)
-    if empty_on_falsy and not text:
-        return ""
-    if not text:
+    if (empty_on_falsy and not value) or not text:
         return ""
     return _casefold_cached(text)
 
@@ -465,16 +472,33 @@ def _choose_writable_target(
     is_dir: bool,
     fallback_name: str,
 ) -> str:
-    for target in candidates:
+    checked_dirs: Set[str] = set()
+    for raw_target in candidates:
+        if not raw_target:
+            continue
+        target = os.path.normpath(raw_target)
         directory = target if is_dir else os.path.dirname(target)
+        normalized_dir = os.path.normcase(os.path.abspath(directory or os.getcwd()))
+        if normalized_dir in checked_dirs:
+            continue
+        checked_dirs.add(normalized_dir)
         if _ensure_writable_directory(directory or os.getcwd()):
             return target
+
+    sanitized_fallback = os.path.basename(fallback_name.strip()) if fallback_name else ""
+    if os.sep in sanitized_fallback:
+        sanitized_fallback = sanitized_fallback.replace(os.sep, "_")
+    if os.altsep and os.altsep in sanitized_fallback:
+        sanitized_fallback = sanitized_fallback.replace(os.altsep, "_")
+    if "\\" in sanitized_fallback and os.sep != "\\":
+        sanitized_fallback = sanitized_fallback.replace("\\", "_")
+    sanitized_fallback = sanitized_fallback or "ClassroomTools"
     app_dir = _preferred_app_directory()
     base_dir = app_dir if _ensure_writable_directory(app_dir) else os.getcwd()
-    fallback = os.path.join(base_dir, fallback_name)
+    fallback = os.path.join(base_dir, sanitized_fallback)
     directory = fallback if is_dir else os.path.dirname(fallback)
     if directory and not _ensure_writable_directory(directory):
-        fallback = os.path.abspath(fallback_name)
+        fallback = os.path.abspath(sanitized_fallback)
         directory = fallback if is_dir else os.path.dirname(fallback)
         _ensure_writable_directory(directory or os.getcwd())
     return fallback
